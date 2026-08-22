@@ -1,0 +1,80 @@
+name: Windows Desktop Releases
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build portable and installer EXEs
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build portable and installer packages
+        run: npm run desktop:all
+
+      - name: Upload portable EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: cardloom-translate-portable
+          path: release/CardLoom-Translate-Portable-*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload installer EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: cardloom-translate-installer
+          path: |
+            release/CardLoom-Translate-Setup-*.exe
+            release/CardLoom-Translate-Setup-*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-tag-release:
+    name: Publish tagged GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download portable artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cardloom-translate-portable
+          path: release-assets
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cardloom-translate-installer
+          path: release-assets
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" release-assets/* --title "${{ github.ref_name }}" --generate-notes

@@ -1038,9 +1038,37 @@ if (existsSync(webRoot)) {
   });
 }
 
-const host = workbenchConfig.host;
-const port = workbenchConfig.port;
-await app.listen({ host, port });
+let serverAddress: string | null = null;
+
+export async function startWorkbenchServer(options: { host?: string; port?: number } = {}): Promise<{
+  address: string;
+  host: string;
+  port: number;
+}> {
+  if (serverAddress) {
+    return {
+      address: serverAddress,
+      host: options.host || workbenchConfig.host,
+      port: options.port || workbenchConfig.port,
+    };
+  }
+  const host = options.host || workbenchConfig.host;
+  const port = options.port || workbenchConfig.port;
+  serverAddress = await app.listen({ host, port });
+  return { address: serverAddress, host, port };
+}
+
+export async function stopWorkbenchServer(): Promise<void> {
+  if (serverAddress) {
+    await app.close();
+    serverAddress = null;
+  }
+  await db.close();
+}
+
+if (process.env.WORKBENCH_EMBEDDED !== '1') {
+  await startWorkbenchServer();
+}
 
 async function protocolSourceByProject(projectId: string): Promise<{
   card: Record<string, unknown>;

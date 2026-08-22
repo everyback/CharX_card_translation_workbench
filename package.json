@@ -4,13 +4,19 @@
   "private": true,
   "license": "GPL-3.0-or-later",
   "type": "module",
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "concurrently -k -n api,web -c cyan,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "tsx watch server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
     "build": "npm run typecheck && vite build && tsc -p tsconfig.server.json",
+    "build:electron": "node scripts/clean-electron.mjs && tsc -p tsconfig.electron.json",
+    "desktop:prepare": "npm run build && npm run build:electron",
+    "desktop:portable": "npm run desktop:prepare && electron-builder --win portable",
+    "desktop:installer": "npm run desktop:prepare && electron-builder --win nsis",
+    "desktop:all": "npm run desktop:prepare && electron-builder --win",
     "start": "node dist-server/server/index.js",
-    "typecheck": "tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "typecheck": "tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "tsx --test tests/**/*.test.ts"
   },
   "dependencies": {
@@ -35,6 +41,8 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
     "concurrently": "^9.1.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0"
@@ -51,5 +59,47 @@
       "fast-uri": "4.1.2"
     },
     "nanoid": "3.3.18"
+  },
+  "build": {
+    "appId": "com.cardloom.translate",
+    "productName": "CardLoom Translate",
+    "asar": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "dist/**/*",
+      "dist-server/**/*",
+      "package.json",
+      "!**/*.map",
+      "!tests/**",
+      "!docs/**",
+      "!docker/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        },
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "CardLoom-Translate-Portable-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CardLoom Translate",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "CardLoom-Translate-Setup-${version}.${ext}"
+    }
   }
 }

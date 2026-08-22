@@ -200,6 +200,25 @@ npm run build
 npm start
 ```
 
+### Windows Desktop Builds
+
+Run these commands on Windows:
+
+```powershell
+# Portable EXE: release/CardLoom-Translate-Portable-<version>.exe
+npm run desktop:portable
+
+# Installer: release/CardLoom-Translate-Setup-<version>.exe
+npm run desktop:installer
+
+# Build both variants
+npm run desktop:all
+```
+
+The portable build stores SQLite data, uploads, and caches in `data/` next to the EXE. The installer build stores them in Electron's Windows user-data directory. Both variants bind the local service to `127.0.0.1` only.
+
+After a GitHub push, `.github/workflows/desktop-release.yml` builds both EXEs and uploads them to the Actions run. Pushing a `v`-prefixed tag (for example, `v0.1.0`) also creates a GitHub Release with the installer assets.
+
 ## Configuration
 
 Deployment settings live in `.env`. The API base URL, model, API key, languages, concurrency, batch sizes, and image settings can only be configured from **Model Settings** in the UI. `TRANSLATION_*` and `IMAGE_EDIT_*` environment variables are not supported, and no model settings are written from `.env` into SQLite. Settings saved from the UI are stored in local SQLite. API keys are read by the backend and must not be committed to Git.
