@@ -239,6 +239,8 @@ npm run desktop:installer
 npm run desktop:all
 ```
 
+不需要自行编译也可以直接使用桌面版：前往 [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) 下载 Windows 安装版或便携版。`CardLoom Translate Nightly` 会随 `master` 的最新提交自动更新；需要选择正式版本时，请查看 [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags) 中带 `v` 前缀的版本。
+
 便携版把 SQLite、上传文件和缓存放在 EXE 同目录的 `data/`；安装版把这些数据放在 Electron 的 Windows 用户数据目录。两种版本都只在本机 `127.0.0.1` 启动服务。
 
 推送到 GitHub 后，`.github/workflows/desktop-release.yml` 会自动编译这两种 EXE，并将构建产物上传到 Actions 运行记录。推送到 `master` 的普通提交会自动更新一个可下载的 `CardLoom Translate Nightly` 预发布版本；推送 `v` 开头的标签（例如 `v0.1.0`）时，会创建独立的正式 GitHub Release 并附加安装包。

@@ -215,6 +215,8 @@ npm run desktop:installer
 npm run desktop:all
 ```
 
+You can use the desktop build without compiling locally: visit [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) to download the Windows installer or portable EXE. `CardLoom Translate Nightly` is updated automatically from the latest `master` commit; for a formal version, choose a `v`-prefixed release from [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags).
+
 The portable build stores SQLite data, uploads, and caches in `data/` next to the EXE. The installer build stores them in Electron's Windows user-data directory. Both variants bind the local service to `127.0.0.1` only.
 
 After a GitHub push, `.github/workflows/desktop-release.yml` builds both EXEs and uploads them to the Actions run. A normal push to `master` automatically updates the downloadable `CardLoom Translate Nightly` prerelease. Pushing a `v`-prefixed tag (for example, `v0.1.0`) creates a separate formal GitHub Release with the installer assets.
