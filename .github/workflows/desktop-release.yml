@@ -87,6 +87,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release create "${{ github.ref_name }}" release-assets/* --title "${{ github.ref_name }}" --generate-notes
 
   publish-nightly-release:
@@ -113,6 +114,7 @@ jobs:
       - name: Update Nightly Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           if gh release view nightly >/dev/null 2>&1; then
             gh release upload nightly release-assets/* --clobber
