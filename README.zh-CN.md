@@ -243,6 +243,8 @@ npm run desktop:all
 
 推送到 GitHub 后，`.github/workflows/desktop-release.yml` 会自动编译并上传这两种 EXE 到 Actions 运行记录。推送 `v` 开头的标签（例如 `v0.1.0`）时，还会自动创建 GitHub Release 并附加安装包。
 
+当前 Actions 产物未配置 Windows 代码签名证书，首次运行可能显示“未知发布者”；这不影响程序启动。后续配置证书 Secret 后再开启签名即可。
+
 Linux 临时改端口：
 
 ```bash

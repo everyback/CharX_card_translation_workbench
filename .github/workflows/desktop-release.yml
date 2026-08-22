@@ -17,10 +17,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Use Node.js 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22.x
           cache: npm
@@ -31,19 +31,25 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Build portable and installer packages
-        run: npm run desktop:all
+      - name: Prepare desktop build
+        run: npm run desktop:prepare
+
+      - name: Build portable package
+        run: npx electron-builder --win portable --publish never
 
       - name: Upload portable EXE
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cardloom-translate-portable
           path: release/CardLoom-Translate-Portable-*.exe
           if-no-files-found: error
           retention-days: 14
 
+      - name: Build installer package
+        run: npx electron-builder --win nsis --publish never
+
       - name: Upload installer EXE
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cardloom-translate-installer
           path: |
@@ -63,13 +69,13 @@ jobs:
 
     steps:
       - name: Download portable artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: cardloom-translate-portable
           path: release-assets
 
       - name: Download installer artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: cardloom-translate-installer
           path: release-assets
