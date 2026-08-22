@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     name: Build portable and installer EXEs
@@ -84,3 +88,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${{ github.ref_name }}" release-assets/* --title "${{ github.ref_name }}" --generate-notes
+
+  publish-nightly-release:
+    name: Publish rolling Nightly Release
+    if: github.ref == 'refs/heads/master'
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download portable artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: cardloom-translate-portable
+          path: release-assets
+
+      - name: Download installer artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: cardloom-translate-installer
+          path: release-assets
+
+      - name: Update Nightly Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly release-assets/* --clobber
+            gh release edit nightly \
+              --title "CardLoom Translate Nightly" \
+              --notes "Automated build from commit ${GITHUB_SHA}." \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          else
+            gh release create nightly release-assets/* \
+              --title "CardLoom Translate Nightly" \
+              --notes "Automated build from commit ${GITHUB_SHA}." \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          fi
