@@ -224,6 +224,25 @@ npm run build
 npm start
 ```
 
+### Windows 桌面版
+
+需要在 Windows 上执行以下命令：
+
+```powershell
+# 生成便携版：release/CardLoom-Translate-Portable-<version>.exe
+npm run desktop:portable
+
+# 生成安装版：release/CardLoom-Translate-Setup-<version>.exe
+npm run desktop:installer
+
+# 一次生成两种版本
+npm run desktop:all
+```
+
+便携版把 SQLite、上传文件和缓存放在 EXE 同目录的 `data/`；安装版把这些数据放在 Electron 的 Windows 用户数据目录。两种版本都只在本机 `127.0.0.1` 启动服务。
+
+推送到 GitHub 后，`.github/workflows/desktop-release.yml` 会自动编译并上传这两种 EXE 到 Actions 运行记录。推送 `v` 开头的标签（例如 `v0.1.0`）时，还会自动创建 GitHub Release 并附加安装包。
+
 Linux 临时改端口：
 
 ```bash
