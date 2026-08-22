@@ -16,6 +16,7 @@
 - [支持格式](#支持格式)
 - [功能](#功能)
 - [界面说明](#界面说明)
+- [最快上手：直接下载](#最快上手直接下载)
 - [快速开始](#快速开始)
 - [第一次使用](#第一次使用)
 - [使用操作流程](#使用操作流程)
@@ -67,6 +68,15 @@
 - **审核**：对照原文、机器译文和人工定稿，按状态或类型筛选并批量审核。
 - **资源**：查看资源引用、JSON 可见文字和图片处理候选。
 - **协议**：查看协议、Lua 和正则引用，确认翻译不会改变交互结构。
+
+## 最快上手：直接下载
+
+如果只是想使用，不需要安装 Node.js、Docker 或自行编译：前往 [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) 下载 Windows 桌面版。
+
+- **安装版**：运行安装程序，按向导完成安装。
+- **便携版**：直接运行 EXE；程序数据保存在 EXE 同目录的 `data/` 中，适合放在任意文件夹或移动硬盘使用。
+
+`CardLoom Translate Nightly` 会随 `master` 的最新提交自动更新，适合获取最新构建；需要选择正式版本时，请查看 [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags) 中带 `v` 前缀的版本。下载后启动程序，在浏览器打开显示的本地地址，再到左下侧“模型设置”填写模型接口和 API Key。
 
 ## 快速开始
 
@@ -238,8 +248,6 @@ npm run desktop:installer
 # 一次生成两种版本
 npm run desktop:all
 ```
-
-不需要自行编译也可以直接使用桌面版：前往 [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) 下载 Windows 安装版或便携版。`CardLoom Translate Nightly` 会随 `master` 的最新提交自动更新；需要选择正式版本时，请查看 [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags) 中带 `v` 前缀的版本。
 
 便携版把 SQLite、上传文件和缓存放在 EXE 同目录的 `data/`；安装版把这些数据放在 Electron 的 Windows 用户数据目录。两种版本都只在本机 `127.0.0.1` 启动服务。
 

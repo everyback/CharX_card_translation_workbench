@@ -48,6 +48,15 @@ CHARX and RISUM are the primary development and test targets. JSON and PNG retai
 - **Resources**: media references and visible JSON text candidates.
 - **Protocols**: Lua, regex, and custom protocol references that need review.
 
+## Fastest Start: Download a Release
+
+If you only want to use the workbench, you do not need Node.js, Docker, or a local build: open [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) and download a Windows desktop build.
+
+- **Installer**: run the setup EXE and follow the installation wizard.
+- **Portable**: run the portable EXE directly; application data stays in the `data/` folder next to the EXE, so it can be kept in any folder or on a removable drive.
+
+`CardLoom Translate Nightly` is updated automatically from the latest `master` commit and is the quickest way to get the newest build. For a formal version, choose a `v`-prefixed release from [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags). After downloading, start the application, open the local address it displays, and configure the model endpoint and API key in **Model Settings**.
+
 ## Quick Start
 
 Docker Compose is the recommended deployment method.
@@ -214,8 +223,6 @@ npm run desktop:installer
 # Build both variants
 npm run desktop:all
 ```
-
-You can use the desktop build without compiling locally: visit [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) to download the Windows installer or portable EXE. `CardLoom Translate Nightly` is updated automatically from the latest `master` commit; for a formal version, choose a `v`-prefixed release from [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags).
 
 The portable build stores SQLite data, uploads, and caches in `data/` next to the EXE. The installer build stores them in Electron's Windows user-data directory. Both variants bind the local service to `127.0.0.1` only.
 
