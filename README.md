@@ -4,6 +4,10 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
+Are you frustrated by card translators that only translate the opening message, leaving the interface full of foreign text and making the card feel untranslated? If so, you have come to the right place.
+
+This project takes a thorough approach to card translation. It covers lorebooks, protocol fields, and any other visible content it can safely identify, while protecting the structures that must remain intact.
+
 It parses a card before translation, protects executable structure, creates machine-translation drafts, and lets a human approve the final text before export. The workbench runs independently from any chat frontend and never overwrites the original card or chat history.
 
 ## Overview
