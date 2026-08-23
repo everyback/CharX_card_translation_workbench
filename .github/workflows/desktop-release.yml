@@ -117,16 +117,29 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           if gh release view nightly >/dev/null 2>&1; then
+            release_id="$(gh api "repos/${GH_REPO}/releases/tags/nightly" --jq '.id')"
+            gh api --paginate "repos/${GH_REPO}/releases/${release_id}/assets" --jq '.[].id' \
+              | while read -r asset_id; do
+                  [ -z "${asset_id}" ] || gh api --method DELETE "repos/${GH_REPO}/releases/assets/${asset_id}"
+                done
             gh release upload nightly release-assets/* --clobber
-            gh release edit nightly \
+            cat <<EOF | gh release edit nightly \
               --title "CardLoom Translate Nightly" \
-              --notes "Automated build from commit ${GITHUB_SHA}." \
+              --notes-file - \
               --prerelease \
               --target "${GITHUB_SHA}"
+            Rolling preview build of CardLoom Translate.
+
+            Commit: ${GITHUB_SHA}
+            EOF
           else
-            gh release create nightly release-assets/* \
+            cat <<EOF | gh release create nightly release-assets/* \
               --title "CardLoom Translate Nightly" \
-              --notes "Automated build from commit ${GITHUB_SHA}." \
+              --notes-file - \
               --prerelease \
               --target "${GITHUB_SHA}"
+            Rolling preview build of CardLoom Translate.
+
+            Commit: ${GITHUB_SHA}
+            EOF
           fi
