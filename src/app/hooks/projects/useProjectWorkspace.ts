@@ -49,6 +49,9 @@ export function useProjectWorkspace({
   const resourcesRequestRef = useRef(0);
 
   const selectProject = useCallback((projectId: string) => {
+    // Clicking the active project does not change selectedProjectId, so its loading effect
+    // will not rerun. Avoid turning the mask on without a request that can clear it.
+    if (selectedProjectIdRef.current === projectId) return;
     setProjectLoading(Boolean(projectId));
     setProjectLoadProgress({ current: 0, total: 0, known: false });
     selectedProjectIdRef.current = projectId;

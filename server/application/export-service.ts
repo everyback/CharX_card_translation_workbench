@@ -52,7 +52,8 @@ export function createExportService({ database, clock, targetLanguage, review }:
     ignoredLuaSegments: number;
   }> {
     const project = await database.prepare(`
-      SELECT original_json, original_module_json, source_format AS sourceFormat, source_blob FROM projects WHERE id = ?
+      SELECT original_json, original_module_json, source_format AS sourceFormat, source_blob
+      FROM projects WHERE id = ?
     `).get(projectId) as {
       original_json: string;
       original_module_json: string | null;
@@ -78,12 +79,26 @@ export function createExportService({ database, clock, targetLanguage, review }:
     }
 
     const draft = applyApprovedSegments(JSON.parse(project.original_json), cardSegments);
-    let draftSourceBlob = resourceSegments.length && project.source_blob
-      ? applyApprovedResourceJson(project.source_blob, resourceSegments)
-      : project.source_blob;
-    if (draftSourceBlob) {
-      const replacements = await confirmedImageReplacements(projectId);
-      for (const replacement of replacements) {
+    // Keep the large original archive out of SQLite when only card/module text
+    // changed. Export falls back to source_blob in that case.
+    const confirmedReplacements = await confirmedImageReplacements(projectId);
+    const approvedResourceSegments = resourceSegments.filter((segment) => segment.reviewStatus === 'approved');
+    const sourceChanges = approvedResourceSegments.length > 0 || confirmedReplacements.length > 0;
+    let existingDraftSourceBlob: Uint8Array | null = null;
+    if (sourceChanges) {
+      const sourceRow = await database.prepare<{ draftSourceBlob: Uint8Array | null }>(
+        'SELECT draft_source_blob AS draftSourceBlob FROM projects WHERE id = ?',
+      ).get(projectId);
+      existingDraftSourceBlob = sourceRow?.draftSourceBlob || null;
+    }
+    let draftSourceBlob: Uint8Array | null = sourceChanges
+      ? (existingDraftSourceBlob || project.source_blob)
+      : null;
+    if (sourceChanges && draftSourceBlob) {
+      if (approvedResourceSegments.length > 0) {
+        draftSourceBlob = applyApprovedResourceJson(draftSourceBlob, approvedResourceSegments);
+      }
+      for (const replacement of confirmedReplacements) {
         draftSourceBlob = replaceResourceBytes(project.sourceFormat, draftSourceBlob, replacement.resourcePath, replacement.imageBlob);
       }
     }
@@ -104,15 +119,32 @@ export function createExportService({ database, clock, targetLanguage, review }:
       : appliedModule;
     assertRisuIntegrity(JSON.parse(project.original_json) as Record<string, unknown>, draft, originalModule, draftModule, false);
 
-    await database.prepare(`
-      UPDATE projects SET draft_json = ?, draft_module_json = ?, draft_source_blob = ?, status = 'ready', updated_at = ? WHERE id = ?
-    `).run(
-      JSON.stringify(draft),
-      draftModule ? JSON.stringify(draftModule) : null,
-      draftSourceBlob ? Buffer.from(draftSourceBlob) : null,
-      clock(),
-      projectId,
-    );
+    if (sourceChanges) {
+      await database.prepare(`
+        UPDATE projects
+        SET draft_json = ?, draft_module_json = ?, draft_source_blob = ?, status = 'ready', updated_at = ?
+        WHERE id = ?
+      `).run(
+        JSON.stringify(draft),
+        draftModule ? JSON.stringify(draftModule) : null,
+        draftSourceBlob ? Buffer.from(draftSourceBlob) : null,
+        clock(),
+        projectId,
+      );
+    } else {
+      // Do not bind the existing archive again. SQLite can read a very large
+      // BLOB, but rebinding it in the same UPDATE can exceed its value limit.
+      await database.prepare(`
+        UPDATE projects
+        SET draft_json = ?, draft_module_json = ?, status = 'ready', updated_at = ?
+        WHERE id = ?
+      `).run(
+        JSON.stringify(draft),
+        draftModule ? JSON.stringify(draftModule) : null,
+        clock(),
+        projectId,
+      );
+    }
     if (project.sourceFormat === 'charx') await review.resolveMirroredModuleLorebookFailures(projectId, draft);
     return {
       ok: true,

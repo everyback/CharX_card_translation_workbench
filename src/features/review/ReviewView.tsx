@@ -126,8 +126,8 @@ export function ReviewView({
               <button className="review-bulk-button" title={`通过 ${safePending.length} 条无警告的低疑点项`} disabled={approving || safePending.length === 0} onClick={onApproveSafe}>
                 <ShieldCheck size={14} /><span>通过低疑点</span><small>{safePending.length}</small>
               </button>
-              <button className="review-bulk-button review-bulk-all" title={`通过全部 ${pendingWithText.length} 条已有译文的待审核项`} disabled={approving || pendingWithText.length === 0} onClick={onApproveAll}>
-                <CheckCheck size={14} /><span>全部通过</span><small>{pendingWithText.length}</small>
+              <button className="review-bulk-button review-bulk-all" title={`确认无误后通过全部 ${pendingWithText.length} 条已有译文的待审核项`} disabled={approving || pendingWithText.length === 0} onClick={onApproveAll}>
+                <CheckCheck size={14} /><span>确认无误后通过</span><small>{pendingWithText.length}</small>
               </button>
             </div>
           </div>

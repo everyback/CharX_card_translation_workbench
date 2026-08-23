@@ -1,7 +1,6 @@
 import {
   ChevronDown,
   CircleAlert,
-  FileJson,
   FileUp,
   Gauge,
   Braces,
@@ -13,7 +12,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { LoadingMask, Stat, UiAlert } from '../components/ui';
 import { SCOPE_OPTIONS } from '../constants';
 import { ProjectOverviewView } from '../features/card-inspection/ProjectOverviewView';
@@ -26,6 +25,8 @@ import { ResourcesView } from '../features/resources/ResourcesView';
 import { ReviewView } from '../features/review/ReviewView';
 import { SegmentsView } from '../features/segments/SegmentsView';
 import { SettingsDialog } from '../features/settings/SettingsDialog';
+import { GuidedWorkflow } from '../features/workflow/GuidedWorkflow';
+import { QuickStartView } from '../features/workflow/QuickStartView';
 import type {
   ScopePreset,
   Tab,
@@ -45,6 +46,7 @@ import { useTranslationTasks } from './hooks/translation/useTranslationTasks';
 
 export function WorkbenchApp() {
   const [tab, setTab] = useState<Tab>('overview');
+  const [pendingAutoScanId, setPendingAutoScanId] = useState('');
   const {
     busy,
     error,
@@ -109,6 +111,7 @@ export function WorkbenchApp() {
     onError: showError,
     onNotice: setNotice,
     onShowOverview: showOverview,
+    onImportedProject: setPendingAutoScanId,
   });
   const {
     jobDetail,
@@ -140,6 +143,7 @@ export function WorkbenchApp() {
     reviewBulk,
     clearAllTranslationResults,
     applyDraft,
+    saveAndExport,
   } = useReviewActions({
     project,
     selectedProjectId,
@@ -171,6 +175,12 @@ export function WorkbenchApp() {
     showUiConfirm,
     onNotice: setNotice,
   });
+
+  useEffect(() => {
+    if (!pendingAutoScanId || project?.id !== pendingAutoScanId || project.status !== 'new' || projectLoading || busy) return;
+    setPendingAutoScanId('');
+    void scan();
+  }, [busy, pendingAutoScanId, project, projectLoading, scan]);
   const { addGlossaryTerm, deleteGlossaryTerm } = useGlossaryActions({
     project,
     setGlossary,
@@ -235,6 +245,7 @@ export function WorkbenchApp() {
           aboutActive={tab === 'about'}
           onDeleteProject={() => void deleteProject()}
           onApplyDraft={() => void applyDraft()}
+          onSaveAndExport={() => void saveAndExport()}
         />
 
         {error && <div className="error-banner"><CircleAlert size={17} /><span>{error}</span><button onClick={() => setError('')}><X size={16} /></button></div>}
@@ -250,14 +261,29 @@ export function WorkbenchApp() {
         {tab === 'about' ? (
           <AboutView />
         ) : !project ? (
-          <section className="empty-workspace">
-            <FileJson size={34} />
-            <h2>导入角色卡或模块</h2>
-            <p>可选择文件，或将 JSON、PNG、CHARX、RISUM 直接拖到窗口中</p>
-            <button className="primary-button" onClick={() => fileInputRef.current?.click()}><FileUp size={16} />选择文件</button>
-          </section>
+          <QuickStartView
+            settings={settings}
+            onImport={() => fileInputRef.current?.click()}
+            onOpenSettings={openSettings}
+          />
         ) : (
           <>
+            <GuidedWorkflow
+              project={project}
+              settings={settings}
+              scope={scope}
+              busy={busy}
+              onOpenSettings={openSettings}
+              onScopeChange={setScope}
+              onScan={(nextScope) => void scan(nextScope)}
+              onStartTranslation={() => void startTranslation()}
+              onOpenJobs={showJobs}
+              onOpenReview={showReview}
+              onApproveAll={() => void approveAll()}
+              onOpenSegments={() => setTab('segments')}
+              onApplyDraft={() => void applyDraft()}
+              onSaveAndExport={() => void saveAndExport()}
+            />
             <section className="stats-band">
               <Stat icon={<ListChecks size={17} />} label="扫描段落" value={project.scanSummary?.totalSegments ?? project.segments.length} />
               <Stat icon={<Gauge size={17} />} label="待人工审核" value={project.scanSummary?.pendingSegments ?? project.segments.filter((item) => item.reviewStatus === 'pending').length} />
@@ -341,6 +367,7 @@ export function WorkbenchApp() {
                 selected={jobDetail}
                 onSelect={(job) => void loadJob(job.id)}
                 onAction={(jobId, action) => void jobAction(jobId, action)}
+                onOpenReview={showReview}
                 languageBehaviorMode={project.languageBehaviorMode}
                 targetLanguage={settings?.targetLanguage || project.targetLanguage}
               />

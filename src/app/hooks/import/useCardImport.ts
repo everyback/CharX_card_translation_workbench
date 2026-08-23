@@ -12,6 +12,7 @@ interface UseCardImportOptions {
   onError: ShowWorkbenchError;
   onNotice: (notice: string) => void;
   onShowOverview: () => void;
+  onImportedProject?: (projectId: string) => void;
 }
 
 export function useCardImport({
@@ -22,6 +23,7 @@ export function useCardImport({
   onError,
   onNotice,
   onShowOverview,
+  onImportedProject,
 }: UseCardImportOptions) {
   const [draggingFiles, setDraggingFiles] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -45,12 +47,15 @@ export function useCardImport({
         });
       }
       await refreshProjects();
-      if (created) selectProject(created.id);
+      if (created) {
+        selectProject(created.id);
+        onImportedProject?.(created.id);
+      }
       onShowOverview();
       const ignored = files.length - supported.length;
       onNotice(`已导入 ${supported.length} 个文件${ignored ? `，忽略 ${ignored} 个不支持的文件` : ''}。`);
     });
-  }, [busy, onError, onNotice, onShowOverview, refreshProjects, runAction, selectProject]);
+  }, [busy, onError, onImportedProject, onNotice, onShowOverview, refreshProjects, runAction, selectProject]);
 
   useEffect(() => {
     const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files');

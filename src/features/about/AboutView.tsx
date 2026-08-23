@@ -10,7 +10,7 @@ import {
   Users,
 } from 'lucide-react';
 
-const workflow = ['导入卡片或模块', '选择翻译范围', '扫描并执行翻译', '人工检查高疑点内容', '生成审核稿并导出'];
+const workflow = ['导入卡片或模块', '选择翻译范围', '扫描并执行翻译', '人工检查高疑点内容', '保存审核稿并导出'];
 
 export function AboutView() {
   return (

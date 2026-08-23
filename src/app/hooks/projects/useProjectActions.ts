@@ -28,7 +28,7 @@ export function useProjectActions({
   showUiConfirm,
   onNotice,
 }: UseProjectActionsOptions) {
-  async function scan() {
+  async function scan(scopeOverride?: ScopePreset) {
     if (!project) return;
     await runAction('scan', async () => {
       const result = await api<{
@@ -38,7 +38,7 @@ export function useProjectActions({
         pendingProtocolCount: number;
         runtimeRiskCount?: number;
         runtimeRiskPaths?: string[];
-      }>(`/api/projects/${project.id}/scan`, { method: 'POST', ...jsonBody({ scope }) });
+      }>(`/api/projects/${project.id}/scan`, { method: 'POST', ...jsonBody({ scope: scopeOverride ?? scope }) });
       const runtimeNotice = result.runtimeRiskCount
         ? `；发现 ${result.runtimeRiskCount} 个运行时状态风险（${(result.runtimeRiskPaths ?? []).slice(0, 2).join('；')}）`
         : '';

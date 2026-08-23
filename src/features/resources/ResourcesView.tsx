@@ -135,7 +135,7 @@ export function ResourcesView({
                       <button className="secondary-button" onClick={() => void setImageCandidateStatus('draft')} disabled={imageBusy}>保留待审</button>
                       <button className="primary-button" onClick={() => void setImageCandidateStatus('confirmed')} disabled={imageBusy}><Check size={15} />确认用于导出</button>
                     </div>
-                    <small>{imageCandidate.status === 'confirmed' ? '已确认：下次“生成审核稿”时会替换该资源。' : '当前为待审稿，不会进入导出文件。'}</small>
+                    <small>{imageCandidate.status === 'confirmed' ? '已确认：下次“保存”或“保存并导出”时会替换该资源。' : '当前为待审稿，不会进入导出文件。'}</small>
                   </>}
                 </div>
               </> : <span className="resource-ocr-hint">当前资源类型无需图片汉化。</span>}

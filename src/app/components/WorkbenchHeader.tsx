@@ -9,6 +9,7 @@ interface WorkbenchHeaderProps {
   aboutActive?: boolean;
   onDeleteProject: () => void;
   onApplyDraft: () => void;
+  onSaveAndExport: () => void;
 }
 
 export function WorkbenchHeader({
@@ -17,6 +18,7 @@ export function WorkbenchHeader({
   aboutActive = false,
   onDeleteProject,
   onApplyDraft,
+  onSaveAndExport,
 }: WorkbenchHeaderProps) {
   const visibleProject = aboutActive ? null : project;
 
@@ -49,12 +51,12 @@ export function WorkbenchHeader({
       <div className="header-actions">
         {visibleProject && <>
           <button className="icon-button danger-ghost" title="删除项目" onClick={onDeleteProject}><Trash2 size={17} /></button>
-          <button className="secondary-button" onClick={onApplyDraft} disabled={busy === 'apply'}>
-            <Save size={16} />生成审核稿
+          <button className="secondary-button" title="保存当前审核稿" onClick={onApplyDraft} disabled={busy.startsWith('apply')}>
+            <Save size={16} />保存
           </button>
-          <a className={`primary-button ${visibleProject.status !== 'ready' ? 'disabled' : ''}`} href={`/api/projects/${visibleProject.id}/export`}>
-            <Download size={16} />导出文件
-          </a>
+          <button className="primary-button" title="保存后执行导出前语法检查并下载" onClick={onSaveAndExport} disabled={busy.startsWith('apply')}>
+            <Download size={16} />保存并导出
+          </button>
         </>}
       </div>
     </header>

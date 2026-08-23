@@ -1,4 +1,4 @@
-import { Pause, Play, RefreshCw, Square } from 'lucide-react';
+import { CheckCheck, Pause, Play, RefreshCw, ShieldCheck, Square } from 'lucide-react';
 import { STATUS_LABELS } from '../../constants';
 import type { Job } from '../../types';
 import { formatClock, formatTime } from '../../utils/format';
@@ -8,6 +8,7 @@ export function JobsView({
   selected,
   onSelect,
   onAction,
+  onOpenReview,
   languageBehaviorMode,
   targetLanguage,
 }: {
@@ -15,12 +16,17 @@ export function JobsView({
   selected: Job | null;
   onSelect: (job: Job) => void;
   onAction: (jobId: string, action: 'pause' | 'resume' | 'retry-failed' | 'cancel') => void;
+  onOpenReview: () => void;
   languageBehaviorMode: 'target' | 'preserve';
   targetLanguage: string;
 }) {
   const selectedJob = selected && jobs.some((item) => item.id === selected.id) ? selected : null;
   const job = selectedJob ?? jobs[0] ?? null;
   const percent = job?.totalItems ? Math.round(((job.completedItems + job.failedItems) / job.totalItems) * 100) : 0;
+  const translationFinished = Boolean(job && (
+    ['review', 'review_with_errors', 'failed'].includes(job.status)
+    || (job.totalItems > 0 && job.completedItems + job.failedItems >= job.totalItems)
+  ));
   return (
     <section className="jobs-layout">
       <div className="job-list">
@@ -38,6 +44,16 @@ export function JobsView({
           <div className="job-title-row"><div><h2>任务进度</h2><span>{job.model} · 卡片语言设定：{languageBehaviorMode === 'preserve' ? '保留卡片原设定' : `跟随${targetLanguage}`}</span></div><strong>{percent}%</strong></div>
           <div className="progress-track"><span style={{ width: `${percent}%` }} /></div>
           <div className="job-metrics"><span>成功 <b>{job.completedItems}</b></span><span>失败 <b>{job.failedItems}</b></span><span>总计 <b>{job.totalItems}</b></span></div>
+          {translationFinished && (
+            <div className="job-complete-callout" role="status" aria-live="polite">
+              <span className="job-complete-icon"><ShieldCheck size={18} /></span>
+              <div className="job-complete-copy">
+                <strong>{job.failedItems > 0 ? '翻译已完成，但有项目需要留意' : '翻译已完成，下一步进入审核'}</strong>
+                <span>{job.failedItems > 0 ? '请先查看失败项和质量提示，再确认哪些译文可以通过。' : '请在审核页对照原文、译文和风险提示，确认后点击“保存”或“保存并导出”。'}</span>
+              </div>
+              <button className="primary-button" type="button" onClick={onOpenReview}><CheckCheck size={16} />进入审核</button>
+            </div>
+          )}
           <div className="job-actions">
             {['queued', 'running'].includes(job.status) && <button onClick={() => onAction(job.id, 'pause')}><Pause size={16} />暂停</button>}
             {['paused', 'failed'].includes(job.status) && <button onClick={() => onAction(job.id, 'resume')}><Play size={16} />继续</button>}

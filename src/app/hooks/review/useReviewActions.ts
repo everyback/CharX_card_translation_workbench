@@ -168,9 +168,9 @@ export function useReviewActions({
       ? `\n其中 ${needsAttention} 条属于高疑点或带质量警告。`
       : '';
     if (!await showUiConfirm({
-      title: '通过全部已有译文',
-      message: `确认通过全部 ${pending.length} 条已有译文的待审核项？${warning}\n此操作不会通过未翻译项。`,
-      confirmLabel: '全部通过',
+      title: '确认批量通过译文',
+      message: `请确认 ${pending.length} 条已有译文都可以通过审核。${warning}\n此操作不会通过未翻译项。`,
+      confirmLabel: '确认并通过全部',
       tone: needsAttention ? 'warning' : 'default',
     })) return;
     await runAction('approve-all', async () => {
@@ -210,9 +210,9 @@ export function useReviewActions({
           throw approveError;
         }
       }
-      onNotice(result.skipped
-        ? `已通过 ${result.approved} 条；仍有 ${result.skipped} 条因协议结构无效或残留源语言而未通过。`
-        : `已通过全部 ${result.approved} 条已有译文。`);
+     onNotice(result.skipped
+       ? `已通过 ${result.approved} 条；仍有 ${result.skipped} 条因协议结构无效或残留源语言而未通过。`
+        : `已通过全部 ${result.approved} 条已有译文。下一步请点击“保存并导出”，完成校验后下载卡片。`);
       await refreshProject(project.id);
     });
   }
@@ -263,8 +263,8 @@ export function useReviewActions({
           ...jsonBody({}),
         });
         onNotice(result.ignoredLuaSegments > 0
-          ? `审核稿已生成并通过 Lua 语法校验；已忽略 ${result.ignoredLuaSegments} 条会改动 Lua 代码的旧扫描译文。`
-          : '审核稿已生成，并通过 Risu Lua 语法校验。');
+          ? `审核稿已保存并通过 Lua 语法校验；已忽略 ${result.ignoredLuaSegments} 条会改动 Lua 代码的旧扫描译文。`
+          : '审核稿已保存，并通过 Risu Lua 语法校验。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
       } catch (applyError) {
         const related = locateLuaSyntaxSegment(
@@ -281,6 +281,59 @@ export function useReviewActions({
     });
   }
 
+  async function saveAndExport() {
+    if (!project) return;
+    await runAction('apply-export', async () => {
+      try {
+        const result = await api<{ ignoredLuaSegments: number }>('/api/projects/' + project.id + '/apply', {
+          method: 'POST',
+          ...jsonBody({}),
+        });
+        const response = await fetch('/api/projects/' + project.id + '/export');
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({ error: response.statusText })) as Record<string, unknown>;
+          throw new ApiError(String(body.error || '请求失败：' + response.status), response.status, body);
+        }
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+        const plainFilename = disposition.match(/filename="([^"]+)"/i)?.[1];
+        let filename = plainFilename || 'translated-card';
+        if (encodedFilename) {
+          try {
+            filename = decodeURIComponent(encodedFilename);
+          } catch {
+            // Keep the server fallback name when a malformed header cannot be decoded.
+          }
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.style.display = 'none';
+        document.body.append(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+        onNotice(result.ignoredLuaSegments > 0
+          ? '审核稿已保存，已通过导出前语法检查并开始下载；已忽略 ' + result.ignoredLuaSegments + ' 条会改动 Lua 代码的旧扫描译文。'
+          : '审核稿已保存，已通过导出前语法检查并开始下载。');
+        await Promise.all([refreshProject(project.id), refreshProjects()]);
+      } catch (exportError) {
+        const related = locateLuaSyntaxSegment(
+          project.segments,
+          exportError instanceof Error ? exportError.message : String(exportError),
+        );
+        if (related) {
+          setSelectedSegmentId(related.id);
+          onShowReview();
+          onNotice('已定位到最接近 Lua 报错行的审核项：' + related.pathLabel);
+        }
+        throw exportError;
+      }
+    });
+  }
+
   return {
     selectedSegment,
     updateSegment,
@@ -289,5 +342,6 @@ export function useReviewActions({
     reviewBulk,
     clearAllTranslationResults,
     applyDraft,
+    saveAndExport,
   };
 }

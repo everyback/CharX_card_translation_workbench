@@ -752,7 +752,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/clear-resu
       UPDATE projects SET
         draft_json = original_json,
         draft_module_json = original_module_json,
-        draft_source_blob = source_blob,
+        draft_source_blob = NULL,
         status = 'scanned',
         updated_at = ?
       WHERE id = ?
