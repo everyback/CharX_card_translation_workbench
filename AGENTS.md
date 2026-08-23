@@ -77,3 +77,9 @@ curl --fail --silent --show-error http://127.0.0.1:18880/api/health
 ## 敏感数据
 
 不要读取、提交或输出 `.env`、`data/`、`backups/`、SQLite 文件、远程配置和真实 API Key。需要调试配置时只报告是否配置、模型名和脱敏后的元数据。
+
+## Git 提交
+
+- 每个提交只覆盖一个明确目的；提交前先检查暂存区，不能把用户的无关改动一并提交。
+- 提交标题必须使用 `类型: 中文说明` 格式；类型限于 `update`、`fix`、`new feature`、`docs`、`remove`、`refactor`、`test`、`build`、`ci`、`perf`、`style`、`chore`，不用 `WIP` 或泛泛说明。
+- 提交前运行与改动相称的测试，并在提交或交付说明中记录实际执行的验证。
