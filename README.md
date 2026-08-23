@@ -1,198 +1,222 @@
-# CharX Card Translation Workbench
+# charx卡片翻译工作台
 
-**CardLoom Translate** is a review-first localization workbench for RisuAI CHARX cards and RISUM modules.
+[English](./README.en.md) | 中文
 
-[English](./README.md) | [中文](./README.zh-CN.md)
+你是否在为其他卡片翻译器只翻译开场白，导致使用时面对界面上一堆异邦文字跟没翻译一样而感到烦躁？如果是，那证明你来对了！
 
-Are you frustrated by card translators that only translate the opening message, leaving the interface full of foreign text and making the card feel untranslated? If so, you have come to the right place.
+这个项目灵巧而又暴力地翻译卡片里的所有内容，包括世界书，协议字段，凡是能找出来影响你查看的，都能抓出来保护翻译！
 
-This project takes a thorough approach to card translation. It covers lorebooks, protocol fields, and any other visible content it can safely identify, while protecting the structures that must remain intact.
+如果你经常处理带世界书、Lua、正则和资源的 AI 角色卡，应该遇到过这种情况：文字翻译了，按钮失效了，触发词丢了，协议也被改坏。卡片翻译工作台就是为这个场景做的：先识别卡片结构，再生成译文，最后让你在审核页决定哪些内容可以导出。
 
-It parses a card before translation, protects executable structure, creates machine-translation drafts, and lets a human approve the final text before export. The workbench runs independently from any chat frontend and never overwrites the original card or chat history.
+它可以独立运行，不依赖特定聊天前端，也不会自动修改原卡片或聊天记录。默认只监听 `127.0.0.1`，适合在自己的电脑上使用。
 
-## Overview
+## 目录
 
-Character cards are structured programs, not plain text files. They can contain lorebooks, Lua, regex rules, variables, asset paths, HTML, and custom protocols. Blindly replacing all text can break buttons, triggers, or runtime behavior.
+- [项目简介](#项目简介)
+- [支持格式](#支持格式)
+- [功能](#功能)
+- [界面说明](#界面说明)
+- [最快上手：直接下载](#最快上手直接下载)
+- [快速开始](#快速开始)
+- [第一次使用](#第一次使用)
+- [使用操作流程](#使用操作流程)
+- [翻译范围与保护规则](#翻译范围与保护规则)
+- [技术栈](#技术栈)
+- [Docker 运维](#docker-运维)
+- [本地开发](#本地开发)
+- [配置参考](#配置参考)
+- [数据与安全](#数据与安全)
+- [贡献](#贡献)
+- [许可证](#许可证)
 
-The workbench separates parsing, scanning, translation, review, and export. Original content remains stored in the project, while only approved text enters the review draft or exported file.
+## 项目简介
 
-## Supported Formats
+角色卡并不只是文本文件，通常还包含世界书、Lua、正则、变量、资源路径和自定义协议。直接对整张卡进行文本替换，可能导致按钮失效、触发词丢失或协议结构损坏。
 
-CHARX and RISUM are the primary development and test targets. JSON and PNG retain basic compatibility, but their coverage is not equivalent to the CHARX/RISUM path. Always keep the original file and verify imports and exports in the target client.
+工作台不会把整张卡直接丢给模型，而是先解析并保护程序结构，再生成翻译草稿。翻译范围由使用者选择，审核页会保留原文、机翻和人工定稿，存在疑点的内容可以单独复核。模型输出不直接覆盖原文件。
 
-| Format | Import | Export | Status |
+## 支持格式
+
+本项目主要针对 RisuAI 模块（RISUM）和 CHARX 卡片开发，相关导入、解析、翻译、审核和导出流程经过较充分测试。PNG、普通 JSON 等酒馆卡格式目前只保留基础兼容能力，真实卡片覆盖不足，不能视为与 CHARX、RISUM 同等稳定。使用这些格式前请保留原文件，并自行核对导入结果与导出卡片。
+
+| 格式 | 读取 | 导出 | 当前状态 |
 | --- | --- | --- | --- |
-| CHARX | Yes | Yes | Primary target; ZIP containers, JPEG+ZIP hybrids, and embedded modules. |
-| RISUM | Yes | Yes | Primary target; RisuAI module JSON and resource containers. |
-| JSON | Basic | Basic | Character-card and module JSON, with limited fixture coverage. |
-| PNG | Basic | Basic | Embedded character-card data, with limited Tavern-card coverage. |
+| CHARX | 是 | 是 | 主要测试对象；支持 ZIP 容器、混合 JPEG+ZIP 和嵌入模块。 |
+| RISUM | 是 | 是 | 主要测试对象；面向 RisuAI 模块 JSON 与资源容器。 |
+| JSON | 基础 | 基础 | 兼容角色卡 JSON 和模块 JSON，但测试覆盖有限。 |
+| PNG | 基础 | 基础 | 支持读写内嵌角色卡数据，但酒馆卡测试覆盖有限。 |
 
-## Features
+## 功能
 
-| Capability | Description |
+| 能力 | 说明 |
 | --- | --- |
-| Multi-format import/export | CHARX and RISUM first, with basic JSON and PNG compatibility. |
-| Selectable translation scopes | Character fields, lorebooks, greetings, script UI, Lua prompts, and visible resource JSON. |
-| Independent job scheduler | Configurable concurrency, batches, retries, and per-job retry. |
-| Human review | Compare source, machine translation, and final text side by side before approval. |
-| Structure protection | Protect variables, Lua, regex, protocol shells, paths, URLs, IDs, asset names, and button triggers by default. |
-| Lorebook-safe aliases | Preserve original triggers and append approved target-language aliases instead of replacing them. |
-| Resource workbench | Inspect media and JSON references; route images through OCR or an image-editing model when needed. |
+| 多格式导入导出 | 以 CHARX、RISUM 为主要处理对象，同时保留 JSON、PNG 的基础兼容流程。 |
+| 自定义翻译范围 | 角色主体、世界书、问候语、脚本界面、Lua 提示词和资源 JSON 均可按需选择。 |
+| 独立任务调度 | 支持并发、批次和重试设置，失败项目可单独重试。 |
+| 人工审核 | 并排查看原文、机器译文和人工定稿，通过后才写入审核稿。 |
+| 结构保护 | 默认保护变量、Lua、正则、协议外壳、路径、URL、ID、资源文件名和按钮触发器。 |
+| 世界书兼容 | 保留原始触发词，以追加别名方式写入目标语言关键词。 |
+| 资源工作台 | 查看媒体和 JSON 引用；图片支持 OCR 或图片编辑模型流程。 |
 
-## Interface
+## 界面说明
 
-- **Overview**: detected format, lorebooks, scripts, protocols, and resources.
-- **Fields**: translatable text grouped by path and protection state.
-- **Jobs**: translation progress, batches, errors, and retries.
-- **Review**: source, machine output, final text, flags, and bulk approval.
-- **Resources**: media references and visible JSON text candidates.
-- **Protocols**: Lua, regex, and custom protocol references that need review.
+主要页面如下：
 
-## Fastest Start: Download a Release
+- **概要**：显示卡片格式、世界书、脚本和资源的识别结果。
+- **字段**：按路径查看待翻译文本及其保护状态。
+- **任务**：启动翻译、查看进度和失败原因，支持重试失败项。
+- **审核**：对照原文、机器译文和人工定稿，按状态或类型筛选并批量审核。
+- **资源**：查看资源引用、JSON 可见文字和图片处理候选。
+- **协议**：查看协议、Lua 和正则引用，确认翻译不会改变交互结构。
 
-If you only want to use the workbench, you do not need Node.js, Docker, or a local build: open [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) and download a Windows desktop build.
+## 最快上手：直接下载
 
-- **Installer**: run the setup EXE and follow the installation wizard.
-- **Portable**: run the portable EXE directly; application data stays in the `data/` folder next to the EXE, so it can be kept in any folder or on a removable drive.
+如果只是想使用，不需要安装 Node.js、Docker 或自行编译：前往 [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) 下载 Windows 桌面版。
 
-`CardLoom Translate Nightly` is updated automatically from the latest `master` commit and is the quickest way to get the newest build. For a formal version, choose a `v`-prefixed release from [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags). After downloading, start the application, open the local address it displays, and configure the model endpoint and API key in **Model Settings**.
+- **安装版**：运行安装程序，按向导完成安装。
+- **便携版**：直接运行 EXE；程序数据保存在 EXE 同目录的 `data/` 中，适合放在任意文件夹或移动硬盘使用。
 
-## Quick Start
+`CardLoom Translate Nightly` 会随 `master` 的最新提交自动更新，适合获取最新构建；需要选择正式版本时，请查看 [Tags](https://github.com/everyback/CharX_card_translation_workbench/tags) 中带 `v` 前缀的版本。下载后启动程序，在浏览器打开显示的本地地址，再到左下侧“模型设置”填写模型接口和 API Key。
 
-Docker Compose is the recommended deployment method.
+## 快速开始
 
-Requirements:
+推荐使用 Docker Compose 运行。部署前准备：
 
-- Windows: Docker Desktop and Docker Compose v2.
-- Linux: Docker Engine and Docker Compose v2.
-- An OpenAI Chat Completions-compatible model endpoint.
+- Windows：Docker Desktop 与 Docker Compose v2。
+- Linux：Docker Engine 与 Docker Compose v2。
+- 开始翻译时需要一个兼容 OpenAI Chat Completions 的模型接口；模型配置在页面打开后完成。
 
-### 1. Optional local configuration
+### 1. 创建本地配置（可选）
 
-PowerShell:
+Windows PowerShell：
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 notepad .env
 ```
 
-Linux:
+Linux：
 
 ```bash
 [ -f .env ] || cp .env.example .env
 nano .env
 ```
 
-The first run can use the defaults. Open the UI, choose **Model Settings**, and enter the API base URL, model, API key, source language, target language, concurrency, and batch size. Image localization uses a separate optional image-editing model.
+第一次使用可以不改 `.env`。启动页面后，点击左侧底部的“模型设置”，再填写 API Base URL、模型名称和 API Key；源语言、目标语言、并发和批次也在这里调整。需要图片汉化时，再填写图片编辑模型的接口、模型和 API Key。
 
-Model settings are stored by the backend in local SQLite. The browser only receives a configured/not-configured status.
+模型配置由后端保存到本地 SQLite，浏览器只会看到“已配置”状态。`.env` 只用于部署参数；模型、语言、并发、批次和图片设置不接受环境变量，必须在页面“模型设置”中填写。
 
-### 2. Build and start
+### 2. 构建并启动
 
 ```bash
 docker compose -f docker/compose.yml up -d --build
 ```
 
-The default address is [http://127.0.0.1:8787/](http://127.0.0.1:8787/). Compose binds the host port to loopback by default.
+默认地址为 [http://127.0.0.1:8787/](http://127.0.0.1:8787/)。Compose 只映射本机回环地址，不会对局域网或公网开放端口。
 
-### 3. Verify
+### 3. 验证服务
 
-PowerShell:
+Windows PowerShell：
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8787/api/health
 docker compose -f docker/compose.yml ps
 ```
 
-Linux:
+Linux：
 
 ```bash
 curl --fail --silent --show-error http://127.0.0.1:8787/api/health
 docker compose -f docker/compose.yml ps
 ```
 
-The health endpoint should return `ok: true`.
+健康接口能返回 `ok: true`，就可以打开浏览器开始用了。
 
-## First Use
+## 第一次使用
 
-1. Open **Model Settings** and configure the model endpoint, model name, API key, source language, target language, concurrency, and batch size.
-2. Import a CHARX, RISUM, PNG, or JSON file, or drop it onto the page.
-3. Select **Scan card** or **Scan fields**, then confirm the detected card, lorebook, script, protocol, and resource counts in **Overview**.
-4. Choose a translation scope. **Translate all** includes card text, lorebooks, Lua prompts, script UI, and visible resource JSON.
-5. Start translation and inspect progress, failed batches, and quality notices on **Jobs**.
-6. When translation finishes, use **Approve all** only if the existing translations are ready; otherwise select **Enter review** and compare the source, machine translation, and final text. Bulk approval does not approve untranslated or failed items.
-7. Use **Save** to create the review draft only. Use **Save and export** to save it, check Lua, script references, and card structure, then automatically download JSON, PNG, CHARX, or RISUM when validation passes.
+1. 打开左下侧“模型设置”，填写 API Base URL、模型名称和 API Key，并确认目标语言、并发和批次参数。
+2. 点击“导入卡片 / 模块”，也可以直接把文件拖到页面里。
+3. 点击“扫描卡片”或“扫描字段”，再在“概要”确认卡片结构、世界书、脚本和资源均已识别。
+4. 在翻译范围下拉框里选择要处理的内容。默认的“全部翻译”会包含卡片可见文本、世界书、Lua 提示词、脚本界面和资源 JSON 可见文本。
+5. 点击“开始翻译”，在“任务”页面查看进度、失败批次和质量提示。
+6. 翻译完成后，确认无误可以点击“一键通过全部”；需要复核时点击“进入审核”，逐条确认原文、机器译文和人工定稿。一键通过只处理已有译文，不会通过未翻译或失败项。
+7. 所有需要的译文通过后，点击“保存”只生成审核稿；点击“保存并导出”会保存审核稿、检查 Lua、脚本引用和卡片结构，校验通过后自动下载 JSON、PNG、CHARX 或 RISUM。
 
-The original import remains available in the project. Machine output is only a draft until it is approved.
+原始导入内容会一直保留在项目里。模型给出的只是草稿，只有审核通过的内容才会写进审核稿或导出文件。
 
-PNG and basic JSON currently provide baseline import/export support; CHARX and RISUM are the primary supported formats. After export, verify the character fields, lorebook triggers, scripts, and asset references in the target client.
+PNG 和普通 JSON 目前提供基础导入导出支持；CHARX、RISUM 是本项目的主要支持格式。导出后请在目标客户端检查角色主体、世界书触发词、脚本和资源引用。
 
-## Recommended Workflow
+## 使用操作流程
 
-1. Configure the model, then import the original card.
-2. Scan the card or fields and confirm its format and counts in **Overview**.
-3. Choose a translation scope and start with a conservative concurrency and batch size for large cards.
-4. Check failed batches and quality notices on **Jobs** before approving text.
-5. Use **Approve all** only for translations you already trust; otherwise use **Enter review**.
-6. Review protocol, script, button, Lua, and lorebook-trigger entries first.
-7. Use **Save** to keep a review draft, or **Save and export** to validate and download it.
-8. Reopen the result in the real client and verify the card, worldbook triggers, scripts, and resource references.
+推荐按下面的顺序处理一张卡：
 
-Do not judge export safety by fluency alone. For unfamiliar protocols, inspect the **Protocols** and **References** views before approving text used by code.
+1. **设置模型**：打开左下侧“模型设置”，填写模型接口、模型名和 API Key；选择源语言、目标语言、并发和批次参数。
+2. **导入原卡**：选择 CHARX、RISUM、PNG 或 JSON 文件，也可以直接拖入页面。原始文件会保留在项目中，不会被覆盖。
+3. **检查概要**：确认卡片格式、角色主体、世界书、脚本、Lua、协议和资源数量符合预期。数量明显不对时，先不要开始翻译。
+4. **选择翻译范围**：一般使用默认的“全部翻译”。如果只想处理主体或世界书，可以改用下拉框中的其他范围。
+5. **扫描并开始翻译**：点击“扫描卡片”或“扫描字段”，确认待翻译内容，再点击“开始翻译”。大卡建议从较低并发和较小批次开始。
+6. **处理失败任务**：到“任务”页查看失败原因。可以修正配置、补充人工译文后重试，不要反复重试同一个结构性错误。
+7. **选择审核方式**：翻译完成后，确认无误可以点击“一键通过全部”；需要复核时点击“进入审核”。一键通过只处理已有译文，不会通过未翻译或失败项。
+8. **审核译文**：在“审核”页对照原文、机器译文和人工定稿，优先处理带疑点、协议、脚本按钮、Lua 和世界书触发词的条目。
+9. **保存、导出并回验**：点击“保存”只生成审核稿；点击“保存并导出”会先检查 Lua、脚本引用和卡片结构，校验通过后自动下载目标格式。在实际使用的客户端重新打开，检查角色主体、世界书触发、按钮、弹窗、协议和资源引用。PNG、普通 JSON 尤其需要完成这一步。
 
-## Translation Scopes and Protection
+遇到陌生协议或脚本时，先在“协议”和“引用”页确认哪些文字被代码使用，再决定是否通过；不要只按译文是否通顺来判断是否可以导出。
 
-| Scope | Includes |
+## 翻译范围与保护规则
+
+| 范围 | 内容 |
 | --- | --- |
-| Character fields only | Name, description, personality, scenario, and related core fields. |
-| Character + lorebook + greetings | Core fields, lorebook prose, and opening messages. |
-| Script UI | Explicitly visible labels, buttons, and dialog text. |
-| All visible content | Card, lorebook, script UI, and visible Lua prompts. |
-| Translate all | All visible content plus visible strings in embedded CHARX JSON. |
-| Parsed Lua strings only | Strings identified as visible text by the Lua parser. |
+| 只翻角色主体 | 名称、描述等主体字段。 |
+| 主体 + 世界书 + 问候语 | 加入世界书和开场白。 |
+| 包含脚本按钮 / 弹窗 | 加入明确可见的脚本界面文字。 |
+| 完整可见内容 | 处理卡片、世界书、脚本界面和 Lua 提示词的可见文字。 |
+| 全部翻译 | 再加入 CHARX 内部 JSON 的可见字符串；为默认项。 |
+| 仅 Lua 解析提取 | 只处理 Lua 中识别为可见文字的字符串。 |
 
-By default, the workbench does not rewrite variable names, IDs, paths, URLs, regex patterns, Lua structure, protocol shells, or button triggers. Lorebook source keys are preserved; approved target-language aliases are appended to existing key arrays. Protection is an aid, not a replacement for human review.
+默认情况下，变量名、ID、路径、URL、正则、Lua 结构、协议外壳和按钮触发器不会被改写。遇到不熟悉的协议，建议先去“协议”和“审核”页面看清楚，再决定要不要批量通过。
 
-## Docker Operations
+## Docker 运维
 
-Stop while keeping data:
+平时用到的 Docker 命令基本就是下面几条。数据会留在 Compose 的数据卷里，停掉容器不会把项目删掉。
+
+停止服务但保留数据：
 
 ```bash
 docker compose -f docker/compose.yml down
 ```
 
-Rebuild and start:
+更新代码后重新构建并启动：
 
 ```bash
 docker compose -f docker/compose.yml up -d --build
 ```
 
-View logs:
+查看日志：
 
 ```bash
 docker compose -f docker/compose.yml logs --tail=200
 ```
 
-If port `8787` is occupied, set another loopback port in `.env`:
+如果 8787 已经被别的程序占用，可以在 `.env` 里换一个本机端口：
 
 ```dotenv
 WORKBENCH_BIND_PORT=18880
 ```
 
-Then restart the compose project and open `http://127.0.0.1:18880/`. Do not expose the service on `0.0.0.0` without adding trusted authentication, TLS, and access controls.
+随后重新执行 `docker compose -f docker/compose.yml up -d`，并访问 `http://127.0.0.1:18880/`。不要将端口映射改为 `0.0.0.0` 或直接暴露到公网。
 
-See [deployment notes](./docs/部署说明.md) for backup and recovery details.
+Windows、Linux、备份和恢复的完整说明放在[部署说明](./docs/部署说明.md)里。
 
-## Technology
+## 技术栈
 
-- Frontend: React, TypeScript, Vite, and Lucide.
-- Backend: TypeScript, Fastify, and SQLite workers.
-- Model interface: OpenAI Chat Completions-compatible service.
-- Deployment: Docker Compose or a local Node.js process.
+- 前端：React、TypeScript、Vite、Lucide。
+- 后端：TypeScript、Fastify、SQLite Worker。
+- 模型接口：兼容 OpenAI Chat Completions 的服务；模型配置在页面中完成。
+- 部署：Docker Compose 或 Node.js 本地进程。
 
-## Local Development
+## 本地开发
 
-Node.js 22 or newer is required:
+本地开发需要 Node.js 22 或更高版本：
 
 ```bash
 npm ci
@@ -201,84 +225,98 @@ npm run build
 npm run dev
 ```
 
-The development UI defaults to `http://127.0.0.1:5173/`; the development API defaults to `http://127.0.0.1:8787/`.
+开发页面默认位于 `http://127.0.0.1:5173/`，开发 API 默认位于 `http://127.0.0.1:8787/`。
 
-For a production build:
+要验证生产构建，可以运行：
 
 ```bash
 npm run build
 npm start
 ```
 
-### Windows Desktop Builds
+### Windows 桌面版
 
-Run these commands on Windows:
+需要在 Windows 上执行以下命令：
 
 ```powershell
-# Portable EXE: release/CardLoom-Translate-Portable-<version>.exe
+# 生成便携版：release/CardLoom-Translate-Portable-<version>.exe
 npm run desktop:portable
 
-# Installer: release/CardLoom-Translate-Setup-<version>.exe
+# 生成安装版：release/CardLoom-Translate-Setup-<version>.exe
 npm run desktop:installer
 
-# Build both variants
+# 一次生成两种版本
 npm run desktop:all
 ```
 
-The portable build stores SQLite data, uploads, and caches in `data/` next to the EXE. The installer build stores them in Electron's Windows user-data directory. Both variants bind the local service to `127.0.0.1` only.
+便携版把 SQLite、上传文件和缓存放在 EXE 同目录的 `data/`；安装版把这些数据放在 Electron 的 Windows 用户数据目录。两种版本都只在本机 `127.0.0.1` 启动服务。
 
-After a GitHub push, `.github/workflows/desktop-release.yml` builds both EXEs and uploads them to the Actions run. A normal push to `master` automatically updates the downloadable `CardLoom Translate Nightly` prerelease. Pushing a `v`-prefixed tag (for example, `v0.1.0`) creates a separate formal GitHub Release with the installer assets.
+推送到 GitHub 后，`.github/workflows/desktop-release.yml` 会自动编译这两种 EXE，并将构建产物上传到 Actions 运行记录。推送到 `master` 的普通提交会自动更新一个可下载的 `CardLoom Translate Nightly` 预发布版本；推送 `v` 开头的标签（例如 `v0.1.0`）时，会创建独立的正式 GitHub Release 并附加安装包。
 
-The current Actions artifacts are unsigned because no Windows code-signing certificate secret is configured. Windows may show an “Unknown publisher” warning on first launch; this does not prevent the application from running.
+当前 Actions 产物未配置 Windows 代码签名证书，首次运行可能显示“未知发布者”；这不影响程序启动。后续配置证书 Secret 后再开启签名即可。
 
-## Configuration
+Linux 临时改端口：
 
-Deployment settings live in `.env`. The API base URL, model, API key, languages, concurrency, batch sizes, and image settings can only be configured from **Model Settings** in the UI. `TRANSLATION_*` and `IMAGE_EDIT_*` environment variables are not supported, and no model settings are written from `.env` into SQLite. Settings saved from the UI are stored in local SQLite. API keys are read by the backend and must not be committed to Git.
+```bash
+WORKBENCH_HOST=127.0.0.1 WORKBENCH_PORT=18880 npm start
+```
 
-### Recommended Initial Settings
+Windows PowerShell 临时改端口：
 
-The following values were read from the current SQLite configuration as a reference for the UI. The API key is shown only as configured/not configured. Enter these values in **Model Settings**, not in `.env`:
+```powershell
+$env:WORKBENCH_HOST = '127.0.0.1'
+$env:WORKBENCH_PORT = '18880'
+npm start
+```
 
-| UI setting | Current reference |
+## 配置参考
+
+端口、数据目录等部署参数放在仓库根目录的 `.env` 里；API Base URL、模型、API Key、语言、并发、批次和图片设置只能从页面左侧底部的“模型设置”完成。`.env` 只用于部署参数，不接受 `TRANSLATION_*` 或 `IMAGE_EDIT_*` 配置，也不会把任何模型设置写入 SQLite。页面保存的模型配置会写入本地 SQLite；API Key 仅由后端读取，别把它写进前端代码，也不要提交到 Git。
+
+### 初始建议配置
+
+以下是从当前 SQLite 配置读取的页面设置参考值；API Key 只显示是否已配置，不显示密钥内容。新环境请在页面“模型设置”中填写，不要写入 `.env`：
+
+| 页面设置 | 当前参考值 |
 | --- | --- |
-| API base URL | `https://opencode.ai/zen/go/v1` |
-| API key | Configured (not displayed) |
-| Model | `deepseek-v4-flash` |
-| Source language | `auto` |
-| Fallback language | `en` |
-| Target language | `zh-CN` |
-| Concurrency | `400` |
-| Items per batch | `40` |
-| Characters per batch | `600000` |
-| Image-editing API, key, and model | Not configured |
+| API Base URL | `https://opencode.ai/zen/go/v1` |
+| API Key | 已配置（不展示） |
+| 模型 | `deepseek-v4-flash` |
+| 源语言 | `auto` |
+| 备用语言 | `en` |
+| 目标语言 | `zh-CN` |
+| 并发数 | `400` |
+| 每批段落数 | `40` |
+| 每批字符数 | `600000` |
+| 图片编辑 API、Key、模型 | 未配置 |
 
-| Variable | Purpose | Default |
+| 变量 | 作用 | 默认值 |
 | --- | --- | --- |
-| `WORKBENCH_HOST` | Local Node.js bind address | `127.0.0.1` |
-| `WORKBENCH_PORT` | Internal application port | `8787` |
-| `WORKBENCH_BIND_PORT` | Docker host port | `8787` |
-| `WORKBENCH_UPLOAD_LIMIT_MB` | Per-file upload limit; `0` means no extra limit | `0` |
-| `WORKBENCH_DB_WORKERS` | SQLite worker count | `3` |
+| `WORKBENCH_HOST` | 本地 Node.js 监听地址 | `127.0.0.1` |
+| `WORKBENCH_PORT` | 应用内部监听端口 | `8787` |
+| `WORKBENCH_BIND_PORT` | Docker 宿主机端口 | `8787` |
+| `WORKBENCH_UPLOAD_LIMIT_MB` | 单个上传大小；`0` 表示不额外限制 | `0` |
+| `WORKBENCH_DB_WORKERS` | SQLite Worker 数量 | `3` |
 
-Higher concurrency and larger batches increase memory use, model cost, and rate-limit risk. The table above records the current configuration as a reference; it is not a universal recommendation for every card or provider.
+模型设置里的并发和批次越大，内存占用、接口费用和限流风险越高；上表仅记录当前配置参考，不代表适合所有卡片或模型服务。
 
-## Data and Security
+## 数据与安全
 
-- Local Node.js stores SQLite data, uploads, drafts, and caches under `data/`; Docker uses named Compose volumes.
-- `.env`, SQLite files, volumes, logs, backups, and imported cards may contain secrets or private content. Do not commit them.
-- There is no login system. The default loopback binding is intended for local single-user use.
-- Back up important projects before upgrades, deployment changes, bulk export, or cleanup. `docker compose down -v` removes Compose volumes.
-- Recheck Lua, regex, protocols, lorebook triggers, and asset references before exporting an unfamiliar card.
+- 本地 Node.js 默认把 SQLite、上传卡片、草稿和缓存放在 `data/`；Docker 使用 Compose 命名卷。两种方式默认不是同一份数据，切换时看不到另一边的项目是正常的。
+- `.env`、SQLite、数据卷、日志、备份和导入卡片里都可能有密钥或私人内容，不要把它们提交到 GitHub。
+- 当前没有登录功能，默认只适合本机使用。请保持 `127.0.0.1` 绑定；如果确实要远程访问，需要自己在可信反向代理后加认证、TLS 和访问控制。
+- 升级、切换部署方式、批量导出或清理数据前，先备份重要项目。尤其注意：`docker compose down -v` 会删除 Compose 数据卷。
+- 陌生卡片导出前，最好再检查一遍 Lua、正则、协议、世界书触发词和资源引用。工作台的保护规则是辅助，不替代人工确认。
 
-## Contributing
+## 贡献
 
-Issues with a redacted log and a minimal reproduction are especially useful. Before submitting code:
+如果你遇到格式兼容、解析或翻译保护问题，欢迎提 Issue；能附上脱敏后的日志和最小复现样例会更容易定位。准备提交代码前，请：
 
-1. Keep model keys, imported cards, SQLite data, backups, and logs out of commits.
-2. Add regression tests for parser, protection, export, or scheduler changes.
-3. Run `npm test` and `npm run build`.
-4. Follow the repository rules in [AGENTS.md](./AGENTS.md).
+1. 保持模型 Key、导入卡片、SQLite、备份和日志不进入提交。
+2. 为解析、保护规则、导出或调度逻辑补充相应回归测试。
+3. 运行 `npm test` 与 `npm run build`。
+4. 遵循 [AGENTS.md](./AGENTS.md) 中的代码边界和验证约定。
 
-## License
+## 许可证
 
-This project is released under the [GNU GPL v3.0 or later](./LICENSE). Copying, modifying, and redistributing the project must comply with the license and its corresponding-source requirements.
+本项目采用 [GNU GPL v3.0 或更高版本](./LICENSE) 发布。复制、修改和再分发本项目时，请遵守许可证及其源码提供要求。
