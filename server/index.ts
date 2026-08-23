@@ -61,6 +61,7 @@ import {
 } from './application/review-metadata.js';
 import { registerSessionToolRoutes } from './routes/session-tools.js';
 import { registerSystemRoutes } from './routes/system.js';
+import { readStoredFile, readStoredFileRange, storeFile, projectStoragePath, imageExtension, removeProjectStorage, removeStoredFile } from './storage.js';
 import {
   isUploadTooLargeError,
   uploadLimitBytes,
@@ -218,7 +219,8 @@ app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('
 app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/overview', async (request, reply) => {
   const row = await db.prepare(`
     SELECT source_format AS sourceFormat, source_filename AS sourceFilename,
-      source_metadata_keys AS sourceMetadataKeys, length(source_blob) AS sourceBytes,
+      source_metadata_keys AS sourceMetadataKeys,
+      COALESCE(source_storage_bytes, length(source_blob)) AS sourceBytes,
       original_json AS originalJson, original_module_json AS originalModuleJson
     FROM projects WHERE id = ?
   `).get(request.params.projectId) as {
@@ -257,17 +259,18 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/overview', 
 
 app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/cover', async (request, reply) => {
   const row = await db.prepare(`
-    SELECT source_format AS sourceFormat, source_blob AS sourceBlob
+    SELECT source_format AS sourceFormat, source_blob AS sourceBlob, source_storage_path AS sourceStoragePath
     FROM projects WHERE id = ?
-  `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null } | undefined;
+  `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceStoragePath?: string | null } | undefined;
   if (!row) return reply.code(404).send({ error: '项目不存在。' });
-  if (row.sourceFormat !== 'png' || !row.sourceBlob) {
+  const sourceBlob = row.sourceBlob || (row.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null);
+  if (row.sourceFormat !== 'png' || !sourceBlob) {
     return reply.code(404).send({ error: '当前项目没有可直接显示的 PNG 封面。' });
   }
   return reply
     .header('Content-Type', 'image/png')
     .header('Cache-Control', 'private, max-age=3600')
-    .send(row.sourceBlob);
+    .send(sourceBlob);
 });
 
 app.get<{
@@ -300,13 +303,15 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/resources',
   const row = await db.prepare(`
     SELECT source_format AS sourceFormat, source_filename AS sourceFilename,
       CASE WHEN source_format = 'risum' THEN NULL ELSE source_blob END AS sourceBlob,
-      length(source_blob) AS sourceBytes,
+      source_storage_path AS sourceStoragePath,
+      COALESCE(source_storage_bytes, length(source_blob)) AS sourceBytes,
       original_json AS originalJson, original_module_json AS originalModuleJson
     FROM projects WHERE id = ?
   `).get(request.params.projectId) as {
     sourceFormat?: string;
     sourceFilename?: string | null;
     sourceBlob?: Uint8Array | null;
+    sourceStoragePath?: string | null;
     sourceBytes?: number | null;
     originalJson?: string;
     originalModuleJson?: string | null;
@@ -316,8 +321,9 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/resources',
     const card = JSON.parse(row.originalJson || '{}') as Record<string, unknown>;
     const module = row.originalModuleJson ? JSON.parse(row.originalModuleJson) as Record<string, unknown> : null;
     let inspection;
-    if (row.sourceFormat === 'charx' && row.sourceBlob) {
-      inspection = inspectCharxResources(row.sourceBlob, card, module, row.sourceFilename ?? null);
+    const sourceBlob = row.sourceBlob || (row.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null);
+    if (row.sourceFormat === 'charx' && sourceBlob) {
+      inspection = inspectCharxResources(sourceBlob, card, module, row.sourceFilename ?? null);
     } else if (row.sourceFormat === 'risum' && module) {
       inspection = await inspectRisuModuleResourcesStreaming(
         module,
@@ -391,9 +397,10 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/
   const row = await db.prepare(`
     SELECT source_format AS sourceFormat,
       CASE WHEN source_format = 'risum' THEN NULL ELSE source_blob END AS sourceBlob,
-      length(source_blob) AS sourceBytes, target_language AS targetLanguage
+      source_storage_path AS sourceStoragePath,
+      COALESCE(source_storage_bytes, length(source_blob)) AS sourceBytes, target_language AS targetLanguage
     FROM projects WHERE id = ?
-  `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceBytes?: number; targetLanguage?: string } | undefined;
+  `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceStoragePath?: string | null; sourceBytes?: number; targetLanguage?: string } | undefined;
   if (!row) return reply.code(404).send({ error: '项目不存在。' });
   if (!row.sourceFormat || (!row.sourceBlob && !row.sourceBytes)) return reply.code(409).send({ error: '当前项目没有保存原始资源。' });
   try {
@@ -405,12 +412,19 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/
     const result = await editImageText(bytes, mimeType, targetLanguage, imageSettings);
     const prompt = `仅将画面文字替换为 ${targetLanguage}，保持其他视觉内容不变。`;
     const timestamp = now();
+    const storedImage = await storeFile(
+      projectStoragePath(request.params.projectId, 'image', imageExtension(result.mimeType), resourcePath),
+      result.bytes,
+    );
     await db.prepare(`
-      INSERT INTO resource_image_candidates(id, project_id, resource_path, mime_type, image_blob, prompt, model, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-      ON CONFLICT(project_id, resource_path) DO UPDATE SET mime_type = excluded.mime_type, image_blob = excluded.image_blob,
+      INSERT INTO resource_image_candidates(
+        id, project_id, resource_path, mime_type, image_blob, storage_path, storage_bytes, storage_sha256,
+        prompt, model, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, zeroblob(0), ?, ?, ?, ?, ?, 'draft', ?, ?)
+      ON CONFLICT(project_id, resource_path) DO UPDATE SET mime_type = excluded.mime_type, image_blob = zeroblob(0),
+        storage_path = excluded.storage_path, storage_bytes = excluded.storage_bytes, storage_sha256 = excluded.storage_sha256,
         prompt = excluded.prompt, model = excluded.model, status = 'draft', updated_at = excluded.updated_at
-    `).run(id(), request.params.projectId, resourcePath, result.mimeType, result.bytes, prompt, imageSettings.model, timestamp, timestamp);
+    `).run(id(), request.params.projectId, resourcePath, result.mimeType, storedImage.path, storedImage.bytes, storedImage.sha256, prompt, imageSettings.model, timestamp, timestamp);
     return { path: resourcePath, mimeType: result.mimeType, model: imageSettings.model, prompt, status: 'draft', updatedAt: timestamp };
   } catch (error) {
     return reply.code(422).send({ error: error instanceof Error ? error.message : String(error) });
@@ -432,11 +446,12 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/resources
 app.get<{ Params: { projectId: string }; Querystring: { path?: string } }>('/api/projects/:projectId/resources/image-edit/file', async (request, reply) => {
   const resourcePath = text(request.query.path);
   const row = await db.prepare(`
-    SELECT mime_type AS mimeType, image_blob AS imageBlob FROM resource_image_candidates
+    SELECT mime_type AS mimeType, image_blob AS imageBlob, storage_path AS storagePath FROM resource_image_candidates
     WHERE project_id = ? AND resource_path = ?
-  `).get(request.params.projectId, resourcePath) as { mimeType?: string; imageBlob?: Uint8Array } | undefined;
-  if (!row?.imageBlob) return reply.code(404).send({ error: 'AI 图片替换稿不存在。' });
-  return reply.header('Content-Type', row.mimeType || 'image/png').send(Buffer.from(row.imageBlob));
+  `).get(request.params.projectId, resourcePath) as { mimeType?: string; imageBlob?: Uint8Array | null; storagePath?: string | null } | undefined;
+  const imageBlob = row?.imageBlob || (row?.storagePath ? await readStoredFile(row.storagePath) : null);
+  if (!imageBlob) return reply.code(404).send({ error: 'AI 图片替换稿不存在。' });
+  return reply.header('Content-Type', row?.mimeType || 'image/png').send(Buffer.from(imageBlob));
 });
 
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/ocr', async (request, reply) => {
@@ -447,9 +462,10 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/
   const row = await db.prepare(`
     SELECT source_format AS sourceFormat,
       CASE WHEN source_format = 'risum' THEN NULL ELSE source_blob END AS sourceBlob,
-      length(source_blob) AS sourceBytes
+      source_storage_path AS sourceStoragePath,
+      COALESCE(source_storage_bytes, length(source_blob)) AS sourceBytes
     FROM projects WHERE id = ?
-  `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceBytes?: number } | undefined;
+  `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceStoragePath?: string | null; sourceBytes?: number } | undefined;
   if (!row) return reply.code(404).send({ error: '项目不存在。' });
   if (!row.sourceFormat || (!row.sourceBlob && !row.sourceBytes)) return reply.code(409).send({ error: '当前项目没有保存原始资源。' });
   try {
@@ -502,8 +518,9 @@ app.get<{ Params: { projectId: string }; Querystring: { path?: string; name?: st
     if (!entryPath) return reply.code(400).send({ error: '缺少资源路径。' });
     const row = await db.prepare(`SELECT source_format AS sourceFormat,
       CASE WHEN source_format = 'risum' THEN NULL ELSE source_blob END AS sourceBlob,
-      length(source_blob) AS sourceBytes FROM projects WHERE id = ?`)
-      .get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceBytes?: number } | undefined;
+      source_storage_path AS sourceStoragePath,
+      COALESCE(source_storage_bytes, length(source_blob)) AS sourceBytes FROM projects WHERE id = ?`)
+      .get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceStoragePath?: string | null; sourceBytes?: number } | undefined;
     if (!row) return reply.code(404).send({ error: '项目不存在。' });
     if (!row.sourceBlob && !row.sourceBytes) return reply.code(404).send({ error: '当前项目没有保存原始资源。' });
     try {
@@ -588,6 +605,7 @@ app.delete<{ Params: { projectId: string } }>('/api/projects/:projectId', async 
   if (Number(active.count) > 0) return reply.code(409).send({ error: '项目仍有运行中的任务。' });
   const result = await db.prepare('DELETE FROM projects WHERE id = ?').run(request.params.projectId);
   if (!result.changes) return reply.code(404).send({ error: '项目不存在。' });
+  await removeProjectStorage(request.params.projectId);
   controlReferenceCache.delete(request.params.projectId);
   return { ok: true };
 });
@@ -626,13 +644,15 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
   const body = asRecord(request.body);
   const scope = normalizeScope(text(body.scope));
   const row = await db.prepare(`
-    SELECT original_json, original_module_json, source_format, source_blob
+    SELECT original_json, original_module_json, source_format, source_blob,
+      source_storage_path AS sourceStoragePath
     FROM projects WHERE id = ?
   `).get(request.params.projectId) as {
     original_json: string;
     original_module_json: string | null;
     source_format: string;
     source_blob: Uint8Array | null;
+    sourceStoragePath: string | null;
   } | undefined;
   if (!row) return reply.code(404).send({ error: '项目不存在。' });
   const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
@@ -643,8 +663,9 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
   let module = row.original_module_json
     ? JSON.parse(row.original_module_json) as Record<string, unknown>
     : null;
-  if (!module && row.source_format === 'charx' && row.source_blob) {
-    module = parseCharx(row.source_blob).module;
+  const sourceBlob = row.source_blob || (row.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null);
+  if (!module && row.source_format === 'charx' && sourceBlob) {
+    module = parseCharx(sourceBlob).module;
     if (module) {
       const serialized = JSON.stringify(module);
       await db.prepare('UPDATE projects SET original_module_json = ?, draft_module_json = ? WHERE id = ?')
@@ -665,8 +686,8 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
       ? []
       : scanCard(card, scope, controlLiterals, protocolRules, publicSettings().sourceLanguage)),
     ...moduleSegments,
-    ...(row.source_format === 'charx' && row.source_blob
-      ? scanCharxResourceJson(row.source_blob, scope === 'all')
+    ...(row.source_format === 'charx' && sourceBlob
+      ? scanCharxResourceJson(sourceBlob, scope === 'all')
       : []),
   ];
   const replacement = await scanService.replaceScannedSegments(request.params.projectId, scope, segments);
@@ -746,6 +767,8 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/clear-resu
   if (!segmentIds.length) return { ok: true, cleared: 0 };
 
   const timestamp = now();
+  const draftRow = await db.prepare('SELECT draft_storage_path AS draftStoragePath FROM projects WHERE id = ?')
+    .get(request.params.projectId) as { draftStoragePath?: string | null } | undefined;
   await db.transaction(async () => {
     await translationJobs.clearTranslationResults(segmentIds, timestamp);
     await db.prepare(`
@@ -753,11 +776,15 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/clear-resu
         draft_json = original_json,
         draft_module_json = original_module_json,
         draft_source_blob = NULL,
+        draft_storage_path = NULL,
+        draft_storage_bytes = NULL,
+        draft_storage_sha256 = NULL,
         status = 'scanned',
         updated_at = ?
       WHERE id = ?
     `).run(timestamp, request.params.projectId);
   });
+  await removeStoredFile(draftRow?.draftStoragePath);
   return { ok: true, cleared: segmentIds.length };
 });
 
@@ -1076,21 +1103,24 @@ async function protocolSourceByProject(projectId: string): Promise<{
 } | null> {
   const row = await db.prepare(`
     SELECT original_json AS originalJson, original_module_json AS originalModuleJson,
-      source_format AS sourceFormat, source_blob AS sourceBlob
+      source_format AS sourceFormat, source_blob AS sourceBlob,
+      source_storage_path AS sourceStoragePath
     FROM projects WHERE id = ?
   `).get(projectId) as {
     originalJson?: string;
     originalModuleJson?: string | null;
     sourceFormat?: string;
     sourceBlob?: Uint8Array | null;
+    sourceStoragePath?: string | null;
   } | undefined;
   if (!row?.originalJson) return null;
   const card = JSON.parse(row.originalJson) as Record<string, unknown>;
   let module = row.originalModuleJson
     ? JSON.parse(row.originalModuleJson) as Record<string, unknown>
     : null;
-  if (!module && row.sourceFormat === 'charx' && row.sourceBlob) {
-    module = parseCharx(row.sourceBlob).module;
+  const sourceBlob = row.sourceBlob || (row.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null);
+  if (!module && row.sourceFormat === 'charx' && sourceBlob) {
+    module = parseCharx(sourceBlob).module;
   }
   return { card, module };
 }
@@ -1120,11 +1150,15 @@ function projectRisuSourceReader(projectId: string, length: number): RisuModuleS
       }
       const readOffset = Math.floor(offset / windowSize) * windowSize;
       const readLength = Math.min(length - readOffset, Math.max(windowSize, offset + byteLength - readOffset));
-      const row = await db.prepare('SELECT substr(source_blob, ?, ?) AS chunk FROM projects WHERE id = ?')
-        .get(readOffset + 1, readLength, projectId) as { chunk?: Uint8Array | null } | undefined;
-      if (!row?.chunk) throw new Error('当前项目没有保存原始资源。');
+      const row = await db.prepare('SELECT source_storage_path AS sourceStoragePath FROM projects WHERE id = ?')
+        .get(projectId) as { sourceStoragePath?: string | null } | undefined;
+      const chunk = row?.sourceStoragePath
+        ? await readStoredFileRange(row.sourceStoragePath, readOffset, readLength)
+        : (await db.prepare('SELECT substr(source_blob, ?, ?) AS chunk FROM projects WHERE id = ?')
+          .get(readOffset + 1, readLength, projectId) as { chunk?: Uint8Array | null } | undefined)?.chunk;
+      if (!chunk) throw new Error('当前项目没有保存原始资源。');
       cachedOffset = readOffset;
-      cachedBytes = row.chunk;
+      cachedBytes = chunk;
       return cachedBytes.subarray(offset - cachedOffset, offset - cachedOffset + byteLength);
     },
   };
@@ -1138,8 +1172,9 @@ async function projectResourceBytes(
   resourcePath: string,
 ): Promise<Buffer> {
   if (sourceFormat !== 'risum') {
-    if (!sourceBlob) throw new Error('当前项目没有保存原始资源。');
-    return readResourceBytes(sourceFormat, sourceBlob, resourcePath);
+    const source = sourceBlob || (await projectStoragePathForRead(projectId));
+    if (!source) throw new Error('当前项目没有保存原始资源。');
+    return readResourceBytes(sourceFormat, source, resourcePath);
   }
   const match = resourcePath.match(/^module-assets\/(\d+)\.bin$/u);
   if (!match) throw new Error('RISUM 资源路径无效。');
@@ -1147,6 +1182,12 @@ async function projectResourceBytes(
     projectRisuSourceReader(projectId, Number(sourceBytes) || 0),
     Number(match[1]) - 1,
   );
+}
+
+async function projectStoragePathForRead(projectId: string): Promise<Buffer | null> {
+  const row = await db.prepare('SELECT source_storage_path AS sourceStoragePath FROM projects WHERE id = ?')
+    .get(projectId) as { sourceStoragePath?: string | null } | undefined;
+  return row?.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null;
 }
 
 async function controlReferencesForProject(projectId: string): Promise<RisuControlReference[]> {

@@ -15,6 +15,7 @@ import { applyApprovedResourceJson, replaceResourceBytes } from '../domain/resou
 import { PROJECT_TITLE_COLUMNS } from '../repositories/project-queries.js';
 import { safeArray } from './review-metadata.js';
 import { formatMissingProtectionDetails, type ApprovedProtectionIssue } from './review-service.js';
+import { fileExtension, projectStoragePath, readStoredFile, storeFile } from '../storage.js';
 
 export interface ReviewValidationService {
   projectLanguageBehaviorIssue(projectId: string): Promise<string | null>;
@@ -52,13 +53,19 @@ export function createExportService({ database, clock, targetLanguage, review }:
     ignoredLuaSegments: number;
   }> {
     const project = await database.prepare(`
-      SELECT original_json, original_module_json, source_format AS sourceFormat, source_blob
+      SELECT original_json, original_module_json, source_format AS sourceFormat, source_filename AS sourceFilename,
+        source_blob, source_storage_path AS sourceStoragePath,
+        draft_source_blob AS draftSourceBlob, draft_storage_path AS draftStoragePath
       FROM projects WHERE id = ?
     `).get(projectId) as {
       original_json: string;
       original_module_json: string | null;
       sourceFormat: string;
+      sourceFilename: string | null;
       source_blob: Uint8Array | null;
+      sourceStoragePath: string | null;
+      draftSourceBlob: Uint8Array | null;
+      draftStoragePath: string | null;
     } | undefined;
     if (!project) throw new ProjectWorkflowError('项目不存在。', 404);
 
@@ -86,13 +93,11 @@ export function createExportService({ database, clock, targetLanguage, review }:
     const sourceChanges = approvedResourceSegments.length > 0 || confirmedReplacements.length > 0;
     let existingDraftSourceBlob: Uint8Array | null = null;
     if (sourceChanges) {
-      const sourceRow = await database.prepare<{ draftSourceBlob: Uint8Array | null }>(
-        'SELECT draft_source_blob AS draftSourceBlob FROM projects WHERE id = ?',
-      ).get(projectId);
-      existingDraftSourceBlob = sourceRow?.draftSourceBlob || null;
+      existingDraftSourceBlob = project.draftSourceBlob || (project.draftStoragePath ? await readStoredFile(project.draftStoragePath) : null);
     }
+    const originalSourceBlob = project.source_blob || (project.sourceStoragePath ? await readStoredFile(project.sourceStoragePath) : null);
     let draftSourceBlob: Uint8Array | null = sourceChanges
-      ? (existingDraftSourceBlob || project.source_blob)
+      ? (existingDraftSourceBlob || originalSourceBlob)
       : null;
     if (sourceChanges && draftSourceBlob) {
       if (approvedResourceSegments.length > 0) {
@@ -119,15 +124,24 @@ export function createExportService({ database, clock, targetLanguage, review }:
       : appliedModule;
     assertRisuIntegrity(JSON.parse(project.original_json) as Record<string, unknown>, draft, originalModule, draftModule, false);
 
+    let storedDraft: Awaited<ReturnType<typeof storeFile>> | null = null;
+    if (sourceChanges && draftSourceBlob) {
+      storedDraft = await storeFile(
+        projectStoragePath(projectId, 'draft', fileExtension(project.sourceFilename, project.sourceFormat)),
+        draftSourceBlob,
+      );
+    }
     if (sourceChanges) {
       await database.prepare(`
         UPDATE projects
-        SET draft_json = ?, draft_module_json = ?, draft_source_blob = ?, status = 'ready', updated_at = ?
+        SET draft_json = ?, draft_module_json = ?, draft_source_blob = NULL,
+          draft_storage_path = ?, draft_storage_bytes = ?, draft_storage_sha256 = ?,
+          status = 'ready', updated_at = ?
         WHERE id = ?
       `).run(
         JSON.stringify(draft),
         draftModule ? JSON.stringify(draftModule) : null,
-        draftSourceBlob ? Buffer.from(draftSourceBlob) : null,
+        storedDraft?.path || null, storedDraft?.bytes || null, storedDraft?.sha256 || null,
         clock(),
         projectId,
       );
@@ -155,22 +169,27 @@ export function createExportService({ database, clock, targetLanguage, review }:
 
   async function exportProject(projectId: string): Promise<ExportPayload> {
     const project = await database.prepare(`
-      SELECT p.name, p.source_format AS sourceFormat, p.source_blob AS sourceBlob,
+      SELECT p.name, p.source_format AS sourceFormat, p.source_filename AS sourceFilename, p.source_blob AS sourceBlob,
+        p.source_storage_path AS sourceStoragePath, p.source_storage_bytes AS sourceBytes,
         source_metadata_keys AS sourceMetadataKeys, original_json AS originalJson, draft_json AS draftJson,
         original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
-        draft_source_blob AS draftSourceBlob,
+        draft_source_blob AS draftSourceBlob, p.draft_storage_path AS draftStoragePath,
         ${PROJECT_TITLE_COLUMNS}
       FROM projects p WHERE p.id = ?
     `).get(projectId) as {
       name?: string;
       sourceFormat?: string;
+      sourceFilename?: string | null;
       sourceBlob?: Uint8Array;
+      sourceStoragePath?: string | null;
+      sourceBytes?: number | null;
       sourceMetadataKeys?: string;
       originalJson?: string;
       draftJson?: string;
       originalModuleJson?: string | null;
       draftModuleJson?: string | null;
       draftSourceBlob?: Uint8Array | null;
+      draftStoragePath?: string | null;
       originalName?: string | null;
       translatedName?: string | null;
     } | undefined;
@@ -207,24 +226,26 @@ export function createExportService({ database, clock, targetLanguage, review }:
       true,
     );
 
-    if (project.sourceFormat === 'png' && project.sourceBlob) {
+    const sourceBlob = project.sourceBlob || (project.sourceStoragePath ? await readStoredFile(project.sourceStoragePath) : null);
+    const draftSourceBlob = project.draftSourceBlob || (project.draftStoragePath ? await readStoredFile(project.draftStoragePath) : null);
+    if (project.sourceFormat === 'png' && sourceBlob) {
       const metadataKeys = safeArray(project.sourceMetadataKeys).map(String);
       return {
         contentType: 'image/png',
         filename: `${exportName}.${exportLanguage}.png`,
-        body: writeCardPng(project.sourceBlob, draft, metadataKeys),
+        body: writeCardPng(sourceBlob, draft, metadataKeys),
       };
     }
-    if (project.sourceFormat === 'charx' && project.sourceBlob) {
-      const resourceSource = await applyImageReplacements('charx', projectId, project.draftSourceBlob || project.sourceBlob);
+    if (project.sourceFormat === 'charx' && sourceBlob) {
+      const resourceSource = await applyImageReplacements('charx', projectId, draftSourceBlob || sourceBlob);
       return {
         contentType: 'application/zip',
         filename: `${exportName}.${exportLanguage}.charx`,
         body: writeCardCharx(resourceSource, draft, exportModule),
       };
     }
-    if (project.sourceFormat === 'risum' && project.sourceBlob && exportModule) {
-      const resourceSource = await applyImageReplacements('risum', projectId, project.draftSourceBlob || project.sourceBlob);
+    if (project.sourceFormat === 'risum' && sourceBlob && exportModule) {
+      const resourceSource = await applyImageReplacements('risum', projectId, draftSourceBlob || sourceBlob);
       return {
         contentType: 'application/octet-stream',
         filename: `${exportName}.${exportLanguage}.risum`,
@@ -284,10 +305,15 @@ export function createExportService({ database, clock, targetLanguage, review }:
   }
 
   async function confirmedImageReplacements(projectId: string): Promise<Array<{ resourcePath: string; imageBlob: Uint8Array }>> {
-    return await database.prepare(`
-      SELECT resource_path AS resourcePath, image_blob AS imageBlob FROM resource_image_candidates
+    const rows = await database.prepare(`
+      SELECT resource_path AS resourcePath, image_blob AS imageBlob, storage_path AS storagePath
+      FROM resource_image_candidates
       WHERE project_id = ? AND status = 'confirmed' ORDER BY resource_path
-    `).all(projectId) as Array<{ resourcePath: string; imageBlob: Uint8Array }>;
+    `).all(projectId) as Array<{ resourcePath: string; imageBlob: Uint8Array | null; storagePath: string | null }>;
+    return await Promise.all(rows.map(async (row) => ({
+      resourcePath: row.resourcePath,
+      imageBlob: row.imageBlob || (row.storagePath ? await readStoredFile(row.storagePath) : (() => { throw new Error('图片替换稿文件不存在。'); })()),
+    })));
   }
 
   async function applyImageReplacements(sourceFormat: string, projectId: string, source: Uint8Array): Promise<Uint8Array> {

@@ -10,6 +10,7 @@ export const WORKBENCH_DEFAULTS = {
   uploadLimitMb: 0,
   databaseWorkers: 3,
   dataDirectory: 'data',
+  storageDirectory: 'storage',
   databaseFile: 'workbench.sqlite',
   unpackSessionsDirectory: 'unpack-sessions',
   tavernCardSessionsDirectory: 'tavern-card-sessions',
@@ -77,6 +78,10 @@ export const workbenchConfig = Object.freeze({
   databaseWorkers: resolveDatabaseWorkerCount(environment('WORKBENCH_DB_WORKERS')),
   paths: Object.freeze({
     dataRoot,
+    storage: resolveConfiguredDirectory(
+      'WORKBENCH_STORAGE_DIR',
+      path.join(dataRoot, WORKBENCH_DEFAULTS.storageDirectory),
+    ),
     database: databasePath,
     unpackSessions: resolveConfiguredDirectory(
       'WORKBENCH_UNPACK_SESSIONS_DIR',

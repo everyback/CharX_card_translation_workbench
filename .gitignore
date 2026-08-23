@@ -4,6 +4,7 @@ dist-server/
 dist-electron/
 release/
 data/
+storage/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

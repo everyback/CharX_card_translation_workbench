@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { AsyncDatabase } from './async-db.js';
 import { workbenchConfig } from './config.js';
+import { migrateLegacyStorage } from './storage-migration.js';
 
 mkdirSync(workbenchConfig.paths.dataRoot, { recursive: true });
 
@@ -38,6 +39,12 @@ await db.exec(`
     draft_module_json TEXT,
     source_filename TEXT,
     source_blob BLOB,
+    source_storage_path TEXT,
+    source_storage_bytes INTEGER,
+    source_storage_sha256 TEXT,
+    draft_storage_path TEXT,
+    draft_storage_bytes INTEGER,
+    draft_storage_sha256 TEXT,
     source_metadata_keys TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -187,6 +194,9 @@ await db.exec(`
     resource_path TEXT NOT NULL,
     mime_type TEXT NOT NULL,
     image_blob BLOB NOT NULL,
+    storage_path TEXT,
+    storage_bytes INTEGER,
+    storage_sha256 TEXT,
     prompt TEXT NOT NULL DEFAULT '',
     model TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'draft',
@@ -205,6 +215,15 @@ await addColumnIfMissing('projects', 'source_metadata_keys', "TEXT NOT NULL DEFA
 await addColumnIfMissing('projects', 'original_module_json', 'TEXT');
 await addColumnIfMissing('projects', 'draft_module_json', 'TEXT');
 await addColumnIfMissing('projects', 'draft_source_blob', 'BLOB');
+await addColumnIfMissing('projects', 'source_storage_path', 'TEXT');
+await addColumnIfMissing('projects', 'source_storage_bytes', 'INTEGER');
+await addColumnIfMissing('projects', 'source_storage_sha256', 'TEXT');
+await addColumnIfMissing('projects', 'draft_storage_path', 'TEXT');
+await addColumnIfMissing('projects', 'draft_storage_bytes', 'INTEGER');
+await addColumnIfMissing('projects', 'draft_storage_sha256', 'TEXT');
+await addColumnIfMissing('resource_image_candidates', 'storage_path', 'TEXT');
+await addColumnIfMissing('resource_image_candidates', 'storage_bytes', 'INTEGER');
+await addColumnIfMissing('resource_image_candidates', 'storage_sha256', 'TEXT');
 await addColumnIfMissing('segments', 'protocol_delimiter', 'TEXT');
 await addColumnIfMissing('projects', 'language_behavior_mode', "TEXT NOT NULL DEFAULT 'target'");
 
@@ -232,6 +251,10 @@ await db.exec(`
 `);
 
 await db.prepare("UPDATE jobs SET status = 'paused', updated_at = ? WHERE status = 'running'").run(now());
+
+await db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+await migrateLegacyStorage(db);
+await db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
 
 export function id(): string {
   return randomUUID();
