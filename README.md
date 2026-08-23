@@ -117,11 +117,11 @@ The health endpoint should return `ok: true`.
 
 1. Open **Model Settings** and configure the model endpoint, model name, API key, source language, target language, concurrency, and batch size.
 2. Import a CHARX, RISUM, PNG, or JSON file, or drop it onto the page.
-3. Check **Overview** and confirm the detected card, lorebook, script, protocol, and resource counts.
-4. Choose a translation scope. **Translate all visible content** includes card text, lorebooks, Lua prompts, script UI, and visible resource JSON.
-5. Start translation and inspect progress and failures on **Jobs**.
-6. Review machine output against the source. Approve items individually or in batches.
-7. Generate the review draft, then export JSON, PNG, CHARX, or RISUM.
+3. Select **Scan card** or **Scan fields**, then confirm the detected card, lorebook, script, protocol, and resource counts in **Overview**.
+4. Choose a translation scope. **Translate all** includes card text, lorebooks, Lua prompts, script UI, and visible resource JSON.
+5. Start translation and inspect progress, failed batches, and quality notices on **Jobs**.
+6. When translation finishes, use **Approve all** only if the existing translations are ready; otherwise select **Enter review** and compare the source, machine translation, and final text. Bulk approval does not approve untranslated or failed items.
+7. Use **Save** to create the review draft only. Use **Save and export** to save it, check Lua, script references, and card structure, then automatically download JSON, PNG, CHARX, or RISUM when validation passes.
 
 The original import remains available in the project. Machine output is only a draft until it is approved.
 
@@ -129,13 +129,14 @@ PNG and basic JSON currently provide baseline import/export support; CHARX and R
 
 ## Recommended Workflow
 
-1. Configure the model.
-2. Import the original card and confirm that its format and counts are correct.
-3. Scan fields before starting translation.
-4. Start with a conservative concurrency and batch size for large cards.
-5. Review protocol, script, button, Lua, and lorebook-trigger entries first.
-6. Approve only text that is safe to export.
-7. Export and reopen the result in the real client.
+1. Configure the model, then import the original card.
+2. Scan the card or fields and confirm its format and counts in **Overview**.
+3. Choose a translation scope and start with a conservative concurrency and batch size for large cards.
+4. Check failed batches and quality notices on **Jobs** before approving text.
+5. Use **Approve all** only for translations you already trust; otherwise use **Enter review**.
+6. Review protocol, script, button, Lua, and lorebook-trigger entries first.
+7. Use **Save** to keep a review draft, or **Save and export** to validate and download it.
+8. Reopen the result in the real client and verify the card, worldbook triggers, scripts, and resource references.
 
 Do not judge export safety by fluency alone. For unfamiliar protocols, inspect the **Protocols** and **References** views before approving text used by code.
 
