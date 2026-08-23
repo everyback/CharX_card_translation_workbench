@@ -43,7 +43,7 @@ export function AboutView() {
           <div className="about-card-title"><FileCode2 size={18} /><h3>Git 项目说明</h3></div>
           <p>仓库包含前端工作台、后端 API、卡片格式解析器、翻译调度和回归测试。项目主要针对 RisuAI 模块与 CHARX 卡片，相关流程经过较充分测试；PNG、普通 JSON 等酒馆卡格式目前只有基础兼容，测试覆盖不足。新增格式或保护规则应同时补充回归测试。</p>
           <div className="about-links">
-            <span><ExternalLink size={14} />公开仓库地址将在正式发布时补上</span>
+            <a href="https://github.com/everyback/CharX_card_translation_workbench" target="_blank" rel="noreferrer"><ExternalLink size={14} />GitHub 公开仓库</a>
             <span><FileCode2 size={14} />TypeScript + React + Fastify + SQLite</span>
           </div>
         </article>
