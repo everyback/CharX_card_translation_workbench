@@ -12,17 +12,22 @@ import {
   risuTranslationControlFragments,
   scanCard,
   scanRisuModule,
+  validateRisuControlReferences,
   type RisuControlReference,
   type ScopePreset,
 } from './domain/card.js';
 import {
+  findCharxCover,
   isRisuModuleLorebookMirrorPath,
   parseCharx,
 } from './domain/charx.js';
 import { parseCardPng } from './domain/png.js';
 import { inspectProjectOverview } from './domain/tavern-card.js';
 import { parseRisuModule, readRisuModuleAssetFromReader, type RisuModuleSourceReader } from './domain/risum.js';
-import { detectRisuRuntimeRisks } from './domain/risu-qa.js';
+import { detectRisuRuntimeRisks, validateRisuTemplateChanges } from './domain/risu-qa.js';
+import { buildLuaManagementReport } from './domain/lua-management.js';
+import { applyPortraitRouterRepairs } from './domain/portrait-router-repair.js';
+import { validateRisuLuaChanges } from './domain/risu-lua.js';
 import { inspectCharxResources, inspectRisuModuleResourcesStreaming, readResourceBytes, resourceContentType, scanCharxResourceJson } from './domain/resources.js';
 import { recognizeImage, type OcrLanguage } from './domain/ocr.js';
 import { editImageText } from './domain/image-edit.js';
@@ -36,7 +41,7 @@ import {
   updateProtocolAnalysis,
   updateProtocolSchema,
 } from './protocol-service.js';
-import { abortJob, analyzeProtocolSemantics, privateImageSettings, publicSettings, scheduleJob } from './scheduler.js';
+import { abortJob, analyzeProtocolSemantics, privateImageSettings, publicSettings, scheduleJob, segmentRuntimeNames, translateRuntimeAliases } from './scheduler.js';
 import { languageBehaviorDirectiveIssue } from './domain/language-directives.js';
 import { workbenchConfig } from './config.js';
 import { PROJECT_TITLE_COLUMNS } from './repositories/project-queries.js';
@@ -99,6 +104,8 @@ const exportService = createExportService({
   clock: now,
   targetLanguage: () => publicSettings().targetLanguage,
   review: reviewService,
+  segmentRuntimeNames,
+  translateRuntimeAliases,
 });
 
 registerSystemRoutes(app);
@@ -221,6 +228,7 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/overview', 
     SELECT source_format AS sourceFormat, source_filename AS sourceFilename,
       source_metadata_keys AS sourceMetadataKeys,
       COALESCE(source_storage_bytes, length(source_blob)) AS sourceBytes,
+      source_blob AS sourceBlob, source_storage_path AS sourceStoragePath,
       original_json AS originalJson, original_module_json AS originalModuleJson
     FROM projects WHERE id = ?
   `).get(request.params.projectId) as {
@@ -228,6 +236,8 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/overview', 
     sourceFilename?: string | null;
     sourceMetadataKeys?: string;
     sourceBytes?: number | null;
+    sourceBlob?: Uint8Array | null;
+    sourceStoragePath?: string | null;
     originalJson?: string;
     originalModuleJson?: string | null;
   } | undefined;
@@ -238,6 +248,11 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/overview', 
       ? JSON.parse(row.originalModuleJson) as Record<string, unknown>
       : null;
     const sourceFormat = row.sourceFormat || 'json';
+    const sourceBlob = sourceFormat === 'charx'
+      ? (row.sourceBlob && row.sourceBlob.length > 0
+        ? row.sourceBlob
+        : row.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null)
+      : null;
     const inspection = inspectProjectOverview(
       card,
       module,
@@ -249,7 +264,8 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/overview', 
       filename: row.sourceFilename ?? null,
       sourceFormat,
       fileBytes: Number(row.sourceBytes) || inspection.jsonBytes + inspection.moduleJsonBytes,
-      previewAvailable: sourceFormat === 'png' && Number(row.sourceBytes) > 0,
+      previewAvailable: sourceFormat === 'png' && Number(row.sourceBytes) > 0
+        || sourceFormat === 'charx' && Boolean(sourceBlob && findCharxCover(sourceBlob)),
       ...inspection,
     });
   } catch (error) {
@@ -263,9 +279,19 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/cover', asy
     FROM projects WHERE id = ?
   `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceStoragePath?: string | null } | undefined;
   if (!row) return reply.code(404).send({ error: '项目不存在。' });
-  const sourceBlob = row.sourceBlob || (row.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null);
+  const sourceBlob = row.sourceBlob && row.sourceBlob.length > 0
+    ? row.sourceBlob
+    : row.sourceStoragePath ? await readStoredFile(row.sourceStoragePath) : null;
+  if (row.sourceFormat === 'charx' && sourceBlob) {
+    const cover = findCharxCover(sourceBlob);
+    if (cover) {
+      return reply.header('Content-Type', cover.mimeType)
+        .header('Cache-Control', 'private, max-age=3600')
+        .send(cover.bytes);
+    }
+  }
   if (row.sourceFormat !== 'png' || !sourceBlob) {
-    return reply.code(404).send({ error: '当前项目没有可直接显示的 PNG 封面。' });
+    return reply.code(404).send({ error: '当前项目没有可直接显示的封面。' });
   }
   return reply
     .header('Content-Type', 'image/png')
@@ -598,6 +624,134 @@ app.patch<{ Params: { projectId: string; schemaId: string } }>(
     }
   },
 );
+
+app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnostics', async (request, reply) => {
+  const row = await db.prepare(`
+    SELECT status, source_language AS sourceLanguage, target_language AS targetLanguage,
+      original_json AS originalJson, draft_json AS draftJson,
+      original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    FROM projects WHERE id = ?
+  `).get(request.params.projectId) as {
+    status?: string;
+    sourceLanguage?: string;
+    targetLanguage?: string;
+    originalJson?: string;
+    draftJson?: string | null;
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+  } | undefined;
+  if (!row?.originalJson) return reply.code(404).send({ error: '项目不存在或缺少原始卡片数据。' });
+  try {
+    const segments = await db.prepare(`
+      SELECT path_label AS pathLabel, kind, source_text AS sourceText,
+        review_status AS reviewStatus, final_text AS finalText, translated_text AS translatedText
+      FROM segments
+      WHERE project_id = ? AND (kind LIKE 'lua-%' OR kind = 'runtime-message')
+      ORDER BY sort_order, path_label
+    `).all(request.params.projectId) as Array<{
+      pathLabel: string;
+      kind: string;
+      sourceText: string;
+      reviewStatus: string;
+      finalText: string | null;
+      translatedText: string | null;
+    }>;
+    const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
+    const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : null;
+    const originalModule = row.originalModuleJson
+      ? JSON.parse(row.originalModuleJson) as Record<string, unknown>
+      : null;
+    const draftModule = row.draftModuleJson
+      ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
+      : null;
+    return buildLuaManagementReport({
+      originalCard,
+      draftCard,
+      originalModule,
+      draftModule,
+      storedSegments: segments,
+      projectStatus: row.status,
+      targetLanguage: row.targetLanguage,
+    });
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router-repair/preview', async (request, reply) => {
+  const row = await db.prepare(`
+    SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    FROM projects WHERE id = ?
+  `).get(request.params.projectId) as {
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+  } | undefined;
+  if (!row?.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可预览的 Risu Lua 模块。' });
+  try {
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const preview = applyPortraitRouterRepairs(originalModule);
+    return { ok: true, report: preview.report, applied: preview.applied, changes: preview.changes };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router-repair', async (request, reply) => {
+  const row = await db.prepare(`
+    SELECT original_json AS originalJson, draft_json AS draftJson,
+      original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    FROM projects WHERE id = ?
+  `).get(request.params.projectId) as {
+    originalJson?: string;
+    draftJson?: string | null;
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+  } | undefined;
+  if (!row?.originalJson) return reply.code(404).send({ error: '项目不存在或缺少原始卡片数据。' });
+  if (!row.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可修复的 Risu Lua 模块。' });
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再应用路由修复。' });
+
+  try {
+    const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
+    const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : originalCard;
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const draftModule = row.draftModuleJson
+      ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
+      : originalModule;
+    const repairedOriginal = applyPortraitRouterRepairs(originalModule);
+    const repairedDraft = applyPortraitRouterRepairs(draftModule);
+    if (!repairedOriginal.applied.length && !repairedDraft.applied.length) {
+      return { ok: true, applied: [], report: repairedDraft.report };
+    }
+    const syntaxIssues = validateRisuLuaChanges(repairedOriginal.draft, repairedDraft.draft);
+    if (syntaxIssues.length) return reply.code(409).send({ error: `路由修复后的 Lua 语法校验失败：${syntaxIssues[0].pathLabel} ${syntaxIssues[0].message}` });
+    const templateIssues = validateRisuTemplateChanges(repairedOriginal.draft, repairedDraft.draft);
+    if (templateIssues.length) return reply.code(409).send({ error: `路由修复破坏了模板结构：${templateIssues[0].pathLabel} ${templateIssues[0].message}` });
+    const controlIssues = validateRisuControlReferences(originalCard, draftCard, repairedOriginal.draft, repairedDraft.draft);
+    if (controlIssues.length) return reply.code(409).send({ error: `路由修复破坏了控制引用：${controlIssues[0].pathLabel} ${controlIssues[0].message}` });
+
+    await db.prepare(`
+      UPDATE projects
+      SET original_module_json = ?, draft_module_json = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      JSON.stringify(repairedOriginal.draft),
+      JSON.stringify(repairedDraft.draft),
+      now(),
+      request.params.projectId,
+    );
+    return {
+      ok: true,
+      applied: repairedDraft.applied,
+      changes: repairedDraft.changes,
+      report: repairedDraft.report,
+    };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
 
 app.delete<{ Params: { projectId: string } }>('/api/projects/:projectId', async (request, reply) => {
   const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running')")

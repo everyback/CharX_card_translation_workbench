@@ -2,13 +2,16 @@ import { Link2, Search } from 'lucide-react';
 import { RiskBadge } from '../../components/ui';
 import { CATEGORY_LABELS, KIND_LABELS, STATUS_LABELS } from '../../constants';
 import type { Segment } from '../../types';
+import type { SegmentSearchScope } from '../../app/hooks/segments/useSegmentFilters';
 
 export function SegmentsView({
   segments,
   query,
+  searchScope,
   statusFilter,
   kindFilter,
   onQuery,
+  onSearchScope,
   onStatusFilter,
   onKindFilter,
   onToggle,
@@ -16,9 +19,11 @@ export function SegmentsView({
 }: {
   segments: Segment[];
   query: string;
+  searchScope: SegmentSearchScope;
   statusFilter: string;
   kindFilter: string;
   onQuery: (value: string) => void;
+  onSearchScope: (value: SegmentSearchScope) => void;
   onStatusFilter: (value: string) => void;
   onKindFilter: (value: string) => void;
   onToggle: (segment: Segment) => void;
@@ -27,7 +32,13 @@ export function SegmentsView({
   return (
     <section className="table-section">
       <div className="table-toolbar">
-        <div className="search-input"><Search size={15} /><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder="搜索路径或内容" /></div>
+        <div className="search-input"><Search size={15} /><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={searchScope === 'translation' ? '搜索译文' : '搜索字段'} /></div>
+        <select aria-label="搜索范围" value={searchScope} onChange={(event) => onSearchScope(event.target.value as SegmentSearchScope)}>
+          <option value="all">全部内容</option>
+          <option value="translation">仅译文</option>
+          <option value="source">仅原文</option>
+          <option value="path">仅路径</option>
+        </select>
         <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
           <option value="all">全部状态</option>
           <option value="untranslated">未翻译</option>

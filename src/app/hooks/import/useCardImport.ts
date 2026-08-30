@@ -83,6 +83,10 @@ export function useCardImport({
     const onDrop = (event: DragEvent) => {
       if (!hasFiles(event)) return;
       event.preventDefault();
+      if (isImageOrDownloadTarget(event.target)) {
+        resetDrag();
+        return;
+      }
       const files = Array.from(event.dataTransfer?.files ?? []);
       resetDrag();
       if (files.length) void importCards(files);
@@ -103,4 +107,8 @@ export function useCardImport({
   }, [importCards]);
 
   return { draggingFiles, fileInputRef, importCards };
+}
+
+function isImageOrDownloadTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('img, a[download]'));
 }

@@ -1,5 +1,5 @@
 export type ScopePreset = 'core' | 'standard' | 'visible-scripts' | 'all-visible' | 'all' | 'lua-only';
-export type Tab = 'overview' | 'segments' | 'jobs' | 'review' | 'glossary' | 'references' | 'protocols' | 'resources' | 'about';
+export type Tab = 'overview' | 'segments' | 'jobs' | 'review' | 'glossary' | 'references' | 'protocols' | 'lua' | 'resources' | 'about';
 
 export interface ControlReference {
   literal: string;
@@ -160,6 +160,94 @@ export interface ScanSummary {
   luaSegments: number;
   runtimeRiskCount: number;
   runtimeRiskMessages: string[];
+}
+
+export type LuaManagementStepStatus = 'complete' | 'needs-review' | 'blocked' | 'not-applicable';
+
+export interface LuaManagementStep {
+  id: 'scan' | 'classify' | 'repair' | 'review' | 'validate' | 'export';
+  title: string;
+  status: LuaManagementStepStatus;
+  message: string;
+}
+
+export interface LuaManagementSegment {
+  pathLabel: string;
+  kind: string;
+  sourceText: string;
+  start: number | null;
+  end: number | null;
+  risk: 'low' | 'medium' | 'high';
+  reviewStatus: string;
+  finalText: string | null;
+  translatedText: string | null;
+}
+
+export interface LuaManagementIssue {
+  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router';
+  pathLabel: string;
+  message: string;
+  blocking: boolean;
+}
+
+export interface LuaPortraitCandidate {
+  ownerId: string;
+  names: string[];
+  missingAliases: string[];
+  pathLabels: string[];
+  status: 'covered' | 'needs-alias';
+}
+
+export interface PortraitRouterRepairFinding {
+  id: 'completion-marker-gate' | 'main-passthrough';
+  title: string;
+  message: string;
+  pathLabel: string;
+  safeToApply: boolean;
+}
+
+export interface PortraitRouterRepairReport {
+  detected: boolean;
+  canApply: boolean;
+  findings: PortraitRouterRepairFinding[];
+}
+
+export interface PortraitRouterRepairChange {
+  id: PortraitRouterRepairFinding['id'];
+  title: string;
+  pathLabel: string;
+  before: string;
+  after: string;
+}
+
+export interface PortraitRouterRepairPreview {
+  ok: boolean;
+  report: PortraitRouterRepairReport;
+  applied: PortraitRouterRepairFinding[];
+  changes: PortraitRouterRepairChange[];
+}
+
+export interface LuaManagementReport {
+  generatedAt: string;
+  hasModule: boolean;
+  sourceCount: number;
+  visibleCount: number;
+  controlReferenceCount: number;
+  pendingCount: number;
+  approvedCount: number;
+  blockerCount: number;
+  warningCount: number;
+  portraitCandidateCount: number;
+  portraitCoveredCount: number;
+  portraitMissingCount: number;
+  portraitCandidates: LuaPortraitCandidate[];
+  portraitFeatureDetected: boolean;
+  portraitFeatureSignals: string[];
+  routerRepair: PortraitRouterRepairReport;
+  segments: LuaManagementSegment[];
+  controlReferences: ControlReference[];
+  issues: LuaManagementIssue[];
+  steps: LuaManagementStep[];
 }
 
 export interface GlossaryTerm {

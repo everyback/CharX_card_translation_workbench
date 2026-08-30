@@ -30,6 +30,12 @@ export interface CharxInspection {
   entries: CharxEntryInfo[];
 }
 
+export interface CharxCover {
+  path: string;
+  bytes: Buffer;
+  mimeType: string;
+}
+
 interface CharxArchive {
   files: Unzipped;
   prefix: Uint8Array;
@@ -90,6 +96,29 @@ export function readCharxEntry(source: Uint8Array, entryPath: string): Buffer {
  */
 export function readCharxEntries(source: Uint8Array): Record<string, Uint8Array> {
   return readCharxArchive(source).files;
+}
+
+export function findCharxCover(source: Uint8Array): CharxCover | null {
+  const archive = readCharxArchive(source);
+  const card = parseCardJson(archive.files['card.json']);
+  const imagePaths = Object.keys(archive.files)
+    .filter((entryPath) => !entryPath.endsWith('/') && Boolean(imageMimeType(entryPath, archive.files[entryPath])))
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  if (!imagePaths.length) return null;
+
+  const declared = [valueAtPath(card, ['data', 'avatar']), valueAtPath(card, ['avatar'])]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  const declaredPath = declared
+    .map((value) => resolveArchivePath(value, imagePaths))
+    .find((entryPath): entryPath is string => Boolean(entryPath));
+  const preferredPath = imagePaths
+    .map((entryPath) => ({ entryPath, score: coverNameScore(entryPath) }))
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || left.entryPath.localeCompare(right.entryPath, 'zh-CN'))[0]?.entryPath;
+  const path = declaredPath || preferredPath;
+  if (!path) return null;
+  const bytes = Buffer.from(archive.files[path]);
+  return { path, bytes, mimeType: imageMimeType(path, bytes) };
 }
 
 export function writeCharxEntries(source: Uint8Array, updates: Record<string, Uint8Array>): Buffer {
@@ -305,6 +334,43 @@ function stringValue(value: unknown): string | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function valueAtPath(value: unknown, path: string[]): unknown {
+  let current = value;
+  for (const key of path) {
+    if (!isRecord(current)) return undefined;
+    current = current[key];
+  }
+  return current;
+}
+
+function resolveArchivePath(value: string, imagePaths: string[]): string | null {
+  const normalized = value.trim().replace(/^\.\//u, '').replace(/^\/+/, '');
+  if (!normalized || normalized.startsWith('data:')) return null;
+  const exact = imagePaths.find((entryPath) => entryPath === normalized);
+  if (exact) return exact;
+  const basename = normalized.split('/').at(-1);
+  return basename ? imagePaths.find((entryPath) => entryPath.split('/').at(-1) === basename) ?? null : null;
+}
+
+function coverNameScore(entryPath: string): number {
+  const name = entryPath.split('/').at(-1)?.toLowerCase() ?? '';
+  if (/^(?:avatar|profile|portrait|character|char|icon|cover|thumbnail)(?:[-_.].*)?\.(?:png|jpe?g|webp|gif|bmp|avif)$/u.test(name)) return 100;
+  if (/(?:avatar|profile|portrait|character|icon|cover|thumbnail)/u.test(name)) return 50;
+  return 0;
+}
+
+function imageMimeType(entryPath: string, bytes: Uint8Array): string {
+  const ascii = (start: number, length: number) => Buffer.from(bytes.subarray(start, start + length)).toString('ascii');
+  if (bytes.length >= 8 && bytes[0] === 0x89 && ascii(1, 3) === 'PNG') return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 4) === 'WEBP') return 'image/webp';
+  if (bytes.length >= 6 && (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a')) return 'image/gif';
+  if (bytes.length >= 12 && ascii(4, 4) === 'ftyp' && /avif|avis/u.test(ascii(8, 8))) return 'image/avif';
+  const extension = entryPath.toLowerCase().match(/\.(png|jpe?g|webp|gif|bmp|avif)$/u)?.[1];
+  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+  return extension ? `image/${extension}` : '';
 }
 
 function isSafeEntryName(name: string): boolean {

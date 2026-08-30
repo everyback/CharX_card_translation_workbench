@@ -9,7 +9,13 @@ import {
 import { synchronizeRisuModuleLorebook, writeCardCharx } from '../domain/charx.js';
 import { writeCardPng } from '../domain/png.js';
 import { writeRisuModule } from '../domain/risum.js';
-import { applyRisuModuleSegments, validateRisuLuaChanges } from '../domain/risu-lua.js';
+import {
+  applyRisuModuleSegments,
+  collectRuntimeAliasCandidates,
+  collectRuntimeAliasTranslationCandidates,
+  detectRisuPortraitRouting,
+  validateRisuLuaChanges,
+} from '../domain/risu-lua.js';
 import { validateRisuTemplateChanges } from '../domain/risu-qa.js';
 import { applyApprovedResourceJson, replaceResourceBytes } from '../domain/resources.js';
 import { PROJECT_TITLE_COLUMNS } from '../repositories/project-queries.js';
@@ -28,6 +34,8 @@ export interface ExportServiceDependencies {
   clock: () => string;
   targetLanguage: () => string;
   review: ReviewValidationService;
+  segmentRuntimeNames?: (input: Array<{ ownerId: string; name: string }>) => Promise<Record<string, string[]>>;
+  translateRuntimeAliases?: (input: Array<{ ownerId: string; aliases: string[] }>, targetLanguage: string) => Promise<Record<string, string[]>>;
 }
 
 export class ProjectWorkflowError extends Error {
@@ -46,20 +54,24 @@ export interface ExportPayload {
   body: Uint8Array | string;
 }
 
-export function createExportService({ database, clock, targetLanguage, review }: ExportServiceDependencies) {
+export function createExportService({ database, clock, targetLanguage, review, segmentRuntimeNames, translateRuntimeAliases }: ExportServiceDependencies) {
   async function applyProject(projectId: string): Promise<{
     ok: true;
     approvedCount: number;
     ignoredLuaSegments: number;
+    runtimeAliasAdditions: number;
+    runtimeAliasTranslationError?: string;
+    runtimeAliasSegmentationError?: string;
   }> {
     const project = await database.prepare(`
-      SELECT original_json, original_module_json, source_format AS sourceFormat, source_filename AS sourceFilename,
+      SELECT original_json, original_module_json, draft_module_json AS draftModuleJson, source_format AS sourceFormat, source_filename AS sourceFilename,
         source_blob, source_storage_path AS sourceStoragePath,
         draft_source_blob AS draftSourceBlob, draft_storage_path AS draftStoragePath
       FROM projects WHERE id = ?
     `).get(projectId) as {
       original_json: string;
       original_module_json: string | null;
+      draftModuleJson: string | null;
       sourceFormat: string;
       sourceFilename: string | null;
       source_blob: Uint8Array | null;
@@ -110,10 +122,49 @@ export function createExportService({ database, clock, targetLanguage, review }:
     const originalModule = project.original_module_json
       ? JSON.parse(project.original_module_json) as Record<string, unknown>
       : null;
+    const existingDraftModule = project.draftModuleJson
+      ? JSON.parse(project.draftModuleJson) as Record<string, unknown>
+      : null;
     if (moduleSegments.length && !originalModule) {
       throw new ProjectWorkflowError('项目缺少原始 Risu 模块，无法应用模块译文。请重新扫描项目。', 409);
     }
-    const moduleResult = originalModule ? applyRisuModuleSegments(originalModule, moduleSegments) : null;
+    const currentTargetLanguage = targetLanguage();
+    let runtimeAliases: Record<string, string[]> = {};
+    let runtimeAliasTranslationError: string | undefined;
+    let runtimeAliasSegmentationError: string | undefined;
+    const portraitFeatureDetected = originalModule ? detectRisuPortraitRouting(originalModule).detected : false;
+    if (originalModule && portraitFeatureDetected && /zh|中文|简体|繁体/iu.test(currentTargetLanguage)) {
+      if (translateRuntimeAliases) {
+        try {
+          runtimeAliases = await translateRuntimeAliases(
+            collectRuntimeAliasTranslationCandidates(existingDraftModule || originalModule, currentTargetLanguage),
+            currentTargetLanguage,
+          );
+        } catch (error) {
+          runtimeAliasTranslationError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      const candidates = [
+        ...collectRuntimeAliasCandidates(originalModule, currentTargetLanguage, draft),
+        ...Object.entries(runtimeAliases).flatMap(([ownerId, names]) => names.map((name) => ({ ownerId, name }))),
+      ]
+        .filter((candidate, index, all) => /[\u3400-\u9fff]/u.test(candidate.name) && candidate.name.length >= 4
+          && all.findIndex((item) => item.ownerId === candidate.ownerId && item.name === candidate.name) === index)
+        .slice(0, 80);
+      try {
+        const segments = segmentRuntimeNames ? await segmentRuntimeNames(candidates) : {};
+        runtimeAliases = mergeRuntimeAliases(runtimeAliases, segments);
+      } catch (error) {
+        runtimeAliasSegmentationError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const moduleResult = originalModule ? applyRisuModuleSegments(
+      originalModule,
+      moduleSegments,
+      portraitFeatureDetected ? currentTargetLanguage : '',
+      portraitFeatureDetected ? draft : undefined,
+      runtimeAliases,
+    ) : null;
     if (moduleResult?.syntaxIssues.length) {
       const issue = moduleResult.syntaxIssues[0];
       throw new ProjectWorkflowError(`Risu Lua 语法校验失败：${issue.pathLabel} ${issue.message}`, 409);
@@ -164,6 +215,9 @@ export function createExportService({ database, clock, targetLanguage, review }:
       ok: true,
       approvedCount: segments.filter((segment) => segment.reviewStatus === 'approved').length,
       ignoredLuaSegments: moduleResult?.ignoredLuaSegments ?? 0,
+      runtimeAliasAdditions: moduleResult?.runtimeAliasAdditions ?? 0,
+      ...(runtimeAliasTranslationError ? { runtimeAliasTranslationError } : {}),
+      ...(runtimeAliasSegmentationError ? { runtimeAliasSegmentationError } : {}),
     };
   }
 
@@ -325,6 +379,21 @@ export function createExportService({ database, clock, targetLanguage, review }:
   }
 
   return { applyProject, exportProject };
+}
+
+function mergeRuntimeAliases(
+  primary: Record<string, string[]>,
+  secondary: Record<string, string[]>,
+): Record<string, string[]> {
+  const merged: Record<string, string[]> = {};
+  for (const [ownerId, aliases] of [...Object.entries(primary), ...Object.entries(secondary)]) {
+    const current = merged[ownerId] ?? [];
+    for (const alias of aliases) {
+      if (!current.some((item) => item.toLocaleLowerCase() === alias.toLocaleLowerCase())) current.push(alias);
+    }
+    merged[ownerId] = current;
+  }
+  return merged;
 }
 
 function sanitizeFilename(value: string): string {

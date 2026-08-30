@@ -112,7 +112,7 @@ export function ResourcesView({
         <div className="resource-detail">
           {current ? <>
             <div className="resource-detail-heading"><div><span>{labels[current.kind]} · {riskLabels[current.textRisk]}</span><h2 title={current.displayName}>{current.displayName}</h2>{current.path !== current.displayName && <small>内部资源：{current.path}</small>}</div><a className="secondary-button" href={`/api/projects/${projectId}/resources/file?path=${encodeURIComponent(current.path)}&name=${encodeURIComponent(current.displayName)}`} download={current.displayName}><Download size={15} />下载</a></div>
-            {current.kind === 'image' && current.size > 0 && <img className="resource-preview" src={`/api/projects/${projectId}/resources/file?path=${encodeURIComponent(current.path)}&name=${encodeURIComponent(current.displayName)}`} alt={current.displayName} />}
+            {current.kind === 'image' && current.size > 0 && <img draggable={false} className="resource-preview" src={`/api/projects/${projectId}/resources/file?path=${encodeURIComponent(current.path)}&name=${encodeURIComponent(current.displayName)}`} alt={current.displayName} />}
             <div className="resource-properties"><span>SHA-256 <code>{current.sha256 || '模块内资源暂未展开'}</code></span><span>识别格式 <code>{current.detectedFormat} · {current.mimeType}</code></span>{current.declaredType && <span>模块声明 <code>{current.declaredType}</code></span>}<span>尺寸 <code>{current.width && current.height ? `${current.width} × ${current.height}` : '未知'}</code></span></div>
             <div className="resource-review-card">
               <strong>翻译状态</strong>
@@ -128,8 +128,8 @@ export function ResourcesView({
                   {imageError && <div className="resource-ocr-error"><CircleAlert size={14} />{imageError}</div>}
                   {imageCandidate && <>
                     <div className="resource-image-comparison">
-                      <figure><img src={`/api/projects/${projectId}/resources/file?path=${encodeURIComponent(current.path)}`} alt="原图" /><figcaption>原图</figcaption></figure>
-                      <figure><img src={`/api/projects/${projectId}/resources/image-edit/file?path=${encodeURIComponent(current.path)}&v=${encodeURIComponent(imageCandidate.updatedAt)}`} alt="AI 图片替换稿" /><figcaption>AI 替换稿 · {imageCandidate.model}</figcaption></figure>
+                      <figure><img draggable={false} src={`/api/projects/${projectId}/resources/file?path=${encodeURIComponent(current.path)}`} alt="原图" /><figcaption>原图</figcaption></figure>
+                      <figure><img draggable={false} src={`/api/projects/${projectId}/resources/image-edit/file?path=${encodeURIComponent(current.path)}&v=${encodeURIComponent(imageCandidate.updatedAt)}`} alt="AI 图片替换稿" /><figcaption>AI 替换稿 · {imageCandidate.model}</figcaption></figure>
                     </div>
                     <div className="resource-ocr-actions">
                       <button className="secondary-button" onClick={() => void setImageCandidateStatus('draft')} disabled={imageBusy}>保留待审</button>

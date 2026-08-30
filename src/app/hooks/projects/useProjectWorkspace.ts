@@ -13,6 +13,7 @@ import type {
   Segment,
   Settings,
   Tab,
+  LuaManagementReport,
 } from '../../../types';
 import { LOADING_MASK_MINIMUM_MS, PROJECT_SEGMENT_PAGE_SIZE } from '../../constants';
 import type { ShowWorkbenchError } from '../contracts';
@@ -41,12 +42,15 @@ export function useProjectWorkspace({
   const [projectOverviewLoading, setProjectOverviewLoading] = useState(false);
   const [resources, setResources] = useState<ResourceInspection | null>(null);
   const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [luaReport, setLuaReport] = useState<LuaManagementReport | null>(null);
+  const [luaReportLoading, setLuaReportLoading] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const [projectLoadProgress, setProjectLoadProgress] = useState({ current: 0, total: 0, known: false });
   const selectedProjectIdRef = useRef('');
   const projectRequestRef = useRef(0);
   const projectOverviewRequestRef = useRef(0);
   const resourcesRequestRef = useRef(0);
+  const luaReportRequestRef = useRef(0);
 
   const selectProject = useCallback((projectId: string) => {
     // Clicking the active project does not change selectedProjectId, so its loading effect
@@ -66,6 +70,9 @@ export function useProjectWorkspace({
     setResources(null);
     resourcesRequestRef.current += 1;
     setResourcesLoading(false);
+    setLuaReport(null);
+    luaReportRequestRef.current += 1;
+    setLuaReportLoading(false);
   }, []);
 
   const refreshProjects = useCallback(async (syncSettings = true) => {
@@ -181,6 +188,25 @@ export function useProjectWorkspace({
     }
   }, [clearError, onError, project?.id, resourcesLoading]);
 
+  const loadLuaReport = useCallback(async (projectId = project?.id) => {
+    if (!projectId || luaReportLoading) return;
+    const requestId = ++luaReportRequestRef.current;
+    setLuaReportLoading(true);
+    clearError();
+    try {
+      const report = await api<LuaManagementReport>(`/api/projects/${projectId}/lua/diagnostics`);
+      if (luaReportRequestRef.current === requestId && selectedProjectIdRef.current === projectId) {
+        setLuaReport(report);
+      }
+    } catch (reportError) {
+      onError(reportError);
+    } finally {
+      if (luaReportRequestRef.current === requestId && selectedProjectIdRef.current === projectId) {
+        setLuaReportLoading(false);
+      }
+    }
+  }, [clearError, luaReportLoading, onError, project?.id]);
+
   const invalidateProjectOverview = useCallback(() => setProjectOverview(null), []);
 
   useEffect(() => {
@@ -220,6 +246,17 @@ export function useProjectWorkspace({
   }, [loadResources, project?.id, resources, selectedProjectId, tab]);
 
   useEffect(() => {
+    if (tab !== 'lua' || !project?.id || project.id !== selectedProjectId || luaReport) return;
+    void loadLuaReport(project.id);
+  }, [loadLuaReport, luaReport, project?.id, selectedProjectId, tab]);
+
+  useEffect(() => {
+    // Scans, approvals, and exports refresh the project timestamp. Drop the
+    // cached report so the Lua tab observes the new draft on its next render.
+    setLuaReport(null);
+  }, [project?.updatedAt]);
+
+  useEffect(() => {
     let stopped = false;
     let timer = 0;
     const poll = async () => {
@@ -256,6 +293,8 @@ export function useProjectWorkspace({
     projectOverviewLoading,
     resources,
     resourcesLoading,
+    luaReport,
+    luaReportLoading,
     projectLoading,
     projectLoadProgress,
     selectProject,
@@ -263,6 +302,7 @@ export function useProjectWorkspace({
     refreshProject,
     loadProjectOverview,
     loadResources,
+    loadLuaReport,
     invalidateProjectOverview,
   };
 }

@@ -85,7 +85,7 @@ nano .env
 
 The first run can use the defaults. Open the UI, choose **Model Settings**, and enter the API base URL, model, API key, source language, target language, concurrency, and batch size. Image localization uses a separate optional image-editing model.
 
-Model settings are stored by the backend in local SQLite. The browser only receives a configured/not-configured status.
+Model settings are stored by the backend in local SQLite. API keys are entered by the user and are never returned to or displayed in the browser.
 
 ### 2. Build and start
 
@@ -235,22 +235,28 @@ The current Actions artifacts are unsigned because no Windows code-signing certi
 
 Deployment settings live in `.env`. The API base URL, model, API key, languages, concurrency, batch sizes, and image settings can only be configured from **Model Settings** in the UI. `TRANSLATION_*` and `IMAGE_EDIT_*` environment variables are not supported, and no model settings are written from `.env` into SQLite. Settings saved from the UI are stored in local SQLite. API keys are read by the backend and must not be committed to Git.
 
-### Recommended Initial Settings
+### Official API Examples
 
-The following values were read from the current SQLite configuration as a reference for the UI. The API key is shown only as configured/not configured. Enter these values in **Model Settings**, not in `.env`:
+The following are public provider examples only, not the project's current settings. Enter the model name and API key yourself in **Model Settings**; do not put the key in `.env`:
 
-| UI setting | Current reference |
+| Provider | API base URL | Model | API key |
+| --- | --- | --- | --- |
+| DeepSeek | `https://api.deepseek.com` | Enter your own, for example `deepseek-v4-flash` | Enter your own |
+| OpenAI | `https://api.openai.com/v1` | Enter your own | Enter your own |
+
+Use the provider's [official documentation](https://api-docs.deepseek.com/) to confirm whether a full `/chat/completions` URL is required.
+
+You can start with the following page values and adjust them for the card size and provider limits:
+
+| UI setting | Example |
 | --- | --- |
-| API base URL | `https://opencode.ai/zen/go/v1` |
-| API key | Configured (not displayed) |
-| Model | `deepseek-v4-flash` |
 | Source language | `auto` |
 | Fallback language | `en` |
 | Target language | `zh-CN` |
 | Concurrency | `400` |
 | Items per batch | `40` |
 | Characters per batch | `600000` |
-| Image-editing API, key, and model | Not configured |
+| Image-editing API, key, and model | Enter your own |
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
@@ -260,7 +266,7 @@ The following values were read from the current SQLite configuration as a refere
 | `WORKBENCH_UPLOAD_LIMIT_MB` | Per-file upload limit; `0` means no extra limit | `0` |
 | `WORKBENCH_DB_WORKERS` | SQLite worker count | `3` |
 
-Higher concurrency and larger batches increase memory use, model cost, and rate-limit risk. The table above records the current configuration as a reference; it is not a universal recommendation for every card or provider.
+Higher concurrency and larger batches increase memory use, model cost, and rate-limit risk. Adjust them for the card size and provider limits.
 
 ## Data and Security
 

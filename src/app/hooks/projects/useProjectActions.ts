@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { api, jsonBody } from '../../../api';
-import type { ProjectDetail, ScopePreset } from '../../../types';
+import type { ProjectDetail, ScopePreset, PortraitRouterRepairPreview } from '../../../types';
 import type { RunWorkbenchAction, ShowUiConfirm } from '../contracts';
 
 interface UseProjectActionsOptions {
@@ -59,6 +59,24 @@ export function useProjectActions({
     });
   }
 
+  async function previewPortraitRouter(): Promise<PortraitRouterRepairPreview> {
+    if (!project) throw new Error('请先选择项目。');
+    return api<PortraitRouterRepairPreview>(`/api/projects/${project.id}/lua/router-repair/preview`);
+  }
+
+  async function repairPortraitRouter() {
+    if (!project) return;
+    await runAction('router-repair', async () => {
+      const result = await api<{ applied: Array<{ title: string }> }>(`/api/projects/${project.id}/lua/router-repair`, {
+        method: 'POST', ...jsonBody({}),
+      });
+      onNotice(result.applied.length
+        ? `已固化 ${result.applied.length} 项路由修复到模块基线和当前草稿；后续保存不会覆盖它。`
+        : '当前模块没有可应用的已知路由修复。');
+      await Promise.all([refreshProject(project.id), refreshProjects()]);
+    });
+  }
+
   async function deleteProject() {
     if (!project || !await showUiConfirm({
       title: '删除项目',
@@ -73,5 +91,5 @@ export function useProjectActions({
     });
   }
 
-  return { scan, updateProjectLanguageRule, deleteProject };
+  return { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, deleteProject };
 }

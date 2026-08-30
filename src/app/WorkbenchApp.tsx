@@ -12,13 +12,14 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { LoadingMask, Stat, UiAlert } from '../components/ui';
 import { SCOPE_OPTIONS } from '../constants';
 import { ProjectOverviewView } from '../features/card-inspection/ProjectOverviewView';
 import { AboutView } from '../features/about/AboutView';
 import { GlossaryView } from '../features/glossary/GlossaryView';
 import { JobsView } from '../features/jobs/JobsView';
+import { LuaManagementView } from '../features/lua/LuaManagementView';
 import { ProtocolsView } from '../features/protocols/ProtocolsView';
 import { ReferencesView } from '../features/references/ReferencesView';
 import { ResourcesView } from '../features/resources/ResourcesView';
@@ -44,8 +45,36 @@ import { useWorkbenchSettings } from './hooks/settings/useWorkbenchSettings';
 import { useWorkbenchFeedback } from './hooks/shared/useWorkbenchFeedback';
 import { useTranslationTasks } from './hooks/translation/useTranslationTasks';
 
+const HISTORY_TABS: Tab[] = ['overview', 'segments', 'jobs', 'review', 'glossary', 'references', 'protocols', 'lua', 'resources', 'about'];
+
+function readWorkbenchRoute(): { tab: Tab; projectId: string; segmentId: string } {
+  if (typeof window === 'undefined') return { tab: 'overview', projectId: '', segmentId: '' };
+  const params = new URLSearchParams(window.location.search);
+  const requestedTab = params.get('tab') as Tab | null;
+  return {
+    tab: requestedTab && HISTORY_TABS.includes(requestedTab) ? requestedTab : 'overview',
+    projectId: params.get('project') || '',
+    segmentId: params.get('segment') || '',
+  };
+}
+
+function writeWorkbenchRoute(route: { tab: Tab; projectId: string; segmentId: string }, replace = false): void {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  url.searchParams.set('tab', route.tab);
+  if (route.projectId) url.searchParams.set('project', route.projectId); else url.searchParams.delete('project');
+  if (route.segmentId) url.searchParams.set('segment', route.segmentId); else url.searchParams.delete('segment');
+  const state = { workbench: true, ...route };
+  if (replace) window.history.replaceState(state, '', url);
+  else window.history.pushState(state, '', url);
+}
+
 export function WorkbenchApp() {
-  const [tab, setTab] = useState<Tab>('overview');
+  const initialRouteRef = useRef(readWorkbenchRoute());
+  const [tab, setTab] = useState<Tab>(initialRouteRef.current.tab);
+  const historyReadyRef = useRef(false);
+  const historyApplyingRef = useRef(false);
+  const historyKeyRef = useRef('');
   const [pendingAutoScanId, setPendingAutoScanId] = useState('');
   const {
     busy,
@@ -86,6 +115,8 @@ export function WorkbenchApp() {
     projectOverviewLoading,
     resources,
     resourcesLoading,
+    luaReport,
+    luaReportLoading,
     projectLoading,
     projectLoadProgress,
     selectProject: selectWorkspaceProject,
@@ -93,6 +124,7 @@ export function WorkbenchApp() {
     refreshProject,
     loadProjectOverview,
     loadResources,
+    loadLuaReport,
     invalidateProjectOverview,
   } = useProjectWorkspace({
     tab,
@@ -135,6 +167,7 @@ export function WorkbenchApp() {
   });
 
   const showReview = useCallback(() => setTab('review'), []);
+  const showLua = useCallback(() => setTab('lua'), []);
   const {
     selectedSegment,
     updateSegment,
@@ -163,7 +196,44 @@ export function WorkbenchApp() {
     selectWorkspaceProject(projectId);
   }, [clearJobDetail, selectWorkspaceProject]);
 
-  const { scan, updateProjectLanguageRule, deleteProject } = useProjectActions({
+  useEffect(() => {
+    if (!initialRouteRef.current.projectId || selectedProjectId) return;
+    selectWorkspaceProject(initialRouteRef.current.projectId);
+  }, [selectedProjectId, selectWorkspaceProject]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const route = readWorkbenchRoute();
+      historyApplyingRef.current = true;
+      setTab(route.tab);
+      if (route.projectId !== selectedProjectId) selectWorkspaceProject(route.projectId);
+      setSelectedSegmentId(route.segmentId);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [selectedProjectId, selectWorkspaceProject, setSelectedSegmentId]);
+
+  useEffect(() => {
+    const routeProjectId = selectedProjectId || (!historyReadyRef.current ? initialRouteRef.current.projectId : '');
+    const routeSegmentId = selectedSegmentId || (!historyReadyRef.current ? initialRouteRef.current.segmentId : '');
+    const key = `${tab}|${routeProjectId}|${routeSegmentId}`;
+    if (!historyReadyRef.current) {
+      historyReadyRef.current = true;
+      historyKeyRef.current = key;
+      writeWorkbenchRoute({ tab, projectId: routeProjectId, segmentId: routeSegmentId }, true);
+      return;
+    }
+    if (historyApplyingRef.current) {
+      historyApplyingRef.current = false;
+      historyKeyRef.current = key;
+      return;
+    }
+    if (historyKeyRef.current === key) return;
+    historyKeyRef.current = key;
+    writeWorkbenchRoute({ tab, projectId: routeProjectId, segmentId: routeSegmentId });
+  }, [selectedProjectId, selectedSegmentId, tab]);
+
+  const { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, deleteProject } = useProjectActions({
     project,
     scope,
     setProject,
@@ -206,10 +276,12 @@ export function WorkbenchApp() {
   });
   const {
     query,
+    searchScope,
     statusFilter,
     kindFilter,
     filteredSegments,
     setQuery,
+    setSearchScope,
     setStatusFilter,
     setKindFilter,
   } = useSegmentFilters(project?.segments ?? []);
@@ -279,6 +351,7 @@ export function WorkbenchApp() {
               onStartTranslation={() => void startTranslation()}
               onOpenJobs={showJobs}
               onOpenReview={showReview}
+              onOpenLuaManagement={showLua}
               onApproveAll={() => void approveAll()}
               onOpenSegments={() => setTab('segments')}
               onApplyDraft={() => void applyDraft()}
@@ -335,6 +408,7 @@ export function WorkbenchApp() {
               <button className={tab === 'glossary' ? 'active' : ''} onClick={() => setTab('glossary')}>术语库</button>
               <button className={tab === 'references' ? 'active' : ''} onClick={() => setTab('references')}>引用</button>
               <button className={tab === 'protocols' ? 'active' : ''} onClick={() => setTab('protocols')}>协议</button>
+              <button className={tab === 'lua' ? 'active' : ''} onClick={() => setTab('lua')}>Lua 管理</button>
               <button className={tab === 'resources' ? 'active' : ''} onClick={() => setTab('resources')}>资源</button>
             </div>
 
@@ -351,9 +425,11 @@ export function WorkbenchApp() {
               <SegmentsView
                 segments={filteredSegments}
                 query={query}
+                searchScope={searchScope}
                 statusFilter={statusFilter}
                 kindFilter={kindFilter}
                 onQuery={setQuery}
+                onSearchScope={setSearchScope}
                 onStatusFilter={setStatusFilter}
                 onKindFilter={setKindFilter}
                 onToggle={(segment) => void updateSegment(segment.id, { included: !segment.included })}
@@ -408,6 +484,26 @@ export function WorkbenchApp() {
                 onAnalyze={(schemaIds) => void analyzeProjectProtocols(schemaIds)}
                 onSave={(schemaId, status, fields) => void saveProtocolRule(schemaId, status, fields)}
                 onApproveHighConfidence={(schemaIds) => void approveHighConfidenceProtocols(schemaIds)}
+              />
+            )}
+
+            {tab === 'lua' && (
+              <LuaManagementView
+                report={luaReport}
+                loading={luaReportLoading || busy.startsWith('router-repair')}
+                onRefresh={() => void loadLuaReport(project.id)}
+                onScan={() => void scan('lua-only')}
+                onPreviewRouterRepair={previewPortraitRouter}
+                onApplyRouterRepair={repairPortraitRouter}
+                onPreviewError={showError}
+                onOpenReview={(pathLabel) => {
+                  const match = pathLabel
+                    ? project.segments.find((segment) => segment.pathLabel === pathLabel && (segment.kind.startsWith('lua-') || segment.kind === 'runtime-message'))
+                    : project.segments.find((segment) => segment.kind.startsWith('lua-') || segment.kind === 'runtime-message');
+                  if (match) setSelectedSegmentId(match.id);
+                  setTab('review');
+                }}
+                onOpenExport={() => void saveAndExport()}
               />
             )}
 

@@ -18,7 +18,15 @@ import {
   scanRisuModule,
   validateRisuControlReferences,
 } from '../server/domain/card.js';
-import { applyRisuModuleSegments, validateRisuLuaChanges } from '../server/domain/risu-lua.js';
+import {
+  applyRisuModuleSegments,
+  collectRuntimeAliasCandidates,
+  detectRisuPortraitRouting,
+  inspectRuntimeAliasCoverage,
+  inspectTouhouRuntimeAliasCoverage,
+  validateRisuLuaChanges,
+} from '../server/domain/risu-lua.js';
+import { normalizeRuntimeNameSegments } from '../server/scheduler.js';
 
 const card = {
   name: 'Alice',
@@ -808,6 +816,121 @@ test('changed Risu Lua is syntax checked before export', () => {
 
   assert.equal(issues.length, 1);
   assert.equal(issues[0].pathLabel, '模块.trigger.0.effect.0.code');
+});
+
+test('translated Touhou asset indexes supply missing Chinese runtime aliases', () => {
+  const code = [
+    'local runtimeRoster = [==[[{"id":"cirno","aliases":["チルノ","Cirno"],"sfw":["cirno_angry"]}]]==]',
+    'local function thv2_detect_response_owners(text) return text end',
+  ].join('\n');
+  const module = {
+    trigger: [{ effect: [{ code }] }],
+  };
+  const translatedCard = {
+    character_book: {
+      entries: [{ content: '<TouhouAssetIndexV2>\n- `cirno` = 琪露诺 [SFW:G1, NSFW, Spell]\n</TouhouAssetIndexV2>' }],
+    },
+  };
+
+  assert.deepEqual(inspectRuntimeAliasCoverage(module, 'zh-CN'), []);
+  assert.deepEqual(inspectRuntimeAliasCoverage(module, 'zh-CN', translatedCard), [{
+    pathLabel: '模块.trigger.0.effect.0.code',
+    ownerId: 'cirno',
+    alias: '琪露诺',
+  }]);
+
+  const result = applyRisuModuleSegments(module, [], 'zh-CN', translatedCard);
+  const repaired = (result.draft.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code;
+  assert.match(repaired, /"aliases":\["チルノ","Cirno","琪露诺"\]/);
+  assert.equal(result.runtimeAliasAdditions, 1);
+  assert.deepEqual(inspectRuntimeAliasCoverage(result.draft, 'zh-CN', translatedCard), []);
+  assert.deepEqual(result.syntaxIssues, []);
+
+  const reapplied = applyRisuModuleSegments(result.draft, [], 'zh-CN', translatedCard);
+  assert.equal(reapplied.runtimeAliasAdditions, 0);
+  assert.equal((reapplied.draft.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code, repaired);
+});
+
+test('portrait routing detection gates proper-name candidates and ignores spell indexes', () => {
+  const code = [
+    'local THGY_TW_TARGET_ALIASES = {',
+    '  { label = "이자요이 사쿠야", aliases = {"izayoi_sakuya", "十六夜咲夜", "咲夜"} },',
+    '}',
+    'local runtimeRoster = [==[[{"id":"izayoi_sakuya","aliases":["이자요이 사쿠야"]}]]==]',
+    'local spellIndex = "THGY_SIGNATURE_SPELL_INDEX\\n- izayoi_sakuya: 幻想风靡 -> <img=\\\"izayoi_sakuya_unique_spell\\\">"',
+    'return "<img=\\\"izayoi_sakuya_default\\\">"',
+  ].join('\\n');
+  const module = { trigger: [{ effect: [{ code }] }] };
+
+  assert.equal(detectRisuPortraitRouting(module).detected, true);
+  const candidates = collectRuntimeAliasCandidates(module, 'zh-CN', {
+    character_book: { entries: [{ content: 'izayoi_sakuya: 十六夜咲夜 [SFW:G1]' }] },
+  });
+  assert.ok(candidates.some((candidate) => candidate.ownerId === 'izayoi_sakuya' && candidate.name === '十六夜咲夜'));
+  assert.equal(candidates.some((candidate) => candidate.name.includes('幻想风靡')), false);
+});
+
+test('portrait routing detection stays off for ordinary Lua text', () => {
+  const module = { trigger: [{ effect: [{ code: 'return "角色走进房间并开始对话"' }] }] };
+  assert.equal(detectRisuPortraitRouting(module).detected, false);
+});
+
+test('translated Chinese full names add unique short runtime aliases', () => {
+  const code = 'local roster = [==[[{"id":"izayoi_sakuya","aliases":["十六夜咲夜"],"sfw":["izayoi_sakuya_default"]}]]==]';
+  const module = { trigger: [{ effect: [{ code }] }] };
+  const translatedCard = {
+    character_book: {
+      entries: [{ content: '<TouhouAssetIndexV2>\n- `izayoi_sakuya` = 十六夜咲夜 [SFW:G1, NSFW, Spell]\n</TouhouAssetIndexV2>' }],
+    },
+  };
+
+  const result = applyRisuModuleSegments(module, [], 'zh-CN', translatedCard);
+  const codeAfter = (result.draft.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code;
+  assert.match(codeAfter, /十六夜咲夜/);
+  assert.match(codeAfter, /咲夜/);
+  assert.equal(result.runtimeAliasAdditions, 1);
+  assert.deepEqual(inspectRuntimeAliasCoverage(result.draft, 'zh-CN', translatedCard), []);
+});
+
+test('ambiguous Chinese short aliases are not added to runtime catalogs', () => {
+  const code = 'local roster = [==[[{"id":"one","aliases":["十六夜咲夜"]},{"id":"two","aliases":["红魔咲夜"]}]]==]';
+  const module = { trigger: [{ effect: [{ code }] }] };
+  const translatedCard = {
+    character_book: {
+      entries: [
+        { content: 'one = 十六夜咲夜 [SFW:G1]' },
+        { content: 'two = 红魔咲夜 [SFW:G1]' },
+      ],
+    },
+  };
+
+  const result = applyRisuModuleSegments(module, [], 'zh-CN', translatedCard);
+  const codeAfter = (result.draft.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code;
+  assert.equal(codeAfter.includes('"咲夜"'), false);
+  assert.equal(result.runtimeAliasAdditions, 0);
+});
+
+test('LLM runtime name segmentation keeps only contiguous valid tokens', () => {
+  const result = normalizeRuntimeNameSegments(JSON.stringify({ segments: [
+    { ownerId: 'izayoi_sakuya', tokens: ['咲夜', '十六夜', '不存在', 'Sakuya'] },
+    { ownerId: 'bad id', tokens: ['坏'] },
+  ] }), [
+    { ownerId: 'izayoi_sakuya', name: '十六夜咲夜' },
+  ]);
+  assert.deepEqual(result, { izayoi_sakuya: ['咲夜', '十六夜'] });
+});
+
+test('runtime catalog discovery handles nested JSON and ordinary quoted Lua strings', () => {
+  const catalog = JSON.stringify({ roster: [{ id: 'reimu', aliases: ['Reimu'] }], unrelated: [{ id: 'x', value: 1 }] });
+  const module = { trigger: [{ effect: [{ code: `local roster = ${JSON.stringify(catalog)}` }] }] };
+  const card = { character_book: { entries: [{ content: 'characters:\n- reimu -> 博丽灵梦 [SFW:G1]' }] } };
+
+  const result = applyRisuModuleSegments(module, [], 'zh-CN', card);
+  const code = (result.draft.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code;
+  assert.equal(code.includes('\\"id\\":\\"reimu\\"') && code.includes('\\"博丽灵梦\\"'), true);
+  assert.equal(code.includes('\\"id\\":\\"x\\"') && code.includes('\\"value\\":1'), true);
+  assert.equal(result.runtimeAliasAdditions, 2);
+  assert.deepEqual(inspectRuntimeAliasCoverage(result.draft, 'zh-CN', card), []);
 });
 
 test('recognized Touhou prompts follow the selected sidebar language', () => {

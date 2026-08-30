@@ -3,12 +3,14 @@ import {
   CheckCheck,
   Check,
   CircleAlert,
+  Code2,
   Download,
   FileSearch,
   Layers3,
   Play,
   ScanSearch,
   Settings2,
+  SlidersHorizontal,
   ShieldCheck,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -27,6 +29,7 @@ interface GuidedWorkflowProps {
   onStartTranslation: () => void;
   onOpenJobs: () => void;
   onOpenReview: () => void;
+  onOpenLuaManagement: () => void;
   onApproveAll: () => void;
   onOpenSegments: () => void;
   onApplyDraft: () => void;
@@ -101,6 +104,7 @@ export function GuidedWorkflow({
   onStartTranslation,
   onOpenJobs,
   onOpenReview,
+  onOpenLuaManagement,
   onApproveAll,
   onOpenSegments,
   onApplyDraft,
@@ -302,6 +306,13 @@ export function GuidedWorkflow({
           </div>
         )}
       </div>
+      {project.scanSummary?.luaSegments ? (
+        <div className="guided-lua-tip">
+          <Code2 size={16} />
+          <div><strong>检测到 Lua 脚本</strong><span>先在 Lua 管理里确认是否存在立绘匹配功能；只有人名、地名等专有名词才会进入匹配流程。</span></div>
+          <button className="secondary-button" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 Lua 管理</button>
+        </div>
+      ) : null}
       {project.status === 'new' && (
         <div className="guided-scan-note"><CircleAlert size={14} />扫描完成后，你还可以在这里切换翻译预设。</div>
       )}

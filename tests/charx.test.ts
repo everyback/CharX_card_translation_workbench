@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import {
+  findCharxCover,
   inspectCharx,
   isRisuModuleLorebookMirrorPath,
   packCharxEntries,
@@ -39,6 +40,27 @@ test('CHARX card.json can be updated while preserving assets', () => {
   assert.deepEqual(JSON.parse(strFromU8(files['card.json'])), translated);
   assert.deepEqual(files['assets/icon/images/avatar.png'], avatar);
   assert.equal(strFromU8(files['risu.json']), '{"theme":"dark"}');
+});
+
+test('CHARX overview selects the declared avatar asset before other images', () => {
+  const source = zipSync({
+    'card.json': strToU8(JSON.stringify({ ...originalCard, data: { ...originalCard.data, avatar: 'assets/icon/images/avatar.png' } })),
+    'assets/background.png': new Uint8Array([137, 80, 78, 71, 9]),
+    'assets/icon/images/avatar.png': avatar,
+  });
+  const cover = findCharxCover(source);
+  assert.equal(cover?.path, 'assets/icon/images/avatar.png');
+  assert.equal(cover?.mimeType, 'image/png');
+  assert.deepEqual(cover?.bytes, Buffer.from(avatar));
+});
+
+test('CHARX overview falls back to a named avatar image when card.json has no avatar', () => {
+  const source = zipSync({
+    'card.json': strToU8(JSON.stringify(originalCard)),
+    'assets/scene.png': new Uint8Array([137, 80, 78, 71, 9]),
+    'assets/avatar.png': avatar,
+  });
+  assert.equal(findCharxCover(source)?.path, 'assets/avatar.png');
 });
 
 test('CHARX embedded Risu module can be translated while preserving other files', () => {

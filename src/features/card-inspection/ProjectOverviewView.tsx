@@ -41,7 +41,7 @@ export function ProjectOverviewView({ info, loading, onRefresh, onViewResources 
       {loading && <LoadingMask label="正在更新项目概要" />}
       <div className="tavern-card-overview">
         <div className="tavern-card-cover">
-          {info.previewAvailable ? <img src={`/api/projects/${info.projectId}/cover`} alt={`${info.cardName} 封面`} /> : info.sourceFormat === 'risum' || info.sourceFormat === 'charx' ? <FileArchive size={48} /> : <FileJson size={48} />}
+          {info.previewAvailable ? <img draggable={false} src={`/api/projects/${info.projectId}/cover`} alt={`${info.cardName} 头图`} /> : info.sourceFormat === 'risum' || info.sourceFormat === 'charx' ? <FileArchive size={48} /> : <FileJson size={48} />}
         </div>
         <div className="tavern-card-heading">
           <span>原始导入内容概要</span>
