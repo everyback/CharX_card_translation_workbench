@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import type { LuaManagementReport, LuaManagementStepStatus, PortraitRouterRepairPreview } from '../../types';
+import type { LuaManagementReport, LuaManagementStepStatus, PortraitRouterRepairChange, PortraitRouterRepairPreview } from '../../types';
 
 const STATUS_LABELS: Record<LuaManagementStepStatus, string> = {
   complete: '已完成',
@@ -32,6 +32,98 @@ const ISSUE_LABELS = {
   router: '路由修复',
 } as const;
 
+interface CompactCodeLine {
+  number: number;
+  text: string;
+  changed: boolean;
+}
+
+interface CompactCode {
+  lines: CompactCodeLine[];
+  hiddenBefore: boolean;
+  hiddenAfter: boolean;
+  changedCount: number;
+}
+
+function codeLines(source: string): string[] {
+  return source.replace(/\r\n/gu, '\n').split('\n');
+}
+
+function diffBounds(source: string, peer: string): { lines: string[]; prefix: number; suffix: number } {
+  const lines = codeLines(source);
+  const peerLines = codeLines(peer);
+  let prefix = 0;
+  while (prefix < lines.length && prefix < peerLines.length && lines[prefix] === peerLines[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < lines.length - prefix
+    && suffix < peerLines.length - prefix
+    && lines[lines.length - suffix - 1] === peerLines[peerLines.length - suffix - 1]
+  ) suffix += 1;
+  return { lines, prefix, suffix };
+}
+
+function changedSection(source: string, peer: string): string {
+  const { lines, prefix, suffix } = diffBounds(source, peer);
+  return lines.slice(prefix, Math.max(prefix, lines.length - suffix)).join('\n');
+}
+
+function replaceChangedSection(source: string, peer: string, replacement: string): string {
+  const { lines, prefix, suffix } = diffBounds(source, peer);
+  const replacementLines = replacement === '' ? [] : replacement.replace(/\r\n/gu, '\n').split('\n');
+  return [...lines.slice(0, prefix), ...replacementLines, ...lines.slice(Math.max(prefix, lines.length - suffix))].join('\n');
+}
+
+function compactCode(source: string, peer: string): CompactCode {
+  const { lines, prefix, suffix } = diffBounds(source, peer);
+  const changedEnd = Math.max(prefix, lines.length - suffix);
+  const start = Math.max(0, prefix - 3);
+  const end = Math.min(lines.length, changedEnd + 3);
+  return {
+    lines: lines.slice(start, end).map((text, index) => ({ number: start + index + 1, text, changed: start + index >= prefix && start + index < changedEnd })),
+    hiddenBefore: start > 0,
+    hiddenAfter: end < lines.length,
+    changedCount: Math.max(0, changedEnd - prefix),
+  };
+}
+
+function routerChangeKey(change: PortraitRouterRepairChange, index: number): string {
+  return `${change.id}:${change.pathLabel}:${index}`;
+}
+
+function RouterCodePanel({
+  source,
+  peer,
+  tone,
+  editable,
+  onDoubleClick,
+}: {
+  source: string;
+  peer: string;
+  tone: 'before' | 'after';
+  editable?: boolean;
+  onDoubleClick?: () => void;
+}) {
+  const compact = compactCode(source, peer);
+  return (
+    <div
+      className={`router-code-panel router-code-panel-${tone}${editable ? ' editable' : ''}`}
+      title={editable ? '双击修改建议代码' : undefined}
+      onDoubleClick={editable ? onDoubleClick : undefined}
+      role={editable ? 'button' : undefined}
+      tabIndex={editable ? 0 : undefined}
+    >
+      {compact.hiddenBefore && <div className="router-code-ellipsis">…</div>}
+      {compact.lines.map((line) => (
+        <div className={`router-code-line${line.changed ? ' changed' : ''}`} key={`${line.number}:${line.text}`}>
+          <span>{line.number}</span><code>{line.text || ' '}</code>
+        </div>
+      ))}
+      {compact.hiddenAfter && <div className="router-code-ellipsis">…</div>}
+    </div>
+  );
+}
+
 export function LuaManagementView({
   report,
   loading,
@@ -48,7 +140,7 @@ export function LuaManagementView({
   onRefresh: () => void;
   onScan: () => void;
   onPreviewRouterRepair: () => Promise<PortraitRouterRepairPreview>;
-  onApplyRouterRepair: () => Promise<void> | void;
+  onApplyRouterRepair: (changes?: PortraitRouterRepairChange[]) => Promise<void> | void;
   onPreviewError: (error: unknown) => void;
   onOpenReview: (pathLabel?: string) => void;
   onOpenExport: () => void;
@@ -58,6 +150,9 @@ export function LuaManagementView({
   const [routerPreview, setRouterPreview] = useState<PortraitRouterRepairPreview | null>(null);
   const [routerPreviewLoading, setRouterPreviewLoading] = useState(false);
   const [routerApplying, setRouterApplying] = useState(false);
+  const [routerDrafts, setRouterDrafts] = useState<Record<string, string>>({});
+  const [editingRouterChange, setEditingRouterChange] = useState<number | null>(null);
+  const [routerEditValue, setRouterEditValue] = useState('');
 
   const filteredCandidates = useMemo(() => {
     if (!report) return [];
@@ -71,7 +166,10 @@ export function LuaManagementView({
   async function openRouterPreview() {
     setRouterPreviewLoading(true);
     try {
-      setRouterPreview(await onPreviewRouterRepair());
+      const preview = await onPreviewRouterRepair();
+      setRouterPreview(preview);
+      setRouterDrafts(Object.fromEntries(preview.changes.map((change, index) => [routerChangeKey(change, index), change.after])));
+      setEditingRouterChange(null);
     } catch (error) {
       onPreviewError(error);
     } finally {
@@ -80,13 +178,35 @@ export function LuaManagementView({
   }
 
   async function applyRouterPreview() {
+    if (!routerPreview || editingRouterChange !== null) return;
     setRouterApplying(true);
     try {
-      await onApplyRouterRepair();
+      const changes = routerPreview.changes.map((change, index) => ({
+        ...change,
+        after: routerDrafts[routerChangeKey(change, index)] ?? change.after,
+      }));
+      await onApplyRouterRepair(changes);
       setRouterPreview(null);
+      setRouterDrafts({});
     } finally {
       setRouterApplying(false);
     }
+  }
+
+  function beginRouterEdit(index: number, value: string, peer: string) {
+    setEditingRouterChange(index);
+    setRouterEditValue(changedSection(value, peer));
+  }
+
+  function cancelRouterEdit() {
+    setEditingRouterChange(null);
+    setRouterEditValue('');
+  }
+
+  function saveRouterEdit(change: PortraitRouterRepairChange, index: number) {
+    const current = routerDrafts[routerChangeKey(change, index)] ?? change.after;
+    setRouterDrafts((drafts) => ({ ...drafts, [routerChangeKey(change, index)]: replaceChangedSection(current, change.before, routerEditValue) }));
+    cancelRouterEdit();
   }
 
   if (!report && loading) {
@@ -151,25 +271,40 @@ export function LuaManagementView({
         <div className="modal-backdrop router-preview-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !routerApplying) setRouterPreview(null); }}>
           <section className="router-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="router-preview-title">
             <header className="dialog-header">
-              <div><h2 id="router-preview-title">路由修复修改对比</h2><span>请人工检查疑似代码和建议修改，确认后才会写入卡片。</span></div>
+              <div><h2 id="router-preview-title">路由修复修改对比</h2><span>仅显示检测到的局部修改，确认后才会写入卡片。</span></div>
               <button className="icon-button" title="关闭" aria-label="关闭修改对比" disabled={routerApplying} onClick={() => setRouterPreview(null)}><X size={16} /></button>
             </header>
             <div className="router-preview-body">
               {routerPreview.changes.map((change, index) => (
                 <article className="router-change" key={`${change.id}:${change.pathLabel}:${index}`}>
-                  <div className="router-change-heading"><strong>{change.title}</strong><code>{change.pathLabel}</code></div>
-                  <p>修改方案：仅替换这一段已识别的路由代码，保留其他脚本结构。</p>
-                  <div className="router-diff-columns">
-                    <label><span>疑似原代码</span><pre>{change.before}</pre></label>
-                    <label><span>建议修改</span><pre>{change.after}</pre></label>
+                  <div className="router-change-heading"><div><strong>{change.title}</strong><span className="router-change-index">{index + 1} / {routerPreview.changes.length}</span></div><code>{change.pathLabel}</code></div>
+                  <p className="router-change-message">{routerPreview.report.findings.find((finding) => finding.id === change.id && finding.pathLabel === change.pathLabel)?.message ?? '仅替换已识别的路由代码，其他脚本结构保持不变。'}</p>
+                  <div className="router-change-summary">
+                    <span>修改点：{compactCode(change.before, routerDrafts[routerChangeKey(change, index)] ?? change.after).changedCount} 行 → {compactCode(routerDrafts[routerChangeKey(change, index)] ?? change.after, change.before).changedCount} 行</span>
+                    <span>{editingRouterChange === index ? '正在编辑本项' : '建议代码可双击编辑'}</span>
                   </div>
+                  {editingRouterChange === index ? (
+                    <div className="router-edit-box">
+                      <span className="router-edit-label">修改点代码</span>
+                      <textarea aria-label={`编辑${change.title}修改点`} value={routerEditValue} onChange={(event) => setRouterEditValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') cancelRouterEdit(); }} spellCheck={false} autoFocus />
+                      <div className="router-edit-actions">
+                        <button className="secondary-button" onClick={cancelRouterEdit}><X size={14} />取消本项</button>
+                        <button className="primary-button" onClick={() => saveRouterEdit(change, index)}><Check size={14} />保存本项</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="router-diff-columns">
+                      <div className="router-diff-column"><span>原代码 · 局部</span><RouterCodePanel source={change.before} peer={routerDrafts[routerChangeKey(change, index)] ?? change.after} tone="before" /></div>
+                      <div className="router-diff-column"><span>建议修改 · 局部</span><RouterCodePanel source={routerDrafts[routerChangeKey(change, index)] ?? change.after} peer={change.before} tone="after" editable onDoubleClick={() => beginRouterEdit(index, routerDrafts[routerChangeKey(change, index)] ?? change.after, change.before)} /></div>
+                    </div>
+                  )}
                 </article>
               ))}
               {!routerPreview.changes.length && <div className="table-empty">预览时未发现仍可修改的路由代码，可能已被其他操作处理。</div>}
             </div>
             <footer className="dialog-actions router-preview-actions">
               <button className="secondary-button" disabled={routerApplying} onClick={() => setRouterPreview(null)}><X size={16} />取消</button>
-              <button className="primary-button" disabled={routerApplying || !routerPreview.changes.length} onClick={() => void applyRouterPreview()}>{routerApplying ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}人工检查通过，应用修改</button>
+              <button className="primary-button" disabled={routerApplying || editingRouterChange !== null || !routerPreview.changes.length} onClick={() => void applyRouterPreview()}>{routerApplying ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}人工检查通过，应用修改</button>
             </footer>
           </section>
         </div>

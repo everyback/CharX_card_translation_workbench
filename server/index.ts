@@ -26,7 +26,13 @@ import { inspectProjectOverview } from './domain/tavern-card.js';
 import { parseRisuModule, readRisuModuleAssetFromReader, type RisuModuleSourceReader } from './domain/risum.js';
 import { detectRisuRuntimeRisks, validateRisuTemplateChanges } from './domain/risu-qa.js';
 import { buildLuaManagementReport } from './domain/lua-management.js';
-import { applyPortraitRouterRepairs } from './domain/portrait-router-repair.js';
+import {
+  applyPortraitRouterChangeOverrides,
+  applyPortraitRouterRepairs,
+  applyPortraitRouterReviewDelta,
+  type PortraitRouterRepairChange,
+  type PortraitRouterRepairOverride,
+} from './domain/portrait-router-repair.js';
 import { validateRisuLuaChanges } from './domain/risu-lua.js';
 import { inspectCharxResources, inspectRisuModuleResourcesStreaming, readResourceBytes, resourceContentType, scanCharxResourceJson } from './domain/resources.js';
 import { recognizeImage, type OcrLanguage } from './domain/ocr.js';
@@ -714,6 +720,8 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router
   if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再应用路由修复。' });
 
   try {
+    const body = asRecord(request.body);
+    const requestedChanges = parseRouterRepairOverrides(body.changes);
     const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
     const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : originalCard;
     const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
@@ -725,11 +733,23 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router
     if (!repairedOriginal.applied.length && !repairedDraft.applied.length) {
       return { ok: true, applied: [], report: repairedDraft.report };
     }
-    const syntaxIssues = validateRisuLuaChanges(repairedOriginal.draft, repairedDraft.draft);
+    const finalOriginal = applyPortraitRouterChangeOverrides(originalModule, requestedChanges, repairedOriginal.changes);
+    const draftChanges = requestedChanges.flatMap((override) => {
+      const sourceChange = repairedOriginal.changes.find((change) => change.id === override.id && change.pathLabel === override.pathLabel);
+      const targetChange = repairedDraft.changes.find((change) => change.id === override.id && change.pathLabel === override.pathLabel);
+      if (!sourceChange || !targetChange) return [];
+      return [{
+        ...override,
+        before: targetChange.before,
+        after: applyPortraitRouterReviewDelta(targetChange.after, sourceChange.after, override.after, targetChange.pathLabel),
+      }];
+    });
+    const finalDraft = applyPortraitRouterChangeOverrides(draftModule, draftChanges, repairedDraft.changes, { requireBefore: false });
+    const syntaxIssues = validateRisuLuaChanges(finalOriginal, finalDraft);
     if (syntaxIssues.length) return reply.code(409).send({ error: `路由修复后的 Lua 语法校验失败：${syntaxIssues[0].pathLabel} ${syntaxIssues[0].message}` });
-    const templateIssues = validateRisuTemplateChanges(repairedOriginal.draft, repairedDraft.draft);
+    const templateIssues = validateRisuTemplateChanges(finalOriginal, finalDraft);
     if (templateIssues.length) return reply.code(409).send({ error: `路由修复破坏了模板结构：${templateIssues[0].pathLabel} ${templateIssues[0].message}` });
-    const controlIssues = validateRisuControlReferences(originalCard, draftCard, repairedOriginal.draft, repairedDraft.draft);
+    const controlIssues = validateRisuControlReferences(originalCard, draftCard, finalOriginal, finalDraft);
     if (controlIssues.length) return reply.code(409).send({ error: `路由修复破坏了控制引用：${controlIssues[0].pathLabel} ${controlIssues[0].message}` });
 
     await db.prepare(`
@@ -737,16 +757,16 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router
       SET original_module_json = ?, draft_module_json = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      JSON.stringify(repairedOriginal.draft),
-      JSON.stringify(repairedDraft.draft),
+      JSON.stringify(finalOriginal),
+      JSON.stringify(finalDraft),
       now(),
       request.params.projectId,
     );
     return {
       ok: true,
       applied: repairedDraft.applied,
-      changes: repairedDraft.changes,
-      report: repairedDraft.report,
+      changes: mergeRouterRepairChanges(repairedDraft.changes, requestedChanges),
+      report: applyPortraitRouterRepairs(finalDraft).report,
     };
   } catch (error) {
     return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
@@ -1492,6 +1512,31 @@ function sanitizeFilename(value: string): string {
 
 function exportLanguageTag(value: string): string {
   return sanitizeFilename(value.trim() || 'target').replace(/\s+/g, '-');
+}
+
+function parseRouterRepairOverrides(value: unknown): PortraitRouterRepairOverride[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error('路由修改列表格式无效。');
+  return value.map((entry) => {
+    const item = asRecord(entry);
+    const id = text(item.id);
+    if (id !== 'completion-marker-gate' && id !== 'main-passthrough') throw new Error('路由修改类型不在安全范围内。');
+    const pathLabel = text(item.pathLabel);
+    const before = typeof item.before === 'string' ? item.before : '';
+    const after = typeof item.after === 'string' ? item.after : '';
+    if (!pathLabel || !before || !after) throw new Error('路由修改缺少位置或代码内容。');
+    return { id, pathLabel, before, after };
+  });
+}
+
+function mergeRouterRepairChanges(
+  changes: PortraitRouterRepairChange[],
+  overrides: PortraitRouterRepairOverride[],
+): PortraitRouterRepairChange[] {
+  return changes.map((change) => {
+    const override = overrides.find((item) => item.id === change.id && item.pathLabel === change.pathLabel);
+    return override ? { ...change, after: override.after } : change;
+  });
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

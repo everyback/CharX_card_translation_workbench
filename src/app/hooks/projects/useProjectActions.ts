@@ -64,14 +64,14 @@ export function useProjectActions({
     return api<PortraitRouterRepairPreview>(`/api/projects/${project.id}/lua/router-repair/preview`);
   }
 
-  async function repairPortraitRouter() {
+  async function repairPortraitRouter(changes?: PortraitRouterRepairPreview['changes']) {
     if (!project) return;
     await runAction('router-repair', async () => {
       const result = await api<{ applied: Array<{ title: string }> }>(`/api/projects/${project.id}/lua/router-repair`, {
-        method: 'POST', ...jsonBody({}),
+        method: 'POST', ...jsonBody({ changes: changes ?? [] }),
       });
       onNotice(result.applied.length
-        ? `已固化 ${result.applied.length} 项路由修复到模块基线和当前草稿；后续保存不会覆盖它。`
+        ? `已固化 ${result.applied.length} 项路由修复到模块基线和当前草稿；不会影响后续保存。`
         : '当前模块没有可应用的已知路由修复。');
       await Promise.all([refreshProject(project.id), refreshProjects()]);
     });

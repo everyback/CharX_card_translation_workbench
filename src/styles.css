@@ -597,15 +597,33 @@ select { padding: 0 9px; }
 .router-preview-body { overflow: auto; padding: 16px 20px; }
 .router-change + .router-change { margin-top: 18px; border-top: 1px solid #dfe4e2; padding-top: 18px; }
 .router-change-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.router-change-heading > div { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .router-change-heading strong { color: #26332f; font-size: 13px; }
+.router-change-index { color: #7b8782; font-size: 10px; font-variant-numeric: tabular-nums; }
 .router-change-heading code { color: #39766e; font-size: 11px; overflow-wrap: anywhere; }
 .router-change p { margin: 6px 0 9px; color: #687570; font-size: 11px; }
+.router-change-summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 7px; color: #697570; font-size: 10px; }
+.router-change-summary span:last-child { color: #39766e; }
 .router-diff-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
-.router-diff-columns label { display: grid; min-width: 0; gap: 5px; }
-.router-diff-columns label > span { color: #66716d; font-size: 11px; font-weight: 650; }
-.router-diff-columns pre { min-height: 140px; max-height: 360px; overflow: auto; margin: 0; border: 1px solid #d9dfdc; padding: 10px; background: #f7f9f8; color: #34413d; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-.router-diff-columns label:first-child pre { border-left: 3px solid #c98778; background: #fff8f5; }
-.router-diff-columns label:last-child pre { border-left: 3px solid #55a28f; background: #f3fbf7; }
+.router-diff-column { display: grid; min-width: 0; gap: 5px; }
+.router-diff-column > span { color: #66716d; font-size: 11px; font-weight: 650; }
+.router-code-panel { min-height: 120px; max-height: 300px; overflow: auto; border: 1px solid #d9dfdc; background: #f7f9f8; color: #34413d; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.router-code-panel-before { border-left: 3px solid #c98778; background: #fff8f5; }
+.router-code-panel-after { border-left: 3px solid #55a28f; background: #f3fbf7; }
+.router-code-panel-after.editable { cursor: text; }
+.router-code-panel-after.editable:hover { border-color: #39766e; box-shadow: inset 0 0 0 1px #b9ded4; }
+.router-code-line { display: grid; min-width: max-content; grid-template-columns: 34px minmax(0, 1fr); padding-right: 10px; }
+.router-code-line > span { padding-right: 8px; color: #a1aaa6; text-align: right; user-select: none; }
+.router-code-line code { white-space: pre; }
+.router-code-line.changed { background: rgb(250 224 135 / 30%); }
+.router-code-panel-before .router-code-line.changed { background: rgb(226 151 132 / 18%); }
+.router-code-panel-after .router-code-line.changed { background: rgb(86 180 153 / 18%); }
+.router-code-ellipsis { padding: 4px 10px; color: #9ba5a1; text-align: center; user-select: none; }
+.router-edit-box { display: grid; gap: 8px; }
+.router-edit-label { color: #39766e; font-size: 11px; font-weight: 650; }
+.router-edit-box textarea { width: 100%; min-height: 260px; resize: vertical; border: 1px solid #55a28f; border-left-width: 3px; border-radius: 4px; padding: 10px; outline: 0; background: #f3fbf7; color: #34413d; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
+.router-edit-box textarea:focus { box-shadow: 0 0 0 2px #dcefeb; }
+.router-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .router-preview-actions { gap: 8px; }
 .router-preview-actions .primary-button { margin-left: auto; }
 .spin { animation: spin .8s linear infinite; }
@@ -725,6 +743,7 @@ select { padding: 0 9px; }
   .lua-management-actions { justify-content: flex-start; }
   .lua-router-repair { flex-direction: column; }
   .router-diff-columns { grid-template-columns: 1fr; }
+  .router-change-summary { align-items: flex-start; flex-direction: column; gap: 3px; }
   .router-change-heading { align-items: flex-start; flex-direction: column; gap: 4px; }
   .router-preview-dialog { max-height: 92vh; }
   .lua-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

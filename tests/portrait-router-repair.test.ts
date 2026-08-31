@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyPortraitRouterRepairs, inspectPortraitRouterRepairs } from '../server/domain/portrait-router-repair.js';
+import { applyPortraitRouterChangeOverrides, applyPortraitRouterRepairs, applyPortraitRouterReviewDelta, inspectPortraitRouterRepairs } from '../server/domain/portrait-router-repair.js';
 
 const vulnerableRouter = `
 onOutput = async(function(id)
@@ -53,4 +53,55 @@ end
 ` }] }] };
   const report = inspectPortraitRouterRepairs(module);
   assert.deepEqual(report.findings.map((item) => item.id), ['main-passthrough']);
+});
+
+test('applies only reviewed router edits from the preview result', () => {
+  const module = { trigger: [{ effect: [{ code: vulnerableRouter }] }] };
+  const preview = applyPortraitRouterRepairs(module);
+  const mainChange = preview.changes.find((change) => change.id === 'main-passthrough');
+  assert.ok(mainChange);
+  const edited = applyPortraitRouterChangeOverrides(
+    module,
+    [{ ...mainChange, after: `${mainChange.after}\n-- reviewed` }],
+    preview.changes,
+  );
+  const code = String((edited.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code);
+  assert.match(code, /-- reviewed$/u);
+  assert.throws(() => applyPortraitRouterChangeOverrides(
+    module,
+    [{ ...mainChange, before: `${mainChange.before}\nchanged` }],
+    preview.changes,
+  ), /原代码已变化/u);
+});
+
+test('replays consecutive repairs from the original source without stale-preview errors', () => {
+  const module = { trigger: [{ effect: [{ code: vulnerableRouter }] }] };
+  const preview = applyPortraitRouterRepairs(module);
+  const repaired = applyPortraitRouterChangeOverrides(module, [], preview.changes);
+  const code = String((repaired.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code);
+  assert.match(code, /_completion_text:match\('\^%s\*\$'\)/u);
+  assert.match(code, /local function walp_run_main\(id\)[\s\S]*return true\nend/u);
+});
+
+test('preserves an earlier reviewed edit when a later repair shares the same path', () => {
+  const module = { trigger: [{ effect: [{ code: vulnerableRouter }] }] };
+  const preview = applyPortraitRouterRepairs(module);
+  const gateChange = preview.changes.find((change) => change.id === 'completion-marker-gate');
+  const mainChange = preview.changes.find((change) => change.id === 'main-passthrough');
+  assert.ok(gateChange);
+  assert.ok(mainChange);
+  const editedGate = `${gateChange.after}\n-- reviewed`;
+  const repaired = applyPortraitRouterChangeOverrides(module, [
+    { ...gateChange, after: editedGate },
+    { ...mainChange },
+  ], preview.changes);
+  const code = String((repaired.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code);
+  assert.match(code, /-- reviewed/u);
+  assert.match(code, /local function walp_run_main\(id\)[\s\S]*return true\nend/u);
+});
+
+test('transfers a reviewed local edit to a translated module without replacing its surrounding code', () => {
+  const source = 'prefix\nold\nsuffix';
+  const target = 'prefix\nold\ntranslated-suffix';
+  assert.equal(applyPortraitRouterReviewDelta(target, source, 'prefix\nnew\nsuffix', '模块.trigger.0.effect.0.code'), 'prefix\nnew\ntranslated-suffix');
 });

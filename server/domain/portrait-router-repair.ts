@@ -31,6 +31,13 @@ export interface PortraitRouterRepairChange {
   after: string;
 }
 
+export interface PortraitRouterRepairOverride {
+  id: PortraitRouterRepairId;
+  pathLabel: string;
+  before: string;
+  after: string;
+}
+
 interface LuaCodeNode {
   path: Array<string | number>;
   source: string;
@@ -134,6 +141,130 @@ export function applyPortraitRouterRepairs(module: Record<string, unknown>): Por
   }
 
   return { draft, report: inspectPortraitRouterRepairs(draft), applied, changes };
+}
+
+/**
+ * Apply edits made in the review dialog to the exact repair result that was previewed.
+ * The expected change is checked first so a stale dialog cannot overwrite a newer module.
+ */
+export function applyPortraitRouterChangeOverrides(
+  module: Record<string, unknown>,
+  overrides: PortraitRouterRepairOverride[],
+  expectedChanges: PortraitRouterRepairChange[],
+  options: { requireBefore?: boolean } = {},
+): Record<string, unknown> {
+  const draft = structuredClone(module);
+  const nodes = luaCodeNodes(draft);
+  const requested = new Map<string, PortraitRouterRepairOverride>();
+  for (const override of overrides) {
+    if (!override || typeof override.after !== 'string' || typeof override.before !== 'string') {
+      throw new Error('路由修改内容格式无效。');
+    }
+    const key = `${override.id}:${override.pathLabel}`;
+    if (requested.has(key)) throw new Error(`路由修改重复提交：${override.pathLabel}`);
+    const expected = expectedChanges.find((change) => change.id === override.id && change.pathLabel === override.pathLabel);
+    if (!expected) throw new Error(`路由修改已过期或不在安全修改范围内：${override.pathLabel}`);
+    if (options.requireBefore !== false && override.before !== expected.before) {
+      throw new Error(`路由原代码已变化，请重新打开修改对比：${override.pathLabel}`);
+    }
+    if (override.after.length > 2_000_000) throw new Error(`路由修改内容过大：${override.pathLabel}`);
+    requested.set(key, override);
+  }
+
+  const processedPaths = new Set<string>();
+  const workingSources = new Map<string, string>();
+  for (const expected of expectedChanges) {
+    const key = `${expected.id}:${expected.pathLabel}`;
+    const override = requested.get(key);
+    const node = nodes.find((candidate) => pathLabel(candidate.path) === expected.pathLabel);
+    if (!node) throw new Error(`找不到路由代码位置：${expected.pathLabel}`);
+    const desired = override?.after ?? expected.after;
+    const current = workingSources.get(expected.pathLabel) ?? node.source;
+    if (!processedPaths.has(expected.pathLabel) && current !== expected.before) {
+      throw new Error(`路由预览已过期，请重新打开修改对比：${expected.pathLabel}`);
+    }
+    const next = current === expected.before
+      ? desired
+      : applyRouterChangeDelta(current, expected.before, expected.after, desired, expected.pathLabel);
+    node.replace(next);
+    workingSources.set(expected.pathLabel, next);
+    processedPaths.add(expected.pathLabel);
+  }
+  return draft;
+}
+
+/**
+ * Replays one repair onto a source that may already contain an earlier reviewed
+ * edit at the same Lua path. The repair region is located from the preview's
+ * before/after pair, so unrelated reviewed text is preserved.
+ */
+function applyRouterChangeDelta(
+  current: string,
+  expectedBefore: string,
+  expectedAfter: string,
+  desiredAfter: string,
+  path: string,
+): string {
+  const { prefix, suffix } = textDiffBounds(expectedBefore, expectedAfter);
+  const oldRegion = expectedBefore.slice(prefix, expectedBefore.length - suffix);
+  const newRegion = desiredAfter.slice(prefix, desiredAfter.length - suffix);
+  if (!oldRegion) {
+    if (prefix === expectedBefore.length) return `${current}${newRegion}`;
+    if (prefix === 0) return `${newRegion}${current}`;
+    const anchorStart = Math.max(0, prefix - 256);
+    const anchor = expectedBefore.slice(anchorStart, prefix);
+    const anchorIndex = current.indexOf(anchor);
+    if (!anchor || anchorIndex < 0 || anchorIndex !== current.lastIndexOf(anchor)) {
+      throw new Error(`路由修改无法定位安全修改点：${path}`);
+    }
+    const insertionPoint = anchorIndex + anchor.length;
+    return `${current.slice(0, insertionPoint)}${newRegion}${current.slice(insertionPoint)}`;
+  }
+  const first = current.indexOf(oldRegion);
+  const last = current.lastIndexOf(oldRegion);
+  if (first < 0 || first !== last) throw new Error(`路由预览已过期，请重新打开修改对比：${path}`);
+  return `${current.slice(0, first)}${newRegion}${current.slice(first + oldRegion.length)}`;
+}
+
+/** Apply a reviewed edit from one module's preview result to its translated counterpart. */
+export function applyPortraitRouterReviewDelta(
+  target: string,
+  expected: string,
+  desired: string,
+  path: string,
+): string {
+  if (expected === desired) return target;
+  const { prefix, suffix } = textDiffBounds(expected, desired);
+  const oldRegion = expected.slice(prefix, expected.length - suffix);
+  const newRegion = desired.slice(prefix, desired.length - suffix);
+  if (!oldRegion) {
+    if (prefix === expected.length) return `${target}${newRegion}`;
+    if (prefix === 0) return `${newRegion}${target}`;
+    const anchorStart = Math.max(0, prefix - 256);
+    const anchor = expected.slice(anchorStart, prefix);
+    const anchorIndex = target.indexOf(anchor);
+    if (!anchor || anchorIndex < 0 || anchorIndex !== target.lastIndexOf(anchor)) {
+      throw new Error(`路由修改无法定位安全修改点：${path}`);
+    }
+    const insertionPoint = anchorIndex + anchor.length;
+    return `${target.slice(0, insertionPoint)}${newRegion}${target.slice(insertionPoint)}`;
+  }
+  const first = target.indexOf(oldRegion);
+  const last = target.lastIndexOf(oldRegion);
+  if (first < 0 || first !== last) throw new Error(`路由修改无法同步到草稿：${path}`);
+  return `${target.slice(0, first)}${newRegion}${target.slice(first + oldRegion.length)}`;
+}
+
+function textDiffBounds(source: string, peer: string): { prefix: number; suffix: number } {
+  let prefix = 0;
+  while (prefix < source.length && prefix < peer.length && source[prefix] === peer[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < source.length - prefix
+    && suffix < peer.length - prefix
+    && source[source.length - suffix - 1] === peer[peer.length - suffix - 1]
+  ) suffix += 1;
+  return { prefix, suffix };
 }
 
 function luaCodeNodes(module: Record<string, unknown>): LuaCodeNode[] {
