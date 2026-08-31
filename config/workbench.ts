@@ -25,6 +25,7 @@ export const WORKBENCH_DEFAULTS = {
     concurrency: 400,
     batchItems: 40,
     batchChars: 600000,
+    requestTimeoutSeconds: 120,
   },
 } as const;
 

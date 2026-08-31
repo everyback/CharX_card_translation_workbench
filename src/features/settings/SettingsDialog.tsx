@@ -23,6 +23,7 @@ export function SettingsDialog({ settings, onClose, onSave }: { settings: Settin
           <label><span>模型请求并发</span><input type="number" min="1" step="1" value={value.concurrency} onChange={(event) => setValue({ ...value, concurrency: Number(event.target.value) })} /></label>
           <label><span>每批段落</span><input type="number" min="1" step="1" value={value.batchItems} onChange={(event) => setValue({ ...value, batchItems: Number(event.target.value) })} /></label>
           <label><span>每批字符</span><input type="number" min="1000" step="500" value={value.batchChars} onChange={(event) => setValue({ ...value, batchChars: Number(event.target.value) })} /></label>
+          <label><span>模型请求超时（秒）</span><input type="number" min="1" max="86400" step="1" value={value.requestTimeoutSeconds} onChange={(event) => setValue({ ...value, requestTimeoutSeconds: Number(event.target.value) })} /><small>单次文本模型请求的最长等待时间，超时后按任务重试策略处理。</small></label>
         </div>
         <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => void onSave(value)}><Save size={16} />保存设置</button></div>
       </div>

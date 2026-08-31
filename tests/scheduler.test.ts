@@ -2,17 +2,25 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldSplitTranslationBatch } from '../server/domain/translation-errors.js';
 import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments } from '../server/domain/card.js';
-import { chatCompletionsEndpoint } from '../server/scheduler.js';
+import { chatCompletionsEndpoint, modelRequestTimeoutMilliseconds, normalizeModelRequestTimeoutSeconds } from '../server/scheduler.js';
 
 test('chat completions endpoint accepts either a base URL or a full endpoint', () => {
   assert.equal(
-    chatCompletionsEndpoint('https://opencode.ai/zen/go/v1'),
-    'https://opencode.ai/zen/go/v1/chat/completions',
+    chatCompletionsEndpoint('https://api.example.com/v1'),
+    'https://api.example.com/v1/chat/completions',
   );
   assert.equal(
-    chatCompletionsEndpoint('https://opencode.ai/zen/go/v1/chat/completions/'),
-    'https://opencode.ai/zen/go/v1/chat/completions',
+    chatCompletionsEndpoint('https://api.example.com/v1/chat/completions/'),
+    'https://api.example.com/v1/chat/completions',
   );
+});
+
+test('model request timeout accepts seconds and stays within safe bounds', () => {
+  assert.equal(normalizeModelRequestTimeoutSeconds(undefined), 120);
+  assert.equal(normalizeModelRequestTimeoutSeconds(45), 45);
+  assert.equal(normalizeModelRequestTimeoutSeconds(0), 120);
+  assert.equal(normalizeModelRequestTimeoutSeconds(90_000), 86_400);
+  assert.equal(modelRequestTimeoutMilliseconds(45), 45_000);
 });
 
 test('translation batches split on size-sensitive and malformed batch responses', () => {

@@ -22,6 +22,7 @@ export interface ScannedSegment {
 }
 
 export interface ApplicableSegment {
+  id?: string;
   pathJson: string;
   sourceText?: string;
   start: number | null;
@@ -44,6 +45,10 @@ export interface RisuControlReference {
 export interface RisuControlIssue {
   pathLabel: string;
   message: string;
+  code?: 'REGEX_MATCH_COUNT_CHANGED';
+  pattern?: string;
+  originalMatches?: number;
+  draftMatches?: number;
 }
 
 interface RisuRegexInput {
@@ -457,6 +462,10 @@ export function validateRisuControlReferences(
     if (originalMatches > 0 && draftMatches !== originalMatches) {
       report({
         pathLabel: reference.pathLabel,
+        code: 'REGEX_MATCH_COUNT_CHANGED',
+        pattern: reference.pattern,
+        originalMatches,
+        draftMatches,
         message: `正则协议匹配数量由 ${originalMatches} 变为 ${draftMatches}，请保留键名、分隔符和字段顺序。`,
       });
     }
@@ -492,6 +501,22 @@ export function validateRisuControlReferences(
     }
   }
   return issues;
+}
+
+export function findRisuRegexAffectedSegmentIds(
+  pattern: string,
+  segments: readonly ApplicableSegment[],
+): string[] {
+  const affected: string[] = [];
+  for (const segment of segments) {
+    if (!segment.id || segment.reviewStatus !== 'approved') continue;
+    const translation = segment.finalText?.trim() || segment.translatedText?.trim();
+    if (!translation || typeof segment.sourceText !== 'string') continue;
+    if (countRegexMatchesInStrings(segment.sourceText, pattern) !== countRegexMatchesInStrings(translation, pattern)) {
+      affected.push(segment.id);
+    }
+  }
+  return affected;
 }
 
 export function isLuaModuleCodePath(path: Array<string | number>): boolean {
@@ -845,7 +870,11 @@ function collectRisuRegexInputs(module: Record<string, unknown>): RisuRegexInput
     const input = (entry as Record<string, unknown>).in;
     if (typeof input !== 'string' || !input) return;
     const path: Array<string | number> = ['regex', index, 'in'];
-    inputs.push({ path, pathLabel: pathLabel(['$module', ...path]), pattern: input });
+    inputs.push({
+      path,
+      pathLabel: pathLabel(['$module', ...path]),
+      pattern: input,
+    });
   });
   return inputs;
 }

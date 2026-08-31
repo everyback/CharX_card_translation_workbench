@@ -1,8 +1,8 @@
-import { Check, CheckCheck, CircleAlert, Copy, Link2, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react';
+import { Check, CheckCheck, CircleAlert, Copy, FilterX, Link2, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { RiskBadge } from '../../components/ui';
 import { CATEGORY_LABELS, KIND_LABELS, STATUS_LABELS } from '../../constants';
-import type { Segment } from '../../types';
+import type { ReviewFocus, Segment } from '../../types';
 
 export function ReviewView({
   segments,
@@ -14,6 +14,8 @@ export function ReviewView({
   onRetranslate,
   onReviewBulk,
   onClearAllResults,
+  reviewFocus,
+  onClearReviewFocus,
   approving,
   resetting,
 }: {
@@ -26,6 +28,8 @@ export function ReviewView({
   onRetranslate: (segmentIds: string[]) => void;
   onReviewBulk: (action: 'copy-machine' | 'clear-manual', segmentIds: string[]) => void;
   onClearAllResults: () => void;
+  reviewFocus: ReviewFocus | null;
+  onClearReviewFocus: () => void;
   approving: boolean;
   resetting: boolean;
 }) {
@@ -36,6 +40,7 @@ export function ReviewView({
   const [qaFlagFilter, setQaFlagFilter] = useState('all');
   const [reviewQuery, setReviewQuery] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const reviewFocusIds = useMemo(() => new Set(reviewFocus?.segmentIds ?? []), [reviewFocus]);
   const reviewable = useMemo(() => segments.filter((segment) => (
     segment.reviewStatus !== 'untranslated'
     || Boolean(segment.translationError)
@@ -53,6 +58,7 @@ export function ReviewView({
   const filteredReviewable = useMemo(() => {
     const normalizedQuery = reviewQuery.trim().toLowerCase();
     return reviewable.filter((segment) => {
+      const matchesFocus = !reviewFocus || reviewFocusIds.has(segment.id);
       const matchesStatus = reviewStatusFilter === 'all'
         || (reviewStatusFilter === 'unapproved' && segment.reviewStatus !== 'approved')
         || (reviewStatusFilter === 'failed' && Boolean(segment.translationError) && segment.reviewStatus !== 'approved')
@@ -76,9 +82,9 @@ export function ReviewView({
         ...segment.qaFlags,
         ...segment.controlReferences.flatMap((reference) => [reference.literal, reference.pathLabel, reference.pattern]),
       ].some((value) => String(value ?? '').toLowerCase().includes(normalizedQuery));
-      return matchesStatus && matchesProblem && matchesCategory && matchesKind && matchesQaFlag && matchesQuery;
+      return matchesFocus && matchesStatus && matchesProblem && matchesCategory && matchesKind && matchesQaFlag && matchesQuery;
     });
-  }, [reviewable, reviewStatusFilter, reviewProblemFilter, categoryFilter, reviewKindFilter, qaFlagFilter, reviewQuery]);
+  }, [reviewable, reviewFocus, reviewFocusIds, reviewStatusFilter, reviewProblemFilter, categoryFilter, reviewKindFilter, qaFlagFilter, reviewQuery]);
   useEffect(() => {
     if (qaFlagFilter !== 'all' && qaFlagFilter !== 'flagged' && qaFlagFilter !== 'protected'
       && !qaFlagOptions.some(({ flag }) => flag === qaFlagFilter)) {
@@ -111,6 +117,25 @@ export function ReviewView({
     <section className="review-layout">
       <aside className="review-queue">
         <div className="review-queue-controls">
+          {reviewFocus && (
+            <div className="review-focus-banner">
+              <FilterX size={15} />
+              <div className="review-focus-copy">
+                <strong>命中问题</strong>
+                <span>{reviewFocus.problem}</span>
+                {reviewFocus.pattern && (
+                  <details className="review-focus-rule">
+                    <summary>查看实际正则规则</summary>
+                    <code>{reviewFocus.pattern}</code>
+                  </details>
+                )}
+                <strong>修正方案</strong>
+                <span>{reviewFocus.fixSuggestion}</span>
+                <small>已过滤 {reviewFocus.segmentIds.length} 条待人工检查文本；处理完成后点击“保存修改”或再次保存导出。</small>
+              </div>
+              <button type="button" title="显示全部审核项" onClick={onClearReviewFocus}>显示全部</button>
+            </div>
+          )}
           <div className="review-queue-header">
             <div className="review-queue-heading">
               <strong>审核队列</strong>
@@ -243,6 +268,20 @@ export function ReviewView({
             <div><span>{CATEGORY_LABELS[selected.category] || selected.category} · {KIND_LABELS[selected.kind] || selected.kind}</span><strong>{selected.pathLabel}</strong></div>
             <div><RiskBadge risk={selected.riskLevel} /><span className="review-status">{selected.translationError && selected.reviewStatus !== 'approved' ? '翻译失败' : STATUS_LABELS[selected.reviewStatus]}</span></div>
           </div>
+          {reviewFocus && reviewFocusIds.has(selected.id) && (
+            <div className="review-focus-detail-banner">
+              <div className="review-focus-detail-heading"><CircleAlert size={16} /><strong>本条文本命中脚本完整性问题</strong></div>
+              <div><b>命中问题：</b>{reviewFocus.problem}</div>
+              <div><b>修正方案：</b>{reviewFocus.fixSuggestion}</div>
+              <small>校验路径：{reviewFocus.pathLabel} · 匹配数 {reviewFocus.originalMatches} → {reviewFocus.draftMatches}</small>
+              {reviewFocus.pattern && (
+                <details className="review-focus-detail-rule">
+                  <summary>查看本次校验使用的正则</summary>
+                  <code>{reviewFocus.pattern}</code>
+                </details>
+              )}
+            </div>
+          )}
           {selected.translationError && selected.reviewStatus !== 'approved' && (
             <div className="translation-error-banner">
               <CircleAlert size={16} />

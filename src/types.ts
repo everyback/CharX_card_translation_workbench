@@ -63,6 +63,7 @@ export interface Settings {
   concurrency: number;
   batchItems: number;
   batchChars: number;
+  requestTimeoutSeconds: number;
   imageApiUrl: string;
   imageApiKeyConfigured: boolean;
   imageModel: string;
@@ -109,6 +110,16 @@ export interface Segment {
   updatedAt: string;
 }
 
+export interface ReviewFocus {
+  pathLabel: string;
+  pattern: string;
+  originalMatches: number;
+  draftMatches: number;
+  segmentIds: string[];
+  problem: string;
+  fixSuggestion: string;
+}
+
 export interface Job {
   id: string;
   projectId: string;
@@ -118,6 +129,9 @@ export interface Job {
   totalItems: number;
   completedItems: number;
   failedItems: number;
+  postTotalItems: number;
+  postCompletedItems: number;
+  postFailedItems: number;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;

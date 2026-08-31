@@ -50,7 +50,7 @@ CHARX and RISUM are the primary development and test targets. JSON and PNG retai
 
 ## Fastest Start: Download a Release
 
-If you only want to use the workbench, you do not need Node.js, Docker, or a local build: open [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases) and download a Windows desktop build.
+Download the Windows portable desktop build directly; Node.js, Docker, and a local build are not required. Get it from [GitHub Releases](https://github.com/everyback/CharX_card_translation_workbench/releases).
 
 - **Installer**: run the setup EXE and follow the installation wizard.
 - **Portable**: run the portable EXE directly; application data stays in the `data/` folder next to the EXE, so it can be kept in any folder or on a removable drive.
@@ -120,7 +120,7 @@ The health endpoint should return `ok: true`.
 3. Select **Scan card** or **Scan fields**, then confirm the detected card, lorebook, script, protocol, and resource counts in **Overview**.
 4. Choose a translation scope. **Translate all** includes card text, lorebooks, Lua prompts, script UI, and visible resource JSON.
 5. Start translation and inspect progress, failed batches, and quality notices on **Jobs**.
-6. When translation finishes, use **Approve all** only if the existing translations are ready; otherwise select **Enter review** and compare the source, machine translation, and final text. Bulk approval does not approve untranslated or failed items.
+6. When translation finishes, use **Approve all** for confirmed translations; send items requiring review to **Enter review** and compare the source, machine translation, and final text. **Approve all** processes existing translations only, not untranslated or failed items.
 7. Use **Save** to create the review draft only. Use **Save and export** to save it, check Lua, script references, and card structure, then automatically download JSON, PNG, CHARX, or RISUM when validation passes.
 
 The original import remains available in the project. Machine output is only a draft until it is approved.
@@ -138,7 +138,7 @@ PNG and basic JSON currently provide baseline import/export support; CHARX and R
 7. Use **Save** to keep a review draft, or **Save and export** to validate and download it.
 8. Reopen the result in the real client and verify the card, worldbook triggers, scripts, and resource references.
 
-Do not judge export safety by fluency alone. For unfamiliar protocols, inspect the **Protocols** and **References** views before approving text used by code.
+Export safety must be judged by both structural validation and translation quality. For unfamiliar protocols, inspect the **Protocols** and **References** views before approving text used by code.
 
 ## Translation Scopes and Protection
 
@@ -179,7 +179,7 @@ If port `8787` is occupied, set another loopback port in `.env`:
 WORKBENCH_BIND_PORT=18880
 ```
 
-Then restart the compose project and open `http://127.0.0.1:18880/`. Do not expose the service on `0.0.0.0` without adding trusted authentication, TLS, and access controls.
+Then restart the compose project and open `http://127.0.0.1:18880/`. Keep port mappings on the loopback address; do not expose the service on `0.0.0.0` or directly to the public network.
 
 See [deployment notes](./docs/部署说明.md) for backup and recovery details.
 
@@ -233,11 +233,11 @@ The current Actions artifacts are unsigned because no Windows code-signing certi
 
 ## Configuration
 
-Deployment settings live in `.env`. The API base URL, model, API key, languages, concurrency, batch sizes, and image settings can only be configured from **Model Settings** in the UI. `TRANSLATION_*` and `IMAGE_EDIT_*` environment variables are not supported, and no model settings are written from `.env` into SQLite. Settings saved from the UI are stored in local SQLite. API keys are read by the backend and must not be committed to Git.
+Deployment settings live in `.env`. The API base URL, model, API key, languages, concurrency, batch sizes, and image settings can only be configured from **Model Settings** in the UI. `TRANSLATION_*` and `IMAGE_EDIT_*` environment variables are not supported, and no model settings are written from `.env` into SQLite. Settings saved from the UI are stored in local SQLite. API keys are configured by the user, read only by the backend, and must not be committed to Git.
 
 ### Official API Examples
 
-The following are public provider examples only, not the project's current settings. Enter the model name and API key yourself in **Model Settings**; do not put the key in `.env`:
+The following are public provider examples only, not the project's current settings. Enter the model name and API key in **Model Settings**:
 
 | Provider | API base URL | Model | API key |
 | --- | --- | --- | --- |
@@ -271,16 +271,16 @@ Higher concurrency and larger batches increase memory use, model cost, and rate-
 ## Data and Security
 
 - Local Node.js stores SQLite data, uploads, drafts, and caches under `data/`; Docker uses named Compose volumes.
-- `.env`, SQLite files, volumes, logs, backups, and imported cards may contain secrets or private content. Do not commit them.
+- `.env`, SQLite files, volumes, logs, backups, and imported cards may contain secrets or private content. They must not be committed.
 - There is no login system. The default loopback binding is intended for local single-user use.
-- Back up important projects before upgrades, deployment changes, bulk export, or cleanup. `docker compose down -v` removes Compose volumes.
-- Recheck Lua, regex, protocols, lorebook triggers, and asset references before exporting an unfamiliar card.
+- Important projects require a backup before upgrades, deployment changes, bulk export, or cleanup. `docker compose down -v` removes Compose volumes.
+- Lua, regex, protocols, lorebook triggers, and asset references require rechecking before an unfamiliar card is exported.
 
 ## Contributing
 
-Issues with a redacted log and a minimal reproduction are especially useful. Before submitting code:
+Submit format, parser, or translation-protection issues as GitHub Issues. Redacted logs and minimal reproductions are useful for diagnosis. Before submitting code:
 
-1. Keep model keys, imported cards, SQLite data, backups, and logs out of commits.
+1. Model keys, imported cards, SQLite data, backups, and logs must stay out of commits.
 2. Add regression tests for parser, protection, export, or scheduler changes.
 3. Run `npm test` and `npm run build`.
 4. Follow the repository rules in [AGENTS.md](./AGENTS.md).

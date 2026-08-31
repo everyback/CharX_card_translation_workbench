@@ -82,6 +82,9 @@ await db.exec(`
     total_items INTEGER NOT NULL DEFAULT 0,
     completed_items INTEGER NOT NULL DEFAULT 0,
     failed_items INTEGER NOT NULL DEFAULT 0,
+    post_total_items INTEGER NOT NULL DEFAULT 0,
+    post_completed_items INTEGER NOT NULL DEFAULT 0,
+    post_failed_items INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -226,6 +229,9 @@ await addColumnIfMissing('resource_image_candidates', 'storage_bytes', 'INTEGER'
 await addColumnIfMissing('resource_image_candidates', 'storage_sha256', 'TEXT');
 await addColumnIfMissing('segments', 'protocol_delimiter', 'TEXT');
 await addColumnIfMissing('projects', 'language_behavior_mode', "TEXT NOT NULL DEFAULT 'target'");
+await addColumnIfMissing('jobs', 'post_total_items', 'INTEGER NOT NULL DEFAULT 0');
+await addColumnIfMissing('jobs', 'post_completed_items', 'INTEGER NOT NULL DEFAULT 0');
+await addColumnIfMissing('jobs', 'post_failed_items', 'INTEGER NOT NULL DEFAULT 0');
 
 await db.prepare(`
   UPDATE projects

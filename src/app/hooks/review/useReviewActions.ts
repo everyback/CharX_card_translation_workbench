@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { ApiError, api, jsonBody } from '../../../api';
-import type { ProjectDetail, Segment } from '../../../types';
+import type { ProjectDetail, ReviewFocus, Segment } from '../../../types';
 import {
   isLanguageConfirmationRequired,
   isProtectionConfirmationRequired,
@@ -23,6 +23,7 @@ interface UseReviewActionsOptions {
   showUiConfirm: ShowUiConfirm;
   onNotice: (notice: string) => void;
   onShowReview: () => void;
+  onFocusReview: (focus: ReviewFocus) => void;
 }
 
 export function useReviewActions({
@@ -37,6 +38,7 @@ export function useReviewActions({
   showUiConfirm,
   onNotice,
   onShowReview,
+  onFocusReview,
 }: UseReviewActionsOptions) {
   const selectedSegment = project?.segments.find((segment) => segment.id === selectedSegmentId) ?? null;
 
@@ -267,6 +269,7 @@ export function useReviewActions({
           : '审核稿已保存，并通过 Risu Lua 语法校验。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
       } catch (applyError) {
+        focusRegexMismatch(applyError);
         const related = locateLuaSyntaxSegment(
           project.segments,
           applyError instanceof Error ? applyError.message : String(applyError),
@@ -320,6 +323,7 @@ export function useReviewActions({
           : '审核稿已保存，已通过导出前语法检查并开始下载。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
       } catch (exportError) {
+        focusRegexMismatch(exportError);
         const related = locateLuaSyntaxSegment(
           project.segments,
           exportError instanceof Error ? exportError.message : String(exportError),
@@ -332,6 +336,28 @@ export function useReviewActions({
         throw exportError;
       }
     });
+  }
+
+  function focusRegexMismatch(error: unknown): void {
+    if (!(error instanceof ApiError) || error.payload.code !== 'REGEX_MATCH_COUNT_CHANGED') return;
+    const pathLabel = String(error.payload.pathLabel || '正则协议');
+    const originalMatches = Number(error.payload.originalMatches) || 0;
+    const draftMatches = Number(error.payload.draftMatches) || 0;
+    const segmentIds = Array.isArray(error.payload.affectedSegmentIds)
+      ? error.payload.affectedSegmentIds.map(String).filter(Boolean)
+      : [];
+    if (!segmentIds.length) return;
+    onFocusReview({
+      pathLabel,
+      pattern: String(error.payload.pattern || ''),
+      originalMatches,
+      draftMatches,
+      segmentIds,
+      problem: String(error.payload.problem || `${pathLabel} 的正则实际命中数由 ${originalMatches} 变为 ${draftMatches}，当前稿中有部分文本不再符合该正则的输入格式。`),
+      fixSuggestion: String(error.payload.fixSuggestion || '逐条对照原文、机翻和人工定稿，恢复该正则要求的文本结构；只修改可见文字，保留键名、分隔符和字段顺序，并保持模块中的正则规则不变。修订后保存并重新校验。'),
+    });
+    onShowReview();
+    onNotice(`已定位 ${segmentIds.length} 条受影响文本：${pathLabel} 命中数 ${originalMatches} → ${draftMatches}。请按审核页中的修正方案逐条处理后再保存。`);
   }
 
   return {

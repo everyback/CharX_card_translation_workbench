@@ -190,8 +190,18 @@ select { padding: 0 9px; }
 .job-title-row > strong { font-size: 28px; }
 .progress-track { height: 8px; margin-top: 18px; overflow: hidden; border-radius: 4px; background: #e2e7e5; }
 .progress-track span { display: block; height: 100%; background: #2a8176; transition: width .25s ease; }
-.job-metrics { display: flex; gap: 24px; margin-top: 12px; color: #69736f; font-size: 12px; }
+.job-metrics { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-top: 12px; color: #69736f; font-size: 12px; }
 .job-metrics b { margin-left: 4px; color: #2d3734; }
+.job-follow-up { display: flex; flex-direction: column; gap: 4px; margin-top: 14px; border-left: 3px solid #aebbb7; padding: 8px 11px; background: #f4f7f6; color: #64736f; font-size: 11px; line-height: 1.45; }
+.job-follow-up-heading { display: flex; justify-content: space-between; gap: 14px; color: #3c514c; font-size: 12px; }
+.job-follow-up-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.job-follow-up-heading b { color: #2a8176; white-space: nowrap; }
+.job-follow-up.active { border-left-color: #2a8176; background: #eef8f5; }
+.job-follow-up.active .job-follow-up-heading { color: #176b62; }
+.job-follow-up.pending { border-left-color: #b78b32; background: #fff8e8; }
+.job-follow-up.pending .job-follow-up-heading { color: #795f22; }
+.job-follow-up.failed { border-left-color: #bb5d53; background: #fff0ed; }
+.job-follow-up.failed .job-follow-up-heading { color: #8c4038; }
 .job-actions { margin: 22px 0 14px; }
 .job-error { margin-bottom: 12px; padding: 9px 11px; border-left: 3px solid #bb5d53; background: #fff0ed; color: #8c4038; font-size: 12px; }
 .job-complete-callout { display: flex; align-items: center; gap: 12px; margin-top: 22px; border: 1px solid #b9d9d2; border-radius: 7px; padding: 12px 14px; background: #f0f8f6; color: #315f58; }
@@ -214,6 +224,24 @@ select { padding: 0 9px; }
 .workspace-review .review-layout { min-height: 0; flex: 1; overflow: hidden; }
 .review-queue { min-height: 0; border-right: 1px solid #dfe4e2; background: #fff; overflow-y: auto; }
 .review-queue-controls { position: sticky; z-index: 2; top: 0; border-bottom: 1px solid #dfe4e2; background: #f7f9f8; }
+.review-focus-banner { display: flex; align-items: flex-start; gap: 7px; padding: 9px 10px; border-bottom: 1px solid #e5c98d; background: #fff8e8; color: #765313; font-size: 12px; }
+.review-focus-banner > svg { flex: 0 0 auto; margin-top: 2px; }
+.review-focus-copy { display: grid; min-width: 0; flex: 1; gap: 3px; }
+.review-focus-copy strong { color: #654609; font-size: 11px; font-weight: 700; }
+.review-focus-copy span { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
+.review-focus-copy small { color: #8a6b31; line-height: 1.4; }
+.review-focus-rule { min-width: 0; margin: 2px 0; }
+.review-focus-rule summary { cursor: pointer; color: #8a6b31; font-size: 10px; }
+.review-focus-rule code { display: block; max-height: 72px; margin-top: 3px; overflow: auto; border: 1px solid #ead8ab; border-radius: 3px; padding: 4px 5px; background: #fffdf7; color: #5f4b25; font-family: Consolas, monospace; font-size: 10px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-focus-banner button { border: 1px solid #d7b66d; border-radius: 4px; padding: 3px 7px; background: #fffdf7; color: #765313; cursor: pointer; white-space: nowrap; }
+.review-focus-detail-banner { display: grid; gap: 6px; margin: 10px 14px 0; border: 1px solid #e5c98d; border-left: 3px solid #b78b32; padding: 10px 12px; background: #fff8e8; color: #654609; font-size: 12px; line-height: 1.5; }
+.review-focus-detail-banner > div { overflow-wrap: anywhere; }
+.review-focus-detail-banner b { color: #765313; }
+.review-focus-detail-heading { display: flex; align-items: center; gap: 6px; color: #765313; }
+.review-focus-detail-heading svg { flex: 0 0 auto; }
+.review-focus-detail-banner small { color: #8a6b31; }
+.review-focus-detail-rule summary { cursor: pointer; color: #8a6b31; font-size: 11px; }
+.review-focus-detail-rule code { display: block; max-height: 96px; margin-top: 4px; overflow: auto; border: 1px solid #ead8ab; border-radius: 3px; padding: 5px 6px; background: #fffdf7; color: #5f4b25; font-family: Consolas, monospace; font-size: 10px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; }
 .review-queue-header { display: grid; gap: 8px; padding: 9px 10px; border-bottom: 1px solid #e4e9e7; background: #fff; }
 .review-queue-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
 .review-queue-heading strong { font-size: 12px; font-weight: 650; white-space: nowrap; }

@@ -29,6 +29,7 @@ import { SettingsDialog } from '../features/settings/SettingsDialog';
 import { GuidedWorkflow } from '../features/workflow/GuidedWorkflow';
 import { QuickStartView } from '../features/workflow/QuickStartView';
 import type {
+  ReviewFocus,
   ScopePreset,
   Tab,
 } from '../types';
@@ -76,6 +77,7 @@ export function WorkbenchApp() {
   const historyApplyingRef = useRef(false);
   const historyKeyRef = useRef('');
   const [pendingAutoScanId, setPendingAutoScanId] = useState('');
+  const [reviewFocus, setReviewFocus] = useState<ReviewFocus | null>(null);
   const {
     busy,
     error,
@@ -189,10 +191,12 @@ export function WorkbenchApp() {
     showUiConfirm,
     onNotice: setNotice,
     onShowReview: showReview,
+    onFocusReview: setReviewFocus,
   });
 
   const selectProject = useCallback((projectId: string) => {
     clearJobDetail();
+    setReviewFocus(null);
     selectWorkspaceProject(projectId);
   }, [clearJobDetail, selectWorkspaceProject]);
 
@@ -460,6 +464,8 @@ export function WorkbenchApp() {
                 onRetranslate={(segmentIds) => void retranslateSegments(segmentIds)}
                 onReviewBulk={(action, segmentIds) => void reviewBulk(action, segmentIds)}
                 onClearAllResults={() => void clearAllTranslationResults()}
+                reviewFocus={reviewFocus}
+                onClearReviewFocus={() => setReviewFocus(null)}
                 approving={busy.startsWith('approve-')}
                 resetting={busy === 'retranslate' || busy === 'clear-results'}
               />

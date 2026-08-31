@@ -3,6 +3,7 @@ import {
   applyApprovedSegments,
   bilingualModuleName,
   cardExportName,
+  findRisuRegexAffectedSegmentIds,
   type ApplicableSegment,
   validateRisuControlReferences,
 } from '../domain/card.js';
@@ -83,7 +84,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
 
     await assertProjectCanApply(projectId, false);
     const segments = await database.prepare(`
-      SELECT path_json AS pathJson, kind, source_text AS sourceText, start_pos AS start, end_pos AS end,
+      SELECT id, path_json AS pathJson, kind, source_text AS sourceText, start_pos AS start, end_pos AS end,
         translated_text AS translatedText, final_text AS finalText, review_status AS reviewStatus
       FROM segments WHERE project_id = ?
     `).all(projectId) as unknown as ApplicableSegment[];
@@ -173,7 +174,14 @@ export function createExportService({ database, clock, targetLanguage, review, s
     const draftModule = appliedModule && project.sourceFormat === 'charx'
       ? synchronizeRisuModuleLorebook(draft, appliedModule)
       : appliedModule;
-    assertRisuIntegrity(JSON.parse(project.original_json) as Record<string, unknown>, draft, originalModule, draftModule, false);
+    assertRisuIntegrity(
+      JSON.parse(project.original_json) as Record<string, unknown>,
+      draft,
+      originalModule,
+      draftModule,
+      false,
+      cardSegments,
+    );
 
     let storedDraft: Awaited<ReturnType<typeof storeFile>> | null = null;
     if (sourceChanges && draftSourceBlob) {
@@ -338,6 +346,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
     originalModule: Record<string, unknown> | null,
     draftModule: Record<string, unknown> | null,
     exporting: boolean,
+    cardSegments: readonly ApplicableSegment[] = [],
   ): void {
     if (!originalModule || !draftModule) return;
     if (exporting) {
@@ -348,8 +357,21 @@ export function createExportService({ database, clock, targetLanguage, review, s
     }
     const controlIssues = validateRisuControlReferences(originalCard, draft, originalModule, draftModule);
     if (controlIssues.length) {
+      const issue = controlIssues[0];
       const prefix = exporting ? '拒绝导出脚本引用不完整的卡片：' : '脚本引用完整性校验失败：';
-      throw new ProjectWorkflowError(`${prefix}${controlIssues[0].pathLabel} ${controlIssues[0].message}`, 409);
+      const payload = issue.code === 'REGEX_MATCH_COUNT_CHANGED'
+        ? {
+            code: issue.code,
+            pathLabel: issue.pathLabel,
+            pattern: issue.pattern,
+            originalMatches: issue.originalMatches,
+            draftMatches: issue.draftMatches,
+            affectedSegmentIds: findRisuRegexAffectedSegmentIds(issue.pattern || '', cardSegments),
+            problem: `${issue.pathLabel} 的正则实际命中数由 ${issue.originalMatches} 变为 ${issue.draftMatches}，当前稿中有部分文本不再符合该正则的输入格式。`,
+            fixSuggestion: '逐条对照原文、机翻和人工定稿，恢复该正则要求的文本结构；只修改可见文字，保留键名、分隔符和字段顺序，并保持模块中的正则规则不变。修订后保存并重新校验。',
+          }
+        : {};
+      throw new ProjectWorkflowError(`${prefix}${issue.pathLabel} ${issue.message}`, 409, payload);
     }
     const templateIssues = validateRisuTemplateChanges(originalModule, draftModule);
     if (templateIssues.length) {

@@ -32,6 +32,9 @@ export function createTranslationJobService(
         id, project_id AS projectId, status, scope, model,
         total_items AS totalItems, completed_items AS completedItems,
         failed_items AS failedItems, last_error AS lastError,
+        post_total_items AS postTotalItems,
+        post_completed_items AS postCompletedItems,
+        post_failed_items AS postFailedItems,
         created_at AS createdAt, updated_at AS updatedAt
       FROM jobs WHERE id = ?
     `).get(jobId) as Record<string, unknown> | undefined;
@@ -199,7 +202,10 @@ export function createTranslationJobService(
       FROM job_items WHERE job_id = ?
     `);
     const update = database.prepare(`
-      UPDATE jobs SET status = ?, total_items = ?, completed_items = ?, failed_items = ?, updated_at = ?
+      UPDATE jobs SET
+        status = ?, total_items = ?, completed_items = ?, failed_items = ?,
+        post_total_items = 0, post_completed_items = 0, post_failed_items = 0,
+        updated_at = ?
       WHERE id = ?
     `);
     for (const job of jobs) {

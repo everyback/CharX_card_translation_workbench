@@ -35,6 +35,9 @@ async function createJobDatabase(): Promise<{ database: AsyncDatabase; directory
       total_items INTEGER NOT NULL,
       completed_items INTEGER NOT NULL DEFAULT 0,
       failed_items INTEGER NOT NULL DEFAULT 0,
+      post_total_items INTEGER NOT NULL DEFAULT 0,
+      post_completed_items INTEGER NOT NULL DEFAULT 0,
+      post_failed_items INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -82,6 +85,22 @@ test('translation job service creates every job item and advances the project in
     assert.deepEqual(await database.prepare('SELECT status, total_items AS totalItems FROM jobs').all(), [
       { status: 'queued', totalItems: 1 },
     ]);
+    assert.deepEqual(await service.jobById(jobId), {
+      id: 'job-1',
+      projectId: 'project-1',
+      status: 'queued',
+      scope: 'all-visible',
+      model: 'test-model',
+      totalItems: 1,
+      completedItems: 0,
+      failedItems: 0,
+      postTotalItems: 0,
+      postCompletedItems: 0,
+      postFailedItems: 0,
+      lastError: null,
+      createdAt: '2026-08-21T00:00:00.000Z',
+      updatedAt: '2026-08-21T00:00:00.000Z',
+    });
     assert.deepEqual(await database.prepare('SELECT job_id AS jobId, segment_id AS segmentId, status FROM job_items').all(), [
       { jobId: 'job-1', segmentId: 'segment-1', status: 'pending' },
     ]);

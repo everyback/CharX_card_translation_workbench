@@ -30,6 +30,7 @@ export interface RuntimeSettings {
   concurrency: number;
   batchItems: number;
   batchChars: number;
+  requestTimeoutSeconds: number;
   imageApiUrl: string;
   imageApiKey: string;
   imageModel: string;
@@ -83,8 +84,14 @@ export interface RuntimeAliasTranslationCandidate {
   aliases: string[];
 }
 
+interface RuntimeAliasFollowUpResult {
+  total: number;
+  failed: number;
+}
+
 const runningJobs = new Map<string, AbortController>();
-const PROVIDER_TIMEOUT_MS = 120_000;
+export const DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS = 120;
+export const MAX_MODEL_REQUEST_TIMEOUT_SECONDS = 86_400;
 let activeCalls = 0;
 type ProviderWaiter = {
   jobKey: string;
@@ -110,6 +117,7 @@ export function publicSettings() {
     concurrency: settings.concurrency,
     batchItems: settings.batchItems,
     batchChars: settings.batchChars,
+    requestTimeoutSeconds: settings.requestTimeoutSeconds,
     imageApiUrl: settings.imageApiUrl,
     imageApiKeyConfigured: Boolean(settings.imageApiKey),
     imageModel: settings.imageModel,
@@ -130,6 +138,7 @@ export async function updateSettings(input: Record<string, unknown>) {
   if (input.concurrency != null) await saveSetting('concurrency', String(positiveInteger(input.concurrency, WORKBENCH_DEFAULTS.translation.concurrency)));
   if (input.batchItems != null) await saveSetting('batch_items', String(positiveInteger(input.batchItems, WORKBENCH_DEFAULTS.translation.batchItems)));
   if (input.batchChars != null) await saveSetting('batch_chars', String(minimumInteger(input.batchChars, 1000, WORKBENCH_DEFAULTS.translation.batchChars)));
+  if (input.requestTimeoutSeconds != null) await saveSetting('request_timeout_seconds', String(normalizeModelRequestTimeoutSeconds(input.requestTimeoutSeconds, WORKBENCH_DEFAULTS.translation.requestTimeoutSeconds)));
   if (typeof input.imageApiUrl === 'string') await saveSetting('image_api_url', input.imageApiUrl.trim());
   if (typeof input.imageModel === 'string') await saveSetting('image_model', input.imageModel.trim());
   if (typeof input.imageApiKey === 'string' && input.imageApiKey.trim()) await saveSetting('image_api_key', input.imageApiKey.trim());
@@ -176,7 +185,7 @@ export async function analyzeProtocolSemantics(input: ProtocolAnalysisInput): Pr
           },
         ],
       }),
-      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+      signal: AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds)),
     });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 800);
@@ -224,7 +233,7 @@ export async function segmentRuntimeNames(input: RuntimeNameCandidate[]): Promis
           { role: 'user', content: JSON.stringify(candidates) },
         ],
       }),
-      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+      signal: AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds)),
     });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 800);
@@ -278,7 +287,7 @@ export async function translateRuntimeAliases(
           { role: 'user', content: JSON.stringify(candidates) },
         ],
       }),
-      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+      signal: AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds)),
     });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 800);
@@ -374,6 +383,9 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
     initialSettings.languageBehaviorMode = await projectLanguageBehaviorMode(jobProject?.projectId || '', initialSettings.languageBehaviorMode);
     assertProviderReady(initialSettings);
     const controlLiterals = await controlLiteralsForJob(jobId);
+    const runtimeAliasCandidates = jobProject?.projectId
+      ? await prepareRuntimeAliasFollowUp(jobId, jobProject.projectId, initialSettings.targetLanguage)
+      : [];
     await log(jobId, 'info', `任务已进入调度队列，模型请求并发上限 ${initialSettings.concurrency}。`);
     if (controlLiterals.length) await log(jobId, 'info', `已保护 ${controlLiterals.length} 个脚本引用。`);
 
@@ -414,12 +426,17 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
       FROM job_items WHERE job_id = ?
     `).get(jobId) as { completed: number; failed: number; remaining: number };
     if (Number(counts.remaining) === 0) {
-      if (jobProject?.projectId) await translateProjectRuntimeAliases(jobId, jobProject.projectId, initialSettings);
-      const status = Number(counts.failed) > 0 ? 'review_with_errors' : 'review';
+      const followUp = jobProject?.projectId
+        ? await translateProjectRuntimeAliases(jobId, jobProject.projectId, initialSettings, runtimeAliasCandidates)
+        : { total: 0, failed: 0 };
+      const status = Number(counts.failed) > 0 || followUp.failed > 0 ? 'review_with_errors' : 'review';
       await db.prepare('UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), jobId);
       await db.prepare("UPDATE projects SET status = 'review', updated_at = ? WHERE id = (SELECT project_id FROM jobs WHERE id = ?)")
         .run(now(), jobId);
-      await log(jobId, 'info', `翻译完成：成功 ${Number(counts.completed) || 0}，失败 ${Number(counts.failed) || 0}。`);
+      const followUpMessage = followUp.total
+        ? `后续处理 ${followUp.total - followUp.failed}/${followUp.total}`
+        : '无后续处理';
+      await log(jobId, 'info', `翻译任务完成：成功 ${Number(counts.completed) || 0}，失败 ${Number(counts.failed) || 0}；${followUpMessage}。`);
     }
   } catch (error) {
     await Promise.allSettled(inFlight);
@@ -429,30 +446,74 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
   }
 }
 
+async function updateRuntimeAliasFollowUp(jobId: string, completed: number, failed: number): Promise<void> {
+  await db.prepare(`
+    UPDATE jobs SET post_completed_items = ?, post_failed_items = ?, updated_at = ? WHERE id = ?
+  `).run(completed, failed, now(), jobId);
+}
+
+/** Identify the runtime-name follow-up early so the task progress includes it. */
+async function prepareRuntimeAliasFollowUp(
+  jobId: string,
+  projectId: string,
+  targetLanguage: string,
+): Promise<RuntimeAliasTranslationCandidate[]> {
+  await db.prepare('UPDATE jobs SET post_total_items = 0, post_completed_items = 0, post_failed_items = 0, updated_at = ? WHERE id = ?')
+    .run(now(), jobId);
+  const row = await db.prepare(`
+    SELECT original_module_json AS originalModuleJson
+    FROM projects WHERE id = ?
+  `).get(projectId) as { originalModuleJson?: string | null } | undefined;
+  if (!row?.originalModuleJson) return [];
+
+  let originalModule: Record<string, unknown>;
+  try {
+    originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+  } catch {
+    await log(jobId, 'warn', '运行时别名阶段跳过：项目模块 JSON 无法解析。');
+    return [];
+  }
+  if (!detectRisuPortraitRouting(originalModule).detected) return [];
+  const candidates = collectRuntimeAliasTranslationCandidates(originalModule, targetLanguage);
+  await db.prepare(`
+    UPDATE jobs SET post_total_items = ?, post_completed_items = 0, post_failed_items = 0, updated_at = ? WHERE id = ?
+  `).run(candidates.length, now(), jobId);
+  if (candidates.length) {
+    await log(jobId, 'info', `后续处理已登记：翻译段落完成后，将本地化 ${candidates.length} 个运行时名称目录。`);
+  }
+  return candidates;
+}
+
 /** Localize missing runtime proper-name aliases before the project enters review. */
-async function translateProjectRuntimeAliases(jobId: string, projectId: string, settings: RuntimeSettings): Promise<void> {
+async function translateProjectRuntimeAliases(
+  jobId: string,
+  projectId: string,
+  settings: RuntimeSettings,
+  candidates: RuntimeAliasTranslationCandidate[],
+): Promise<RuntimeAliasFollowUpResult> {
+  if (!candidates.length) return { total: 0, failed: 0 };
   const row = await db.prepare(`
     SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
     FROM projects WHERE id = ?
   `).get(projectId) as { originalModuleJson?: string | null; draftModuleJson?: string | null } | undefined;
-  if (!row?.originalModuleJson) return;
+  if (!row?.originalModuleJson) {
+    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
+    return { total: candidates.length, failed: candidates.length };
+  }
 
-  let originalModule: Record<string, unknown>;
   let draftModule: Record<string, unknown>;
   try {
-    originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
     draftModule = row.draftModuleJson
       ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
       : structuredClone(originalModule);
   } catch {
+    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
     await log(jobId, 'warn', '运行时别名阶段跳过：项目模块 JSON 无法解析。');
-    return;
+    return { total: candidates.length, failed: candidates.length };
   }
-  if (!detectRisuPortraitRouting(originalModule).detected) return;
-  const candidates = collectRuntimeAliasTranslationCandidates(originalModule, settings.targetLanguage);
-  if (!candidates.length) return;
 
-  await log(jobId, 'info', `翻译完成后开始本地化 ${candidates.length} 个运行时名称目录。`);
+  await log(jobId, 'info', `后续处理开始：正在本地化 ${candidates.length} 个运行时名称目录，完成后进入审核。`);
   let translated: Record<string, string[]> = {};
   try {
     translated = await translateRuntimeAliases(candidates, settings.targetLanguage);
@@ -466,22 +527,40 @@ async function translateProjectRuntimeAliases(jobId: string, projectId: string, 
       }
     }
   } catch (error) {
+    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
     await log(jobId, 'warn', `运行时名称本地化失败，导出时将再次尝试：${error instanceof Error ? error.message : String(error)}`);
-    return;
+    return { total: candidates.length, failed: candidates.length };
   }
   if (!Object.keys(translated).length) {
+    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
     await log(jobId, 'warn', '运行时名称本地化没有返回可验证的目标语言别名。');
-    return;
+    return { total: candidates.length, failed: candidates.length };
   }
 
-  const applied = applyRisuModuleSegments(draftModule, [], '', undefined, translated);
-  if (!applied.runtimeAliasAdditions) {
-    await log(jobId, 'info', '运行时名称本地化结果没有新增目录项。');
-    return;
+  let applied: ReturnType<typeof applyRisuModuleSegments>;
+  try {
+    applied = applyRisuModuleSegments(draftModule, [], '', undefined, translated);
+  } catch (error) {
+    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
+    await log(jobId, 'warn', `运行时名称本地化写回失败，导出时将再次尝试：${error instanceof Error ? error.message : String(error)}`);
+    return { total: candidates.length, failed: candidates.length };
   }
-  await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(applied.draft), now(), projectId);
+  if (!applied.runtimeAliasAdditions) {
+    await updateRuntimeAliasFollowUp(jobId, candidates.length, 0);
+    await log(jobId, 'info', '运行时名称本地化结果没有新增目录项。');
+    return { total: candidates.length, failed: 0 };
+  }
+  try {
+    await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(applied.draft), now(), projectId);
+  } catch (error) {
+    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
+    await log(jobId, 'warn', `运行时名称本地化写回失败，导出时将再次尝试：${error instanceof Error ? error.message : String(error)}`);
+    return { total: candidates.length, failed: candidates.length };
+  }
+  await updateRuntimeAliasFollowUp(jobId, candidates.length, 0);
   await log(jobId, 'info', `已在翻译阶段写入 ${applied.runtimeAliasAdditions} 个运行时目标语言别名，进入审核时即可检查。`);
+  return { total: candidates.length, failed: 0 };
 }
 
 function runtimeSettings(): RuntimeSettings {
@@ -497,6 +576,7 @@ function runtimeSettings(): RuntimeSettings {
     concurrency: positiveInteger(setting('concurrency'), defaults.concurrency),
     batchItems: positiveInteger(setting('batch_items'), defaults.batchItems),
     batchChars: minimumInteger(setting('batch_chars'), 1000, defaults.batchChars),
+    requestTimeoutSeconds: normalizeModelRequestTimeoutSeconds(setting('request_timeout_seconds'), defaults.requestTimeoutSeconds),
     imageApiUrl: (setting('image_api_url') || '').trim(),
     imageApiKey: setting('image_api_key') || '',
     imageModel: (setting('image_model') || '').trim(),
@@ -682,7 +762,7 @@ async function requestTranslations(
         { role: 'user', content: payload },
       ],
     }),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(PROVIDER_TIMEOUT_MS)]),
+    signal: AbortSignal.any([signal, AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds))]),
   });
   if (!response.ok) {
     const body = (await response.text()).slice(0, 800);
@@ -946,6 +1026,16 @@ export function chatCompletionsEndpoint(value: string): string {
   return /\/chat\/completions$/i.test(normalized)
     ? normalized
     : `${normalized}/chat/completions`;
+}
+
+export function normalizeModelRequestTimeoutSeconds(value: unknown, fallback = DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(MAX_MODEL_REQUEST_TIMEOUT_SECONDS, Math.max(1, Math.round(parsed)));
+}
+
+export function modelRequestTimeoutMilliseconds(seconds: number): number {
+  return normalizeModelRequestTimeoutSeconds(seconds) * 1_000;
 }
 
 function normalizeLanguage(value: unknown, fallback: string): string {

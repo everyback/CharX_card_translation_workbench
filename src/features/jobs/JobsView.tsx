@@ -22,34 +22,61 @@ export function JobsView({
 }) {
   const selectedJob = selected && jobs.some((item) => item.id === selected.id) ? selected : null;
   const job = selectedJob ?? jobs[0] ?? null;
-  const percent = job?.totalItems ? Math.round(((job.completedItems + job.failedItems) / job.totalItems) * 100) : 0;
+  const processedItems = job ? Math.max(0, job.completedItems + job.failedItems) : 0;
+  const postTotalItems = job ? Math.max(0, job.postTotalItems ?? 0) : 0;
+  const postCompletedItems = job ? Math.max(0, job.postCompletedItems ?? 0) : 0;
+  const postFailedItems = job ? Math.max(0, job.postFailedItems ?? 0) : 0;
+  const postProcessedItems = Math.min(postTotalItems, postCompletedItems + postFailedItems);
+  const totalWorkItems = job ? Math.max(0, job.totalItems + postTotalItems) : 0;
+  const processedWorkItems = Math.min(totalWorkItems, processedItems + postProcessedItems);
+  const translatingItems = job ? Math.max(0, totalWorkItems - processedWorkItems) : 0;
+  const percent = totalWorkItems
+    ? translatingItems > 0
+      ? Math.min(99, Math.floor((processedWorkItems / totalWorkItems) * 100))
+      : 100
+    : 0;
   const translationFinished = Boolean(job && (
-    ['review', 'review_with_errors', 'failed'].includes(job.status)
-    || (job.totalItems > 0 && job.completedItems + job.failedItems >= job.totalItems)
+    translatingItems === 0
+    && (['review', 'review_with_errors', 'failed'].includes(job.status)
+      || (totalWorkItems > 0 && processedWorkItems >= totalWorkItems))
   ));
+  const hasFollowUpFailure = postFailedItems > 0;
+  const mainTranslationRemaining = job ? Math.max(0, job.totalItems - processedItems) : 0;
+  const followUpPending = postTotalItems > 0 && mainTranslationRemaining > 0;
+  const followUpInProgress = postTotalItems > 0 && !followUpPending && postProcessedItems < postTotalItems;
   return (
     <section className="jobs-layout">
       <div className="job-list">
-        {jobs.map((item) => (
-          <button key={item.id} className={`job-list-item ${job?.id === item.id ? 'active' : ''}`} onClick={() => onSelect(item)}>
-            <span className={`job-state state-${item.status}`} />
-            <span><strong>{STATUS_LABELS[item.status] || item.status}</strong><small>{formatTime(item.createdAt)} · {item.model}</small></span>
-            <b>{item.completedItems}/{item.totalItems}</b>
-          </button>
-        ))}
+        {jobs.map((item) => {
+          const itemPostTotal = Math.max(0, item.postTotalItems ?? 0);
+          const itemPostProcessed = Math.min(itemPostTotal, Math.max(0, (item.postCompletedItems ?? 0) + (item.postFailedItems ?? 0)));
+          return (
+            <button key={item.id} className={`job-list-item ${job?.id === item.id ? 'active' : ''}`} onClick={() => onSelect(item)}>
+              <span className={`job-state state-${item.status}`} />
+              <span><strong>{STATUS_LABELS[item.status] || item.status}</strong><small>{formatTime(item.createdAt)} · {item.model}</small></span>
+              <b>{item.completedItems + itemPostProcessed}/{item.totalItems + itemPostTotal}</b>
+            </button>
+          );
+        })}
         {!jobs.length && <div className="table-empty">还没有翻译任务</div>}
       </div>
       <div className="job-detail">
         {job ? <>
           <div className="job-title-row"><div><h2>任务进度</h2><span>{job.model} · 卡片语言设定：{languageBehaviorMode === 'preserve' ? '保留卡片原设定' : `跟随${targetLanguage}`}</span></div><strong>{percent}%</strong></div>
           <div className="progress-track"><span style={{ width: `${percent}%` }} /></div>
-          <div className="job-metrics"><span>成功 <b>{job.completedItems}</b></span><span>失败 <b>{job.failedItems}</b></span><span>总计 <b>{job.totalItems}</b></span></div>
+          <div className="job-metrics"><span>成功 <b>{job.completedItems}</b></span><span>失败 <b>{job.failedItems}</b></span><span>翻译中 <b>{translatingItems}</b></span><span>总计（含后续） <b>{totalWorkItems}</b></span></div>
+          {postTotalItems > 0 && (
+            <div className={`job-follow-up ${followUpPending ? 'pending' : followUpInProgress ? 'active' : hasFollowUpFailure ? 'failed' : 'complete'}`} role="status" aria-live="polite">
+              <div className="job-follow-up-heading"><strong>后续处理：运行时名称本地化</strong><b>{postProcessedItems}/{postTotalItems}</b></div>
+              <span>{followUpPending ? `主翻译完成后处理 ${postTotalItems} 个目录。` : followUpInProgress ? `正在处理 ${postTotalItems - postProcessedItems} 个目录，处理完成后进入审核。` : hasFollowUpFailure ? `有 ${postFailedItems} 个目录未完成，导出阶段会再次尝试。` : '运行时名称目录已处理完成，可以进入审核。'}</span>
+            </div>
+          )}
           {translationFinished && (
             <div className="job-complete-callout" role="status" aria-live="polite">
               <span className="job-complete-icon"><ShieldCheck size={18} /></span>
               <div className="job-complete-copy">
-                <strong>{job.failedItems > 0 ? '翻译已完成，但有项目需要留意' : '翻译已完成，下一步进入审核'}</strong>
-                <span>{job.failedItems > 0 ? '请先查看失败项和质量提示，再确认哪些译文可以通过。' : '请在审核页对照原文、译文和风险提示，确认后点击“保存”或“保存并导出”。'}</span>
+                <strong>{job.failedItems > 0 || hasFollowUpFailure ? '翻译已完成，但有项目需要留意' : '翻译已完成，下一步进入审核'}</strong>
+                <span>{job.failedItems > 0 || hasFollowUpFailure ? '请先查看失败项和后续处理提示，再确认哪些译文可以通过。' : '请在审核页对照原文、译文和风险提示，确认后点击“保存”或“保存并导出”。'}</span>
               </div>
               <button className="primary-button" type="button" onClick={onOpenReview}><CheckCheck size={16} />进入审核</button>
             </div>

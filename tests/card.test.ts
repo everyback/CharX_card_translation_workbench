@@ -5,6 +5,7 @@ import {
   bilingualModuleName,
   cardExportName,
   controlReferencesInText,
+  findRisuRegexAffectedSegmentIds,
   missingProtectionTokens,
   missingProtectedFragments,
   protectText,
@@ -386,6 +387,38 @@ test('Risu control validation catches status protocol match loss', () => {
     originalCard, draftCard, originalModule, structuredClone(originalModule),
   );
   assert.match(issues.map((issue) => issue.message).join('\n'), /正则协议匹配数量/);
+});
+
+test('Risu control validation reports language-sensitive display formatting drift for review', () => {
+  const pattern = '([”"」])[ \\t]+(?!(?:하고|하는|라고|라며|라는|이라고|이라는|라니|と|って)(?![가-힣]))(?![A-Za-z-]+=)(?=[“"「『]?[0-9A-Za-z가-힣ぁ-ヺ一-鿿*(])';
+  const originalCard = { data: { first_mes: '"안녕" 다음 장면' } };
+  const draftCard = { data: { first_mes: '“你好”下一幕' } };
+  const originalModule = {
+    regex: [{ type: 'editdisplay', in: pattern, out: '$1\n' }],
+  };
+
+  const issues = validateRisuControlReferences(
+    originalCard, draftCard, originalModule, structuredClone(originalModule),
+  );
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].code, 'REGEX_MATCH_COUNT_CHANGED');
+  assert.equal(issues[0].originalMatches, 1);
+  assert.equal(issues[0].draftMatches, 0);
+});
+
+test('Risu regex cardinality reports the translated segments needing manual review', () => {
+  const pattern = '([”"」])[ \\t]+(?!(?:하고|하는|라고|라며|라는|이라고|이라는|라니|と|って)(?![가-힣]))(?![A-Za-z-]+=)(?=[“"「『]?[0-9A-Za-z가-힣ぁ-ヺ一-鿿*(])';
+  const segments = [
+    {
+      id: 'affected', pathJson: '["data","first_mes"]', sourceText: '"안녕" 다음 장면',
+      translatedText: '“你好”下一幕', finalText: null, reviewStatus: 'approved', start: null, end: null,
+    },
+    {
+      id: 'unchanged', pathJson: '["data","scenario"]', sourceText: '일반 문장',
+      translatedText: '普通句子', finalText: null, reviewStatus: 'approved', start: null, end: null,
+    },
+  ];
+  assert.deepEqual(findRisuRegexAffectedSegmentIds(pattern, segments), ['affected']);
 });
 
 test('Risu control validation allows additive aliases with zero-width UI render rules', () => {

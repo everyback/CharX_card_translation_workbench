@@ -27,7 +27,7 @@ export function AboutView() {
       <div className="about-grid">
         <article className="about-card about-card-wide">
           <div className="about-card-title"><BookOpen size={18} /><h3>项目做什么</h3></div>
-          <p>卡片里的世界书、Lua、正则和资源经常互相交错，直接全文翻译很容易破坏原有按钮和脚本的格式。工作台会先把这些内容分开并保护起来，再让模型生成草稿，最后由你在审核页确认哪些修改可以导出。原卡片和聊天记录都不会被自动改动。绝大部分情况下可以无脑全部通过。</p>
+          <p>卡片里的世界书、Lua、正则和资源经常互相交错，直接全文翻译很容易破坏原有按钮和脚本的格式。工作台会先把这些内容分开并保护起来，再生成翻译草稿；审核页提供原文、机器译文和人工定稿对照，审核通过后才可导出。原卡片和聊天记录不会被自动改动。</p>
           <div className="about-workflow">
             {workflow.map((item, index) => <div className="about-workflow-step" key={item}><b>{index + 1}</b><span>{item}</span></div>)}
           </div>

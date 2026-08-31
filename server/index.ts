@@ -193,6 +193,9 @@ app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('
       total_items AS totalItems,
       completed_items AS completedItems,
       failed_items AS failedItems,
+      post_total_items AS postTotalItems,
+      post_completed_items AS postCompletedItems,
+      post_failed_items AS postFailedItems,
       last_error AS lastError,
       created_at AS createdAt,
       updated_at AS updatedAt
