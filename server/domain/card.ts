@@ -23,6 +23,7 @@ export interface ScannedSegment {
 
 export interface ApplicableSegment {
   id?: string;
+  pathLabel?: string;
   pathJson: string;
   sourceText?: string;
   start: number | null;
@@ -37,6 +38,8 @@ export interface RisuControlReference {
   literal: string;
   kind: 'regex' | 'lua';
   embedded?: boolean;
+  /** Runtime-only display formatting rules cannot be proven from static card text. */
+  dynamicDisplay?: boolean;
   path: Array<string | number>;
   pathLabel: string;
   pattern: string;
@@ -51,10 +54,61 @@ export interface RisuControlIssue {
   draftMatches?: number;
 }
 
+export interface RisuRegexValidationOverride {
+  pattern: string;
+  originalMatchCount: number;
+  draftMatchCount: number;
+  confirmedAt: string;
+}
+
+export type RisuRegexValidationOverrides = Readonly<Record<string, RisuRegexValidationOverride>>;
+
+export function isRegexValidationOverrideActive(
+  overrides: RisuRegexValidationOverrides | undefined,
+  pathLabel: string,
+  pattern: string,
+  originalMatchCount: number,
+  draftMatchCount: number,
+): boolean {
+  const override = overrides?.[pathLabel];
+  return Boolean(
+    override
+    && override.pattern === pattern
+    && override.originalMatchCount === originalMatchCount
+    && override.draftMatchCount === draftMatchCount,
+  );
+}
+
+/** A model-approved, additive set of literal alternatives for one regex input. */
+export interface RisuRegexAlternativeProposal {
+  pathLabel: string;
+  anchorAlternatives: string[];
+  additions: string[];
+  /** Coverage-stage candidate that may adjust target-language structure. */
+  pattern?: string;
+}
+
+export interface RisuRegexAlternativeChange {
+  pathLabel: string;
+  addedAlternatives: string[];
+}
+
+/** Return the first top-level non-capturing alternation used by a regex rule. */
+export function extractRegexAlternatives(pattern: string): string[] {
+  for (const group of findNonCapturingGroups(pattern)) {
+    const alternatives = splitTopLevelRegexAlternatives(pattern.slice(group.bodyStart, group.end));
+    if (alternatives.length > 1) return alternatives;
+  }
+  return [];
+}
+
 interface RisuRegexInput {
   path: Array<string | number>;
   pathLabel: string;
   pattern: string;
+  type: string;
+  out: string;
+  dynamicDisplay: boolean;
 }
 
 const CORE_KEYS = new Set([
@@ -296,7 +350,9 @@ export function scanRisuModule(module: Record<string, unknown>, scope: ScopePres
       const luaCode = isLuaModuleCodePath(path);
       if (scope === 'lua-only' && !luaCode) return;
       const background = isBackgroundPath(path);
-      if (scope === 'all' && !luaCode && !background && !isGenericProtectedPath(path, String(path.at(-1) ?? ''))) {
+      const script = isScriptPath(path);
+      if (scope === 'all' && !luaCode && !background && !script
+        && !isGenericProtectedPath(path, String(path.at(-1) ?? ''))) {
         add(fieldSegment(path, value, 'core', 'medium'));
         return;
       }
@@ -365,6 +421,7 @@ export function risuControlReferences(module: Record<string, unknown>): RisuCont
           path: inputPath,
           pathLabel: pathLabel(['$module', ...inputPath]),
           pattern: entry.in,
+          dynamicDisplay: isRisuDisplayFormattingRegexRule(entry),
         });
       }
     }
@@ -419,6 +476,7 @@ export function validateRisuControlReferences(
   draftCard: Record<string, unknown>,
   originalModule: Record<string, unknown>,
   draftModule: Record<string, unknown>,
+  regexValidationOverrides: RisuRegexValidationOverrides = {},
 ): RisuControlIssue[] {
   const issues: RisuControlIssue[] = [];
   const references = risuControlReferences(originalModule);
@@ -433,19 +491,38 @@ export function validateRisuControlReferences(
   for (const reference of references) {
     const originalValue = String(getAt(originalModule, reference.path) ?? '');
     const draftValue = String(getAt(draftModule, reference.path) ?? '');
-    if (reference.kind === 'regex' && originalValue !== draftValue) {
+    if (reference.kind === 'regex' && !reference.dynamicDisplay && originalValue !== draftValue
+      && !isAdditiveRegexExtension(originalValue, draftValue)
+      && !isSafeRegexLanguageAdaptation(originalValue, draftValue, originalCard)) {
       report({ pathLabel: reference.pathLabel, message: `正则触发规则已改动：${reference.literal}` });
     }
   }
 
   // Capture-group regex rules are not literal control references, but their
-  // input pattern is still executable structure. Keep it byte-for-byte stable
-  // and verify that translated card text remains matchable by the same rule.
+  // input pattern is still executable structure. Runtime display rules are
+  // checked structurally; static card cardinality applies to other rules.
   const originalRegexInputs = collectRisuRegexInputs(originalModule);
-  const draftRegexInputs = new Map(collectRisuRegexInputs(draftModule).map((entry) => [JSON.stringify(entry.path), entry.pattern]));
+  const draftRegexInputs = new Map(collectRisuRegexInputs(draftModule).map((entry) => [JSON.stringify(entry.path), entry]));
   for (const reference of originalRegexInputs) {
-    const draftPattern = draftRegexInputs.get(JSON.stringify(reference.path));
-    if (draftPattern !== reference.pattern) {
+    const draftInput = draftRegexInputs.get(JSON.stringify(reference.path));
+    const draftPattern = draftInput?.pattern;
+    if (reference.dynamicDisplay) {
+      if (!draftInput || !isSafeRisuDisplayFormattingInputChange(reference, draftInput)) {
+        report({
+          pathLabel: reference.pathLabel,
+          message: '动态展示正则只能保留 editdisplay 类型、捕获组和仅由捕获组/换行组成的替换模板。',
+        });
+      }
+      // editdisplay runs when Risu renders message text. Static card strings
+      // are diagnostic samples only, so Chinese no-space writing must not be
+      // blocked by a source/draft cardinality comparison.
+      continue;
+    }
+    const languageAdapted = draftPattern !== reference.pattern
+      && !isAdditiveRegexExtension(reference.pattern, draftPattern || '')
+      && isSafeRegexLanguageAdaptation(reference.pattern, draftPattern || '', originalCard);
+    if (draftPattern !== reference.pattern && !isAdditiveRegexExtension(reference.pattern, draftPattern || '')
+      && !languageAdapted) {
       report({ pathLabel: reference.pathLabel, message: '正则输入模式已改动，协议外壳必须保留原格式。' });
       continue;
     }
@@ -458,8 +535,17 @@ export function validateRisuControlReferences(
     if (isZeroWidthCardinalityTrigger(reference.pattern)) continue;
 
     const originalMatches = countRegexMatchesInStrings(originalCard, reference.pattern);
-    const draftMatches = countRegexMatchesInStrings(draftCard, reference.pattern);
+    const draftMatches = countRegexMatchesInStrings(draftCard, languageAdapted ? (draftPattern || reference.pattern) : reference.pattern);
     if (originalMatches > 0 && draftMatches !== originalMatches) {
+      const effectivePattern = languageAdapted ? (draftPattern || reference.pattern) : reference.pattern;
+      const overrideActive = isRegexValidationOverrideActive(
+        regexValidationOverrides, reference.pathLabel, effectivePattern, originalMatches, draftMatches,
+      ) || Boolean(
+        draftPattern
+        && isAdditiveRegexExtension(reference.pattern, draftPattern)
+        && isRegexValidationOverrideActive(regexValidationOverrides, reference.pathLabel, draftPattern, originalMatches, draftMatches),
+      );
+      if (overrideActive) continue;
       report({
         pathLabel: reference.pathLabel,
         code: 'REGEX_MATCH_COUNT_CHANGED',
@@ -517,6 +603,239 @@ export function findRisuRegexAffectedSegmentIds(
     }
   }
   return affected;
+}
+
+/**
+ * Apply only validated literal alternatives to a regex rule. The original
+ * alternatives and ordering remain untouched; malformed or ambiguous model
+ * output is ignored.
+ */
+export function applyRisuRegexAlternativeProposals(
+  module: Record<string, unknown>,
+  proposals: readonly RisuRegexAlternativeProposal[],
+): RisuRegexAlternativeChange[] {
+  if (!proposals.length || !Array.isArray(module.regex)) return [];
+  const byPath = new Map<string, RisuRegexAlternativeProposal>();
+  for (const proposal of proposals) {
+    if (!proposal || typeof proposal.pathLabel !== 'string') continue;
+    if (!byPath.has(proposal.pathLabel)) byPath.set(proposal.pathLabel, proposal);
+  }
+  const changes: RisuRegexAlternativeChange[] = [];
+  module.regex.forEach((rawEntry, index) => {
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) return;
+    const entry = rawEntry as Record<string, unknown>;
+    if (typeof entry.in !== 'string') return;
+    const pathLabelValue = pathLabel(['$module', 'regex', index, 'in']);
+    const proposal = byPath.get(pathLabelValue);
+    if (!proposal) return;
+    const result = appendRegexLiteralAlternatives(entry.in, proposal.anchorAlternatives, proposal.additions);
+    if (!result.added.length) return;
+    entry.in = result.pattern;
+    changes.push({ pathLabel: pathLabelValue, addedAlternatives: result.added });
+  });
+  return changes;
+}
+
+/** Apply complete patterns returned by the full-coverage language check. */
+export function applyRisuRegexCoverageProposals(
+  module: Record<string, unknown>,
+  proposals: readonly RisuRegexAlternativeProposal[],
+  originalCard?: Record<string, unknown>,
+): RisuRegexAlternativeChange[] {
+  if (!Array.isArray(module.regex)) return [];
+  const byPath = new Map(proposals.filter((proposal) => typeof proposal?.pattern === 'string').map((proposal) => [proposal.pathLabel, proposal]));
+  const changes: RisuRegexAlternativeChange[] = [];
+  module.regex.forEach((rawEntry, index) => {
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) return;
+    const entry = rawEntry as Record<string, unknown>;
+    if (typeof entry.in !== 'string') return;
+    const pathLabelValue = pathLabel(['$module', 'regex', index, 'in']);
+    const proposal = byPath.get(pathLabelValue);
+    if (!proposal?.pattern || proposal.pattern === entry.in) return;
+    if (!isSafeRegexLanguageAdaptation(entry.in, proposal.pattern, originalCard ?? {})) return;
+    // A later complete-pattern proposal must retain aliases already added by
+    // the translation-stage pass, otherwise the two stages can regress each
+    // other when the Lua page is run repeatedly.
+    const currentAlternatives = extractRegexAlternatives(entry.in);
+    const candidateAlternatives = extractRegexAlternatives(proposal.pattern);
+    if (currentAlternatives.length && !currentAlternatives.every((value) => candidateAlternatives.includes(value))) return;
+    entry.in = proposal.pattern;
+    changes.push({ pathLabel: pathLabelValue, addedAlternatives: [] });
+  });
+  return changes;
+}
+
+function appendRegexLiteralAlternatives(
+  pattern: string,
+  anchors: readonly string[],
+  additions: readonly string[],
+): { pattern: string; added: string[] } {
+  const cleanAnchors = [...new Set(anchors.map((value) => value.trim()).filter(Boolean))];
+  const cleanAdditions = [...new Set(additions.map((value) => value.trim()).filter(isSafeRegexLiteral))];
+  if (!cleanAnchors.length || !cleanAdditions.length) return { pattern, added: [] };
+  for (const group of findNonCapturingGroups(pattern)) {
+    const body = pattern.slice(group.bodyStart, group.end);
+    const alternatives = splitTopLevelRegexAlternatives(body);
+    // A focused proposal may cite only the relevant subset of a large group.
+    if (!cleanAnchors.some((anchor) => alternatives.includes(anchor))) continue;
+    const present = new Set(alternatives);
+    const added = cleanAdditions.filter((value) => !present.has(value));
+    if (!added.length) return { pattern, added: [] };
+    const nextBody = `${body}|${added.map(escapeRegExp).join('|')}`;
+    return { pattern: `${pattern.slice(0, group.bodyStart)}${nextBody}${pattern.slice(group.end)}`, added };
+  }
+  return { pattern, added: [] };
+}
+
+function isAdditiveRegexExtension(original: string, draft: string): boolean {
+  if (original === draft) return true;
+  const allowedClosings = new Set(findNonCapturingGroups(draft).map((group) => group.end));
+  let originalCursor = 0;
+  let draftCursor = 0;
+  let inserted = false;
+  while (originalCursor < original.length) {
+    if (original[originalCursor] === draft[draftCursor]) {
+      originalCursor += 1;
+      draftCursor += 1;
+      continue;
+    }
+    if (draft[draftCursor] !== '|') return false;
+    const close = draft.indexOf(')', draftCursor + 1);
+    if (close < 0 || !allowedClosings.has(close)) return false;
+    const additions = draft.slice(draftCursor + 1, close).split('|');
+    if (!additions.length || additions.some((value) => !isSafeRegexEncodedLiteral(value))) return false;
+    inserted = true;
+    draftCursor = close;
+  }
+  return inserted && draftCursor === draft.length;
+}
+
+function isSafeRegexLanguageAdaptation(original: string, candidate: string, originalCard: Record<string, unknown>): boolean {
+  if (!candidate || candidate.length > 4_000 || /[\r\n]/u.test(candidate)) return false;
+  if (isZeroWidthCardinalityTrigger(original)) return false;
+  try { new RegExp(candidate); } catch { return false; }
+  if (countCapturingGroups(original) !== countCapturingGroups(candidate)) return false;
+  const originalMatches = countRegexMatchesInStrings(originalCard, original);
+  if (originalMatches <= 0) return false;
+  if (countRegexMatchesInStrings(originalCard, candidate) < originalMatches) return false;
+  return true;
+}
+
+export function isRisuDisplayFormattingRegexRule(rule: Record<string, unknown> | null | undefined): boolean {
+  const pattern = typeof rule?.in === 'string' ? rule.in : '';
+  const output = typeof rule?.out === 'string' ? rule.out : '';
+  return String(rule?.type ?? '').trim().toLowerCase() === 'editdisplay'
+    && Boolean(pattern)
+    && isDisplayFormattingReplacement(output, countCapturingGroups(pattern));
+}
+
+function isDisplayFormattingReplacement(output: string, captureCount: number): boolean {
+  if (!output || !/^(?:\$\d+|\r?\n)+$/u.test(output)) return false;
+  const references = [...output.matchAll(/\$(\d+)/gu)].map((match) => Number(match[1]));
+  return references.length === captureCount
+    && references.every((reference, index) => reference === index + 1);
+}
+
+export function isSafeRisuDisplayFormattingRegexChange(
+  originalRule: Record<string, unknown> | null | undefined,
+  candidateRule: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!isRisuDisplayFormattingRegexRule(originalRule) || !isRisuDisplayFormattingRegexRule(candidateRule)) return false;
+  const originalType = typeof originalRule?.type === 'string' ? originalRule.type : '';
+  const candidateType = typeof candidateRule?.type === 'string' ? candidateRule.type : '';
+  const originalOutput = typeof originalRule?.out === 'string' ? originalRule.out : '';
+  const candidateOutput = typeof candidateRule?.out === 'string' ? candidateRule.out : '';
+  const originalPattern = typeof originalRule?.in === 'string' ? originalRule.in : '';
+  const candidatePattern = typeof candidateRule?.in === 'string' ? candidateRule.in : '';
+  if (originalType !== candidateType || originalOutput !== candidateOutput) return false;
+  if (!originalPattern || !candidatePattern || candidatePattern.length > 4_000 || /[\r\n]/u.test(candidatePattern)) return false;
+  const captureCount = countCapturingGroups(originalPattern);
+  if (captureCount !== countCapturingGroups(candidatePattern)) return false;
+  if (!isDisplayFormattingReplacement(candidateOutput, captureCount)) return false;
+  try { new RegExp(candidatePattern); } catch { return false; }
+  return true;
+}
+
+function isSafeRisuDisplayFormattingInputChange(original: RisuRegexInput, candidate: RisuRegexInput): boolean {
+  return isSafeRisuDisplayFormattingRegexChange(
+    { type: original.type, in: original.pattern, out: original.out },
+    { type: candidate.type, in: candidate.pattern, out: candidate.out },
+  );
+}
+
+function countCapturingGroups(pattern: string): number {
+  let count = 0;
+  let escaped = false;
+  let inClass = false;
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (char === '[') { inClass = true; continue; }
+    if (char === ']' && inClass) { inClass = false; continue; }
+    if (inClass || char !== '(') continue;
+    const next = pattern[index + 1];
+    if (next !== '?') count += 1;
+    else if (pattern[index + 2] === '<' && pattern[index + 3] !== '=' && pattern[index + 3] !== '!') count += 1;
+  }
+  return count;
+}
+
+function isSafeRegexLiteral(value: string): boolean {
+  return value.length >= 1 && value.length <= 40
+    && !/[\\()[\]{}*+?|^$\r\n]/u.test(value);
+}
+
+function isSafeRegexEncodedLiteral(value: string): boolean {
+  const decoded = value.replace(/\\([.*+?^${}()|[\]\\])/gu, '$1');
+  return isSafeRegexLiteral(decoded) && escapeRegExp(decoded) === value;
+}
+
+function findNonCapturingGroups(pattern: string): Array<{ bodyStart: number; end: number }> {
+  const groups: Array<{ bodyStart: number; end: number }> = [];
+  const stack: Array<{ start: number; bodyStart: number; nonCapturing: boolean }> = [];
+  let inClass = false;
+  let escaped = false;
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (char === '[') { inClass = true; continue; }
+    if (char === ']' && inClass) { inClass = false; continue; }
+    if (inClass) continue;
+    if (char === '(') {
+      const nonCapturing = pattern.startsWith('(?:', index);
+      stack.push({ start: index, bodyStart: index + (nonCapturing ? 3 : 1), nonCapturing });
+    } else if (char === ')' && stack.length) {
+      const group = stack.pop()!;
+      if (group.nonCapturing) groups.push({ bodyStart: group.bodyStart, end: index });
+    }
+  }
+  return groups;
+}
+
+function splitTopLevelRegexAlternatives(body: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let inClass = false;
+  let escaped = false;
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (escaped) { escaped = false; continue; }
+    if (char === '\\') { escaped = true; continue; }
+    if (char === '[') { inClass = true; continue; }
+    if (char === ']' && inClass) { inClass = false; continue; }
+    if (inClass) continue;
+    if (char === '(') depth += 1;
+    else if (char === ')' && depth > 0) depth -= 1;
+    else if (char === '|' && depth === 0) {
+      parts.push(body.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(body.slice(start));
+  return parts;
 }
 
 export function isLuaModuleCodePath(path: Array<string | number>): boolean {
@@ -827,7 +1146,7 @@ function countOccurrencesInStrings(value: unknown, literal: string): number {
   return Object.values(value).reduce((total, entry) => total + countOccurrencesInStrings(entry, literal), 0);
 }
 
-function isZeroWidthCardinalityTrigger(pattern: string): boolean {
+export function isZeroWidthCardinalityTrigger(pattern: string): boolean {
   try {
     const match = new RegExp(pattern).exec('');
     // RegExpExecArray contains one element when the rule has no capture groups.
@@ -838,7 +1157,57 @@ function isZeroWidthCardinalityTrigger(pattern: string): boolean {
   }
 }
 
-function countRegexMatchesInStrings(value: unknown, pattern: string): number {
+export function regexMatchSamplesInStrings(value: unknown, pattern: string, limit = 40): string[] {
+  const samples: string[] = [];
+  let regex: RegExp;
+  try { regex = new RegExp(pattern, 'u'); } catch { return samples; }
+  const visit = (child: unknown) => {
+    if (samples.length >= limit) return;
+    if (typeof child === 'string') {
+      regex.lastIndex = 0;
+      if (regex.test(child)) samples.push(child);
+      return;
+    }
+    if (Array.isArray(child)) { child.forEach(visit); return; }
+    if (child && typeof child === 'object') Object.values(child).forEach(visit);
+  };
+  visit(value);
+  return samples;
+}
+
+/** Return bounded context around each regex hit for diagnostics, rather than whole card strings. */
+export function regexMatchSnippetsInStrings(value: unknown, pattern: string, limit = 40): string[] {
+  const samples: string[] = [];
+  let regex: RegExp;
+  try { regex = new RegExp(pattern, 'gu'); } catch { return samples; }
+  const clip = (text: string, max = 80) => text.length <= max ? text : `${text.slice(0, max)}…`;
+  const visit = (child: unknown) => {
+    if (samples.length >= limit) return;
+    if (typeof child === 'string') {
+      regex.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while (samples.length < limit && (match = regex.exec(child))) {
+        const start = Math.max(0, match.index - 55);
+        const end = Math.min(child.length, match.index + match[0].length + 55);
+        const before = child.slice(start, match.index);
+        const hit = match[0] ? `【${clip(match[0])}】` : '【空匹配】';
+        const after = child.slice(match.index + match[0].length, end);
+        const snippet = `${start > 0 ? '…' : ''}${before}${hit}${after}${end < child.length ? '…' : ''}`
+          .replace(/\s+/gu, ' ')
+          .trim();
+        samples.push(snippet.length > 180 ? `${snippet.slice(0, 179)}…` : snippet);
+        if (!match[0].length) regex.lastIndex = match.index + 1;
+      }
+      return;
+    }
+    if (Array.isArray(child)) { child.forEach(visit); return; }
+    if (child && typeof child === 'object') Object.values(child).forEach(visit);
+  };
+  visit(value);
+  return samples;
+}
+
+export function countRegexMatchesInStrings(value: unknown, pattern: string): number {
   let regex: RegExp;
   try {
     regex = new RegExp(pattern, 'g');
@@ -867,16 +1236,30 @@ function collectRisuRegexInputs(module: Record<string, unknown>): RisuRegexInput
   const rules = Array.isArray(module.regex) ? module.regex : [];
   rules.forEach((entry, index) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
-    const input = (entry as Record<string, unknown>).in;
+    const rule = entry as Record<string, unknown>;
+    const input = rule.in;
     if (typeof input !== 'string' || !input) return;
     const path: Array<string | number> = ['regex', index, 'in'];
     inputs.push({
       path,
       pathLabel: pathLabel(['$module', ...path]),
       pattern: input,
+      type: typeof rule.type === 'string' ? rule.type : '',
+      out: typeof rule.out === 'string' ? rule.out : '',
+      dynamicDisplay: isRisuDisplayFormattingRegexRule(rule),
     });
   });
   return inputs;
+}
+
+export function risuRegexControlReferences(module: Record<string, unknown>): Array<{ literal: string; kind: 'regex'; pathLabel: string; pattern: string; dynamicDisplay: boolean }> {
+  return collectRisuRegexInputs(module).map((entry) => ({
+    literal: entry.pattern,
+    kind: 'regex' as const,
+    pathLabel: entry.pathLabel,
+    pattern: entry.pattern,
+    dynamicDisplay: entry.dynamicDisplay,
+  }));
 }
 
 function collectButtonActions(value: unknown): Map<string, string[]> {
@@ -1680,6 +2063,13 @@ function isEncodedLiteralSegment(kind: SegmentKind | undefined): boolean {
     || kind === 'lua-text-node';
 }
 
+function requiresQuotedLiteralContext(kind: SegmentKind | undefined): boolean {
+  return kind === 'runtime-message'
+    || kind === 'lua-string'
+    || kind === 'lua-formatted'
+    || kind === 'lua-language';
+}
+
 function enclosingQuote(source: string, start: number): string {
   const lineStart = source.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
   let quote = '';
@@ -1759,6 +2149,11 @@ function segmentRangeMatches(
 ): boolean {
   if (start < 0 || end < start || end > source.length) return false;
   if (segment.sourceText == null) return true;
+  // Regular Lua literal scans store offsets for the content inside quotes.
+  // When an older scan is replayed against a translated draft, the same text
+  // can occur inside an identifier (for example `flashback then`). Never
+  // replace that code token just because the stale offset happens to match.
+  if (requiresQuotedLiteralContext(segment.kind) && !enclosingQuote(source, start)) return false;
   const raw = source.slice(start, end);
   if (segment.kind === 'lua-long-string') {
     return raw.startsWith('[') && raw.endsWith(']') && raw.includes(segment.sourceText ?? '');

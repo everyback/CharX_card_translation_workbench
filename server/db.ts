@@ -46,6 +46,7 @@ await db.exec(`
     draft_storage_bytes INTEGER,
     draft_storage_sha256 TEXT,
     source_metadata_keys TEXT NOT NULL DEFAULT '[]',
+    regex_validation_overrides TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
@@ -229,6 +230,7 @@ await addColumnIfMissing('resource_image_candidates', 'storage_bytes', 'INTEGER'
 await addColumnIfMissing('resource_image_candidates', 'storage_sha256', 'TEXT');
 await addColumnIfMissing('segments', 'protocol_delimiter', 'TEXT');
 await addColumnIfMissing('projects', 'language_behavior_mode', "TEXT NOT NULL DEFAULT 'target'");
+await addColumnIfMissing('projects', 'regex_validation_overrides', "TEXT NOT NULL DEFAULT '{}'");
 await addColumnIfMissing('jobs', 'post_total_items', 'INTEGER NOT NULL DEFAULT 0');
 await addColumnIfMissing('jobs', 'post_completed_items', 'INTEGER NOT NULL DEFAULT 0');
 await addColumnIfMissing('jobs', 'post_failed_items', 'INTEGER NOT NULL DEFAULT 0');

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LoadingMask, Stat, UiAlert } from '../components/ui';
+import { api, jsonBody } from '../api';
 import { SCOPE_OPTIONS } from '../constants';
 import { ProjectOverviewView } from '../features/card-inspection/ProjectOverviewView';
 import { AboutView } from '../features/about/AboutView';
@@ -29,6 +30,10 @@ import { SettingsDialog } from '../features/settings/SettingsDialog';
 import { GuidedWorkflow } from '../features/workflow/GuidedWorkflow';
 import { QuickStartView } from '../features/workflow/QuickStartView';
 import type {
+  RegexCoveragePreview,
+  RegexCoverageRuleResult,
+  RegexRuleSaveResult,
+  RegexRuleTestResult,
   ReviewFocus,
   ScopePreset,
   Tab,
@@ -170,6 +175,7 @@ export function WorkbenchApp() {
 
   const showReview = useCallback(() => setTab('review'), []);
   const showLua = useCallback(() => setTab('lua'), []);
+  const activeTranslationJob = Boolean(project?.jobs.some((job) => ['queued', 'running'].includes(job.status)));
   const {
     selectedSegment,
     updateSegment,
@@ -178,6 +184,7 @@ export function WorkbenchApp() {
     reviewBulk,
     clearAllTranslationResults,
     applyDraft,
+    applyDraftQuiet,
     saveAndExport,
   } = useReviewActions({
     project,
@@ -191,8 +198,23 @@ export function WorkbenchApp() {
     showUiConfirm,
     onNotice: setNotice,
     onShowReview: showReview,
+    onOpenLuaManagement: showLua,
     onFocusReview: setReviewFocus,
+    onClearReviewFocus: () => setReviewFocus(null),
   });
+
+  const saveLuaAndExport = useCallback(async () => {
+    if (!project?.id) return;
+    // The Lua page can still hold the report from before a syntax-line save.
+    // Refresh it before choosing between re-checking and exporting so the
+    // button never branches on a stale blocker count.
+    const latestLuaReport = await loadLuaReport(project.id, true);
+    if (latestLuaReport?.blockerCount) {
+      await applyDraftQuiet();
+      return;
+    }
+    await saveAndExport(false);
+  }, [applyDraftQuiet, loadLuaReport, project?.id, saveAndExport]);
 
   const selectProject = useCallback((projectId: string) => {
     clearJobDetail();
@@ -390,7 +412,7 @@ export function WorkbenchApp() {
               <button className="secondary-button" onClick={() => void scan()} disabled={Boolean(busy)}>
                 {busy === 'scan' ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}扫描字段
               </button>
-              <button className="primary-button" onClick={() => void startTranslation()} disabled={!project.segments.length || Boolean(busy)}>
+              <button className="primary-button" onClick={() => void startTranslation()} disabled={!project.segments.length || Boolean(busy) || activeTranslationJob} title={activeTranslationJob ? '翻译任务进行中，完成或失败后才能再次执行' : undefined}>
                 {busy === 'start' ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}开始翻译
               </button>
               <div className="command-spacer" />
@@ -502,14 +524,38 @@ export function WorkbenchApp() {
                 onPreviewRouterRepair={previewPortraitRouter}
                 onApplyRouterRepair={repairPortraitRouter}
                 onPreviewError={showError}
-                onOpenReview={(pathLabel) => {
-                  const match = pathLabel
-                    ? project.segments.find((segment) => segment.pathLabel === pathLabel && (segment.kind.startsWith('lua-') || segment.kind === 'runtime-message'))
-                    : project.segments.find((segment) => segment.kind.startsWith('lua-') || segment.kind === 'runtime-message');
-                  if (match) setSelectedSegmentId(match.id);
-                  setTab('review');
+                onSaveLuaSyntaxLine={async (pathJson, line, replacement, expectedLine) => {
+                  const result = await api<{ syntaxOk: boolean; remainingSyntaxIssues?: unknown[] }>(`/api/projects/${project.id}/lua/syntax-line`, {
+                    method: 'PATCH',
+                    ...jsonBody({ pathJson, line, replacement, ...(expectedLine !== undefined ? { expectedLine } : {}) }),
+                  });
+                  await loadLuaReport(project.id, true);
+                  return result;
                 }}
-                onOpenExport={() => void saveAndExport()}
+                onOpenExport={() => void saveLuaAndExport()}
+                reviewFocus={reviewFocus}
+                onClearReviewFocus={() => setReviewFocus(null)}
+                onSaveAliases={async (ownerId, aliases) => {
+                  await api(`/api/projects/${project.id}/lua/runtime-aliases`, { method: 'POST', ...jsonBody({ ownerId, aliases }) });
+                  setNotice(`已将 ${ownerId} 的目标语言别名一次合并到 Lua 匹配目录。`);
+                  await loadLuaReport(project.id);
+                }}
+                onPreviewRegexCoverage={() => api<RegexCoveragePreview>(`/api/projects/${project.id}/lua/regex-coverage/preview`, { method: 'POST' })}
+                regexConcurrency={settings?.concurrency ?? 1}
+                onAnalyzeRegexRule={async (pathLabel, signal, pattern) => {
+                  const result = await api<RegexCoverageRuleResult>(`/api/projects/${project.id}/lua/regex-coverage/rule`, { method: 'POST', signal, ...jsonBody({ pathLabel, ...(pattern !== undefined ? { pattern } : {}) }) });
+                  return result;
+                }}
+                onTestRegexRule={(pathLabel, pattern) => api<RegexRuleTestResult>(`/api/projects/${project.id}/lua/regex-test`, {
+                  method: 'POST', ...jsonBody({ pathLabel, pattern }),
+                })}
+                onSaveRegexRule={async (pathLabel, pattern, expectedPattern, forcePass) => {
+                  const result = await api<RegexRuleSaveResult>(`/api/projects/${project.id}/lua/regex-rule`, {
+                    method: 'PATCH', ...jsonBody({ pathLabel, pattern, expectedPattern, forcePass }),
+                  });
+                  await loadLuaReport(project.id);
+                  return result;
+                }}
               />
             )}
 

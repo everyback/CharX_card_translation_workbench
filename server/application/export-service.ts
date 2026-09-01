@@ -5,6 +5,7 @@ import {
   cardExportName,
   findRisuRegexAffectedSegmentIds,
   type ApplicableSegment,
+  type RisuRegexValidationOverrides,
   validateRisuControlReferences,
 } from '../domain/card.js';
 import { synchronizeRisuModuleLorebook, writeCardCharx } from '../domain/charx.js';
@@ -55,6 +56,33 @@ export interface ExportPayload {
   body: Uint8Array | string;
 }
 
+function parseRegexValidationOverrides(value: string | null | undefined): RisuRegexValidationOverrides {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const result: Record<string, RisuRegexValidationOverrides[string]> = {};
+    for (const [pathLabel, raw] of Object.entries(parsed)) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const item = raw as Record<string, unknown>;
+      const originalMatchCount = Number(item.originalMatchCount);
+      const draftMatchCount = Number(item.draftMatchCount);
+      if (typeof item.pattern !== 'string' || !item.pattern) continue;
+      if (!Number.isSafeInteger(originalMatchCount) || originalMatchCount < 0) continue;
+      if (!Number.isSafeInteger(draftMatchCount) || draftMatchCount < 0) continue;
+      result[pathLabel] = {
+        pattern: item.pattern,
+        originalMatchCount,
+        draftMatchCount,
+        confirmedAt: typeof item.confirmedAt === 'string' ? item.confirmedAt : '',
+      };
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
 export function createExportService({ database, clock, targetLanguage, review, segmentRuntimeNames, translateRuntimeAliases }: ExportServiceDependencies) {
   async function applyProject(projectId: string): Promise<{
     ok: true;
@@ -66,6 +94,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
   }> {
     const project = await database.prepare(`
       SELECT original_json, original_module_json, draft_module_json AS draftModuleJson, source_format AS sourceFormat, source_filename AS sourceFilename,
+        regex_validation_overrides AS regexValidationOverrides,
         source_blob, source_storage_path AS sourceStoragePath,
         draft_source_blob AS draftSourceBlob, draft_storage_path AS draftStoragePath
       FROM projects WHERE id = ?
@@ -73,6 +102,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
       original_json: string;
       original_module_json: string | null;
       draftModuleJson: string | null;
+      regexValidationOverrides: string | null;
       sourceFormat: string;
       sourceFilename: string | null;
       source_blob: Uint8Array | null;
@@ -84,7 +114,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
 
     await assertProjectCanApply(projectId, false);
     const segments = await database.prepare(`
-      SELECT id, path_json AS pathJson, kind, source_text AS sourceText, start_pos AS start, end_pos AS end,
+      SELECT id, path_json AS pathJson, path_label AS pathLabel, kind, source_text AS sourceText, start_pos AS start, end_pos AS end,
         translated_text AS translatedText, final_text AS finalText, review_status AS reviewStatus
       FROM segments WHERE project_id = ?
     `).all(projectId) as unknown as ApplicableSegment[];
@@ -159,8 +189,12 @@ export function createExportService({ database, clock, targetLanguage, review, s
         runtimeAliasSegmentationError = error instanceof Error ? error.message : String(error);
       }
     }
-    const moduleResult = originalModule ? applyRisuModuleSegments(
-      originalModule,
+    // Stage 2 (Lua regex/keyword adaptation) writes additive changes directly
+    // to draft_module_json. Rebuild from that draft so applying reviewed text
+    // does not silently discard those changes.
+    const moduleBase = existingDraftModule || originalModule;
+    const moduleResult = moduleBase ? applyRisuModuleSegments(
+      moduleBase,
       moduleSegments,
       portraitFeatureDetected ? currentTargetLanguage : '',
       portraitFeatureDetected ? draft : undefined,
@@ -168,7 +202,19 @@ export function createExportService({ database, clock, targetLanguage, review, s
     ) : null;
     if (moduleResult?.syntaxIssues.length) {
       const issue = moduleResult.syntaxIssues[0];
-      throw new ProjectWorkflowError(`Risu Lua 语法校验失败：${issue.pathLabel} ${issue.message}`, 409);
+      throw new ProjectWorkflowError(`Risu Lua 语法校验失败：${issue.pathLabel} ${issue.message}`, 409, {
+        code: 'RISU_LUA_SYNTAX_INVALID', pathLabel: issue.pathLabel,
+        // Lua parser diagnostics point to a raw code line. Do not pretend a
+        // nearby translated text segment is the failing line; the client opens
+        // Lua management and uses pathJson + line for the direct editor.
+        affectedSegmentIds: [],
+        ...(issue.line ? { line: issue.line } : {}),
+        ...(issue.column ? { column: issue.column } : {}),
+        ...(issue.sourceLine ? { sourceLine: issue.sourceLine.slice(0, 500) } : {}),
+        ...(issue.draftLine ? { draftLine: issue.draftLine.slice(0, 500) } : {}),
+        problem: `Lua 语法错误：${issue.message}`,
+        fixSuggestion: '请打开 Lua 管理页，展开这条语法错误，按行号和列号人工检查当前稿错误行；只修改确认后的整行，保留 Lua 代码、引号、括号和字段分隔符，再保存并重新校验。系统不会自动改写这行。',
+      });
     }
     const appliedModule = moduleResult?.draft ?? null;
     const draftModule = appliedModule && project.sourceFormat === 'charx'
@@ -180,7 +226,8 @@ export function createExportService({ database, clock, targetLanguage, review, s
       originalModule,
       draftModule,
       false,
-      cardSegments,
+      [...cardSegments, ...moduleSegments],
+      parseRegexValidationOverrides(project.regexValidationOverrides),
     );
 
     let storedDraft: Awaited<ReturnType<typeof storeFile>> | null = null;
@@ -235,6 +282,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
         p.source_storage_path AS sourceStoragePath, p.source_storage_bytes AS sourceBytes,
         source_metadata_keys AS sourceMetadataKeys, original_json AS originalJson, draft_json AS draftJson,
         original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
+        regex_validation_overrides AS regexValidationOverrides,
         draft_source_blob AS draftSourceBlob, p.draft_storage_path AS draftStoragePath,
         ${PROJECT_TITLE_COLUMNS}
       FROM projects p WHERE p.id = ?
@@ -250,6 +298,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
       draftJson?: string;
       originalModuleJson?: string | null;
       draftModuleJson?: string | null;
+      regexValidationOverrides?: string | null;
       draftSourceBlob?: Uint8Array | null;
       draftStoragePath?: string | null;
       originalName?: string | null;
@@ -286,8 +335,9 @@ export function createExportService({ database, clock, targetLanguage, review, s
       originalModule,
       draftModule,
       true,
+      [],
+      parseRegexValidationOverrides(project.regexValidationOverrides),
     );
-
     const sourceBlob = project.sourceBlob || (project.sourceStoragePath ? await readStoredFile(project.sourceStoragePath) : null);
     const draftSourceBlob = project.draftSourceBlob || (project.draftStoragePath ? await readStoredFile(project.draftStoragePath) : null);
     if (project.sourceFormat === 'png' && sourceBlob) {
@@ -347,15 +397,27 @@ export function createExportService({ database, clock, targetLanguage, review, s
     draftModule: Record<string, unknown> | null,
     exporting: boolean,
     cardSegments: readonly ApplicableSegment[] = [],
+    regexValidationOverrides: RisuRegexValidationOverrides = {},
   ): void {
     if (!originalModule || !draftModule) return;
     if (exporting) {
       const issues = validateRisuLuaChanges(originalModule, draftModule);
       if (issues.length) {
-        throw new ProjectWorkflowError(`拒绝导出存在语法错误的 Risu Lua：${issues[0].pathLabel} ${issues[0].message}`, 409);
+        const issue = issues[0];
+        throw new ProjectWorkflowError(`拒绝导出存在语法错误的 Risu Lua：${issue.pathLabel} ${issue.message}`, 409, {
+          code: 'RISU_LUA_SYNTAX_INVALID',
+          pathLabel: issue.pathLabel,
+          affectedSegmentIds: [],
+          ...(issue.line ? { line: issue.line } : {}),
+          ...(issue.column ? { column: issue.column } : {}),
+          ...(issue.sourceLine ? { sourceLine: issue.sourceLine.slice(0, 500) } : {}),
+          ...(issue.draftLine ? { draftLine: issue.draftLine.slice(0, 500) } : {}),
+          problem: `Lua 语法错误：${issue.message}`,
+          fixSuggestion: '请在 Lua 管理页展开对应错误，按错误行和列人工检查当前稿错误行，保留 Lua 代码、引号、括号和字段分隔符，只修正确认后的整行后再保存。系统不会自动改写这行。',
+        });
       }
     }
-    const controlIssues = validateRisuControlReferences(originalCard, draft, originalModule, draftModule);
+    const controlIssues = validateRisuControlReferences(originalCard, draft, originalModule, draftModule, regexValidationOverrides);
     if (controlIssues.length) {
       const issue = controlIssues[0];
       const prefix = exporting ? '拒绝导出脚本引用不完整的卡片：' : '脚本引用完整性校验失败：';
@@ -368,16 +430,62 @@ export function createExportService({ database, clock, targetLanguage, review, s
             draftMatches: issue.draftMatches,
             affectedSegmentIds: findRisuRegexAffectedSegmentIds(issue.pattern || '', cardSegments),
             problem: `${issue.pathLabel} 的正则实际命中数由 ${issue.originalMatches} 变为 ${issue.draftMatches}，当前稿中有部分文本不再符合该正则的输入格式。`,
-            fixSuggestion: '逐条对照原文、机翻和人工定稿，恢复该正则要求的文本结构；只修改可见文字，保留键名、分隔符和字段顺序，并保持模块中的正则规则不变。修订后保存并重新校验。',
+            fixSuggestion: quoteSpacingRequired(issue.pattern || '')
+              ? '这条规则首先要求“闭引号 + 至少一个空格”。请先在右侧“人工定稿”中把原文每个符合条件的闭引号后的空格保留下来，例如“你好” 下一句；中文排版不能压成“你好”下一句。只有空格和引号结构恢复后，才根据实际语义判断是否需要追加“说、说道、表示”等目标语言并列项；并列项不能补回已经删掉的空格命中。'
+              : '翻译阶段会结合本卡片的原文、译文和正则上下文，由模型判断是否需要追加目标语言并列项；只追加模型确认的字面量，不会删除或重排原有规则。若模型判断不确定或命中数仍不一致，请在右侧“人工定稿”框对照左侧原文，保留同样的引号、空格、键名、分隔符和字段顺序后再保存。',
           }
-        : {};
+        : {
+            code: issue.code || 'RISU_SCRIPT_INTEGRITY_INVALID', pathLabel: issue.pathLabel,
+            affectedSegmentIds: findIntegrityAffectedSegmentIds(issue.pathLabel, cardSegments),
+            problem: issue.message,
+            fixSuggestion: '请按已过滤的错误行逐条检查，保留原有键名、分隔符和字段顺序，只修正对应的可见文本后再保存。',
+          };
       throw new ProjectWorkflowError(`${prefix}${issue.pathLabel} ${issue.message}`, 409, payload);
     }
     const templateIssues = validateRisuTemplateChanges(originalModule, draftModule);
     if (templateIssues.length) {
       const prefix = exporting ? '拒绝导出模板结构异常的卡片：' : 'Risu 模板结构校验失败：';
-      throw new ProjectWorkflowError(`${prefix}${templateIssues[0].pathLabel} ${templateIssues[0].message}`, 409);
+      const issue = templateIssues[0];
+      throw new ProjectWorkflowError(`${prefix}${issue.pathLabel} ${issue.message}`, 409, {
+        code: 'RISU_TEMPLATE_INVALID', pathLabel: issue.pathLabel,
+        affectedSegmentIds: findIntegrityAffectedSegmentIds(issue.pathLabel, cardSegments),
+        problem: issue.message,
+        fixSuggestion: '请按已过滤的错误行检查模板标记、括号和属性值，只修改可见文本后再保存。',
+      });
     }
+  }
+
+  function quoteSpacingRequired(pattern: string): boolean {
+    return /\(\[”"」\]\)\[ \\t\]\+/.test(pattern);
+  }
+
+  function findIntegrityAffectedSegmentIds(pathLabel: string, segments: readonly ApplicableSegment[]): string[] {
+    const errorLine = Number(pathLabel.match(/\[(\d+):\d+\]/u)?.[1] || 0) || null;
+    const path = pathLabel.replace(/\s*\[\d+:\d+\].*$/u, '').trim();
+    const matches = segments.filter((segment) => segment.id && (() => {
+      try {
+        const parsed = JSON.parse(segment.pathJson) as Array<string | number>;
+        const raw = parsed.join('.');
+        const labels = parsed[0] === '$module' ? [`模块.${parsed.slice(1).join('.')}`, raw] : [raw, `模块.${raw}`];
+        return labels.some((label) => label === path);
+      } catch { return false; }
+    })());
+    if (matches.length) {
+      if (errorLine != null) {
+        const nearest = matches.map((segment) => ({ segment, distance: Math.abs(Number(segment.pathLabel?.match(/行\s*(\d+)/u)?.[1] || 0) - errorLine) }))
+          .sort((a, b) => a.distance - b.distance)[0];
+        if (nearest) return [nearest.segment.id as string];
+      }
+      return matches.map((segment) => segment.id as string);
+    }
+    return segments.filter((segment) => segment.id && (() => {
+      try {
+        const parsed = JSON.parse(segment.pathJson) as Array<string | number>;
+        const raw = parsed.join('.');
+        const labels = parsed[0] === '$module' ? [`模块.${parsed.slice(1).join('.')}`, raw] : [raw, `模块.${raw}`];
+        return labels.some((label) => label.startsWith(`${path}.`));
+      } catch { return false; }
+    })()).map((segment) => segment.id as string);
   }
 
   async function confirmedImageReplacements(projectId: string): Promise<Array<{ resourcePath: string; imageBlob: Uint8Array }>> {

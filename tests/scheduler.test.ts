@@ -2,7 +2,25 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldSplitTranslationBatch } from '../server/domain/translation-errors.js';
 import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments } from '../server/domain/card.js';
-import { chatCompletionsEndpoint, modelRequestTimeoutMilliseconds, normalizeModelRequestTimeoutSeconds } from '../server/scheduler.js';
+import {
+  chatCompletionsEndpoint,
+  MAX_TRANSLATION_BATCH_CHARS,
+  MAX_TRANSLATION_BATCH_ITEMS,
+  MAX_TRANSLATION_CONCURRENCY,
+  buildRegexWhitespaceProbe,
+  collectRegexSamplePairs,
+  collectRegexCoveragePairs,
+  collectRegexLanguageEntries,
+  MAX_REGEX_MODEL_CONTEXT_CHARS,
+  relaxedRegexWhitespacePattern,
+  regexLanguagePayloadEntry,
+  regexLanguagePayloadSummary,
+  risuRegexLanguageSystemPrompt,
+  modelRequestTimeoutMilliseconds,
+  normalizeModelRequestTimeoutSeconds,
+  normalizeRisuRegexLanguageAlternatives,
+  splitRegexLanguageEntries,
+} from '../server/scheduler.js';
 
 test('chat completions endpoint accepts either a base URL or a full endpoint', () => {
   assert.equal(
@@ -21,6 +39,257 @@ test('model request timeout accepts seconds and stays within safe bounds', () =>
   assert.equal(normalizeModelRequestTimeoutSeconds(0), 120);
   assert.equal(normalizeModelRequestTimeoutSeconds(90_000), 86_400);
   assert.equal(modelRequestTimeoutMilliseconds(45), 45_000);
+});
+
+test('translation throughput limits keep batches small enough for real parallel requests', () => {
+  assert.equal(MAX_TRANSLATION_CONCURRENCY, 8);
+  assert.equal(MAX_TRANSLATION_BATCH_ITEMS, 8);
+  assert.equal(MAX_TRANSLATION_BATCH_CHARS, 40_000);
+});
+
+test('coverage regex prompt permits language-specific word-boundary syntax adaptation', () => {
+  const prompt = risuRegexLanguageSystemPrompt('coverage');
+  assert.match(prompt, /中文等连续书写语言通常无词间空格/u);
+  assert.match(prompt, /英语\/韩语等依赖空格分词/u);
+  assert.match(prompt, /零宽断言、分组和量词/u);
+  assert.match(prompt, /必须在 pattern 中准确修改对应正则语法/u);
+  assert.match(prompt, /所有已有并列项，以及捕获组的数量和顺序/u);
+  const samplePrompt = risuRegexLanguageSystemPrompt('sample');
+  assert.match(samplePrompt, /当前任务模式：sample/u);
+  assert.match(samplePrompt, /绝不能修改完整 pattern/u);
+  assert.doesNotMatch(samplePrompt, /fullCoverage/u);
+  assert.doesNotMatch(samplePrompt, /分词与边界语法差异/u);
+  assert.doesNotMatch(samplePrompt, /完整候选正则/u);
+});
+
+test('Lua regex adaptation splits large context into provider-sized concurrent batches', () => {
+  const entries = Array.from({ length: 10 }, (_, index) => ({
+    pathLabel: `模块.regex.${index}.in`,
+    pattern: 'a'.repeat(1_500),
+    type: 'normal',
+    out: 'b'.repeat(1_500),
+    sourceSamples: ['s'.repeat(600), 's'.repeat(600), 's'.repeat(600)],
+    draftSamples: ['d'.repeat(600), 'd'.repeat(600), 'd'.repeat(600)],
+  }));
+  const batches = splitRegexLanguageEntries(entries);
+
+  assert.equal(batches.length, 2);
+  assert.equal(batches.flat().length, entries.length);
+  assert.ok(batches.every((batch) => batch.length <= MAX_TRANSLATION_BATCH_ITEMS));
+  assert.ok(batches.every((batch) => batch.reduce((chars, entry) => chars + JSON.stringify(regexLanguagePayloadEntry(entry)).length, 0) <= MAX_TRANSLATION_BATCH_CHARS));
+});
+
+test('Lua regex adaptation sends only matching, source-draft paired context to the model', () => {
+  const pattern = '([”"])\\s+(?=[\\u4e00-\\u9fff])';
+  const samples = collectRegexSamplePairs(
+    { ignored: '含有引号“但不命中', matched: '原文” 中文' },
+    { ignored: '同样有引号“但不命中', matched: '译文” 中文' },
+    pattern,
+  );
+
+  assert.deepEqual(samples, [{ source: '原文” 中文', draft: '译文” 中文' }]);
+});
+
+test('runtime display regex analysis does not send static card materials', () => {
+  const payload = regexLanguagePayloadEntry({
+    pathLabel: '模块.regex.41.in',
+    originalPattern: '([”"」])[ \\t]+',
+    pattern: '([”"」])[ \\t]*',
+    type: 'editdisplay',
+    out: '$1\n',
+    dynamicDisplay: true,
+    sourceSamples: ['卡片原文素材'],
+    draftSamples: ['卡片译文素材'],
+    sourceMatchCount: 59,
+    draftMatchCount: 2,
+    coverageRecords: [],
+  });
+  assert.equal(payload.dynamicDisplay, true);
+  assert.equal(Object.hasOwn(payload, 'samples'), false);
+  assert.equal(Object.hasOwn(payload, 'fullCoverage'), false);
+  assert.equal(JSON.stringify(payload).includes('卡片原文素材'), false);
+  assert.match(String(payload.runtimeRequirement), /中文无空格/);
+});
+
+test('whitespace probes keep prose spacing evidence ahead of CSS quote noise', () => {
+  const sourcePattern = '([”"])\\s+(?=[A-Za-z一-鿿])';
+  const draftPattern = '([”"])[ \\t]+(?=[A-Za-z一-鿿])';
+  assert.equal(relaxedRegexWhitespacePattern(draftPattern), '([”"])[ \\t]*(?=[A-Za-z一-鿿])');
+
+  const probe = buildRegexWhitespaceProbe(
+    { css: '<style>.x{content:"A"}</style>', dialogue: '原文" Next' },
+    { css: '<style>.x{content:"A"}</style>', dialogue: '译文”下一句' },
+    sourcePattern,
+    draftPattern,
+  );
+  assert.ok(probe);
+  assert.equal(probe.sourceMatchCount, 2);
+  assert.equal(probe.draftMatchCount, 2);
+  assert.equal(probe.baselineSourceMatchCount, 1);
+  assert.equal(probe.baselineDraftMatchCount, 0);
+  const dialogueRecord = probe.coverageRecords.find((record) => record.pathLabel === '$.dialogue');
+  assert.match(dialogueRecord?.sourceText ?? '', /【" 】/u);
+  assert.match(dialogueRecord?.draftText ?? '', /【”】/u);
+
+  const payload = regexLanguagePayloadEntry({
+    pathLabel: '模块.regex.41.in',
+    pattern: draftPattern,
+    type: 'normal',
+    out: '$1',
+    sourceSamples: [],
+    draftSamples: [],
+    coverageRecords: [],
+    sourceMatchCount: 1,
+    draftMatchCount: 0,
+    formatProbe: probe,
+  });
+  const formatProbe = payload.formatProbe as { records: Array<{ path: string }> };
+  assert.equal(formatProbe.records[0]?.path, '$.dialogue');
+  assert.ok(JSON.stringify(payload).length <= MAX_REGEX_MODEL_CONTEXT_CHARS);
+});
+
+test('regex model payload is deduplicated, difference-first, stable, and hard-bounded', () => {
+  const duplicate = {
+    pathLabel: '$.same',
+    sourceText: '原文字段'.repeat(120),
+    draftText: '译文字段'.repeat(120),
+    sourceMatches: ['原文命中', '原文命中'],
+    draftMatches: [],
+  };
+  const records = [
+    ...Array.from({ length: 120 }, (_, index) => ({
+      pathLabel: `$.field.${index}`,
+      sourceText: `原文 ${index} `.repeat(120),
+      draftText: `译文 ${index} `.repeat(120),
+      sourceMatches: index % 2 ? [`命中${index}`, `命中${index}`] : [`命中${index}`],
+      draftMatches: index % 2 ? [] : [`命中${index}`],
+    })),
+    duplicate,
+    duplicate,
+  ];
+  const entry = {
+    pathLabel: '模块.regex.9.in',
+    pattern: '([”"])[ \\t]+(?=[0-9A-Za-z])',
+    type: 'normal',
+    out: '$1',
+    sourceSamples: [],
+    draftSamples: [],
+    coverageRecords: records,
+    sourceMatchCount: 5_000,
+    draftMatchCount: 4_000,
+  };
+  const payload = regexLanguagePayloadEntry(entry);
+  const summary = regexLanguagePayloadSummary(entry);
+  assert.ok(JSON.stringify(payload).length <= MAX_REGEX_MODEL_CONTEXT_CHARS);
+  assert.equal(summary.totalRecords, records.length);
+  assert.equal(summary.totalUniqueRecords, records.length - 1);
+  assert.equal(summary.totalSourceMatches, 5_000);
+  assert.equal(summary.totalDraftMatches, 4_000);
+  assert.equal(summary.truncated, true);
+  assert.ok(summary.strata.coverageDifference > 0);
+  const coverage = payload.fullCoverage as { records: Array<{ sourceMatches: string[]; draftMatches: string[] }> };
+  assert.equal(coverage.records.length, summary.selectedRecords);
+  assert.ok(coverage.records.some((record) => record.sourceMatches.length !== record.draftMatches.length));
+  assert.equal(Object.hasOwn(coverage, 'sourceMatches'), false);
+  assert.equal(Object.hasOwn(coverage, 'draftMatches'), false);
+  assert.deepEqual(regexLanguagePayloadEntry(entry), regexLanguagePayloadEntry(entry));
+});
+
+test('regex grouping is language-agnostic and compares structure rather than a word list', () => {
+  const payload = regexLanguagePayloadEntry({
+    pathLabel: '模块.regex.10.in',
+    pattern: '["”」]\\s+',
+    type: 'normal',
+    out: '$&',
+    sourceSamples: [],
+    draftSamples: [],
+    coverageRecords: [
+      { pathLabel: '$.english', sourceText: 'He said " next', draftText: '他说"下一句', sourceMatches: ['" '], draftMatches: ['"'] },
+      { pathLabel: '$.japanese', sourceText: '彼は「 次」と言った', draftText: '彼は「次」と言った', sourceMatches: ['「 '], draftMatches: ['「'] },
+      { pathLabel: '$.stable', sourceText: 'status: ready', draftText: 'status: ready', sourceMatches: ['ready'], draftMatches: ['ready'] },
+    ],
+  });
+  const coverage = payload.fullCoverage as { strata: { coverageDifference: number; textDifference: number; stable: number } };
+  assert.deepEqual(coverage.strata, { coverageDifference: 2, textDifference: 0, stable: 1 });
+});
+
+test('Lua regex coverage collects every before/after hit with its field path', () => {
+  const pairs = collectRegexCoveragePairs(
+    { first: 'A" B" C', nested: ['none', 'D" E'] },
+    { first: '甲”乙', nested: ['无', '丁” 戊'] },
+    '["”]\\s*',
+  );
+  assert.equal(pairs.length, 2);
+  assert.deepEqual(pairs.map((pair) => pair.pathLabel), ['$.first', '$.nested.1']);
+  assert.deepEqual(pairs[0].sourceMatches, ['" ', '" ']);
+  assert.deepEqual(pairs[0].draftMatches, ['”']);
+});
+
+test('Lua regex coverage ignores regex protocol definitions', () => {
+  const pairs = collectRegexCoveragePairs(
+    { regex: [{ in: '"', out: '"' }], text: '原文" 后续' },
+    { regex: [{ in: '"', out: '"' }], text: '译文"后续' },
+    '"',
+  );
+  assert.deepEqual(pairs.map((pair) => pair.pathLabel), ['$.text']);
+});
+
+test('stage 2 regex entries retain the current rule and complete paired hit coverage', () => {
+  const originalPattern = '([”"])\\s+(?=[0-9A-Za-z])';
+  const currentPattern = '([”"])\\s*(?=[0-9A-Za-z一-鿿])';
+  const entries = collectRegexLanguageEntries(
+    { regex: [{ in: originalPattern, out: '$1' }] },
+    { regex: [{ in: currentPattern, out: '$1' }] },
+    { first: '原文" A', second: '又" B' },
+    { first: '译文”后续', second: '再”文' },
+  );
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].originalPattern, originalPattern);
+  assert.equal(entries[0].pattern, currentPattern);
+  assert.equal(entries[0].sourceMatchCount, 2);
+  // Stage 2 coverage uses the translated/current rule for the draft side.
+  assert.equal(entries[0].draftMatchCount, 2);
+  assert.deepEqual(entries[0].coverageRecords?.map((record) => record.pathLabel), ['$.first', '$.second']);
+});
+
+test('stage 2 uses complete match counts even when its evidence is bounded', () => {
+  const text = Array.from({ length: 250 }, () => '" a').join(' ');
+  const entries = collectRegexLanguageEntries(
+    { regex: [{ in: '"\\s+a', out: '$1' }] },
+    { regex: [{ in: '"\\s+a', out: '$1' }] },
+    { text },
+    { text },
+  );
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].sourceMatchCount, 250);
+  assert.equal(entries[0].draftMatchCount, 250);
+  assert.equal(entries[0].coverageRecords?.[0]?.sourceMatches.length, 200);
+});
+
+test('stage 2 skips zero-width display rules that cannot have a stable cardinality', () => {
+  const entries = collectRegexLanguageEntries(
+    { regex: [{ in: '(?:)', out: '' }] },
+    { regex: [{ in: '(?:)', out: '' }] },
+    { text: '原文' },
+    { text: '译文' },
+  );
+
+  assert.deepEqual(entries, []);
+});
+
+test('coverage normalization accepts a complete candidate pattern', () => {
+  const input = {
+    targetLanguage: 'zh-CN',
+    mode: 'coverage' as const,
+    entries: [{ pathLabel: '模块.regex.1.in', pattern: 'x+', type: 'normal', out: '$1', sourceSamples: [], draftSamples: [] }],
+  };
+  assert.deepEqual(normalizeRisuRegexLanguageAlternatives(JSON.stringify({ proposals: [
+    { pathLabel: '模块.regex.1.in', pattern: 'x*', reason: '中文无空格' },
+  ] }), input), [{
+    pathLabel: '模块.regex.1.in', anchorAlternatives: [], additions: [], pattern: 'x*',
+  }]);
 });
 
 test('translation batches split on size-sensitive and malformed batch responses', () => {

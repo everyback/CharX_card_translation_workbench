@@ -6,8 +6,65 @@ import {
 } from './card.js';
 
 export interface LuaSyntaxIssue {
+  /** JSON path of the Lua code string, used by the manual line editor. */
+  pathJson: string;
   pathLabel: string;
   message: string;
+  line?: number;
+  column?: number;
+  sourceLine?: string;
+  draftLine?: string;
+  /** Raw code surrounding the parser location, never inferred from translation segments. */
+  contextLines?: Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }>;
+}
+
+export type LuaLineReplacementResult =
+  | { ok: true; previousLine: string; code: string }
+  | { ok: false; reason: 'invalid-path' | 'not-code' | 'line-out-of-range' | 'stale'; currentLine?: string };
+
+/** Replace exactly one line after an explicit user edit; never guesses or rewrites other lines. */
+export function replaceRisuLuaLine(
+  module: Record<string, unknown>,
+  pathJson: string,
+  line: number,
+  replacement: string,
+  expectedLine?: string,
+): LuaLineReplacementResult {
+  let path: Array<string | number>;
+  try {
+    const parsed = JSON.parse(pathJson) as unknown;
+    if (!Array.isArray(parsed) || !parsed.every((part) => typeof part === 'string' || typeof part === 'number')) {
+      return { ok: false, reason: 'invalid-path' };
+    }
+    path = parsed;
+  } catch {
+    return { ok: false, reason: 'invalid-path' };
+  }
+  if (!isLuaModuleCodePath(path) || !Number.isInteger(line) || line < 1) return { ok: false, reason: 'not-code' };
+  let target: unknown = module;
+  for (const part of path) {
+    if (!target || typeof target !== 'object') return { ok: false, reason: 'not-code' };
+    target = (target as Record<string | number, unknown>)[part];
+  }
+  if (typeof target !== 'string') return { ok: false, reason: 'not-code' };
+  const newline = target.includes('\r\n') ? '\r\n' : '\n';
+  const lines = target.split(/\r?\n/u);
+  const index = line - 1;
+  if (index >= lines.length) return { ok: false, reason: 'line-out-of-range' };
+  const previousLine = lines[index];
+  if (expectedLine !== undefined && previousLine !== expectedLine) {
+    return { ok: false, reason: 'stale', currentLine: previousLine };
+  }
+  lines[index] = replacement;
+  const code = lines.join(newline);
+  let parent: unknown = module;
+  for (const part of path.slice(0, -1)) {
+    if (!parent || typeof parent !== 'object') return { ok: false, reason: 'not-code' };
+    parent = (parent as Record<string | number, unknown>)[part];
+  }
+  if (!parent || typeof parent !== 'object') return { ok: false, reason: 'not-code' };
+  (parent as Record<string | number, unknown>)[path.at(-1)!] = code;
+  return { ok: true, previousLine, code };
 }
 
 export interface RisuModuleApplyResult {
@@ -109,7 +166,15 @@ export function applyRisuModuleSegments(
   runtimeAliases?: RuntimeAliasMap,
 ): RisuModuleApplyResult {
   let ignoredLuaSegments = 0;
-  const safeSegments = segments.filter((segment) => {
+  // Persisted scans identify module-owned values with a $module prefix. Accept those
+  // internal paths here as well, because applyApprovedSegments receives the module root.
+  const normalizedSegments = segments.map((segment) => {
+    const path = parsePath(segment.pathJson);
+    return path[0] === '$module'
+      ? { ...segment, pathJson: JSON.stringify(path.slice(1)) }
+      : segment;
+  });
+  const safeSegments = normalizedSegments.filter((segment) => {
     const path = parsePath(segment.pathJson);
     if (!isLuaModuleCodePath(path)
       || segment.kind === 'runtime-message'
@@ -235,6 +300,15 @@ function collectRuntimeOwnerAliases(targetLanguage: string, module: unknown, add
   if (additionalAliasSource) collectRuntimeOwnerAliasesFromSource(additionalAliasSource, targetLanguage, result, knownOwnerIds, true, derived);
   appendUniqueDerivedAliases(result, derived);
   return result;
+}
+
+export function runtimeAliasesForOwner(module: Record<string, unknown>, targetLanguage: string, ownerId: string): string[] {
+  const language = targetLanguage.toLocaleLowerCase().split(/[-_]/u)[0] || targetLanguage;
+  const output = new Map<string, string[]>();
+  const derived = new Map<string, Map<string, Set<string>>>();
+  collectRuntimeOwnerAliasesFromSource(module, language, output, collectRuntimeOwnerIds(module), true, derived);
+  appendUniqueDerivedAliases(output, derived);
+  return output.get(ownerId.toLocaleLowerCase()) ?? [];
 }
 
 function collectRuntimeOwnerAliasesFromSource(
@@ -797,13 +871,49 @@ export function validateRisuLuaChanges(
     try {
       parse(candidate, { luaVersion: '5.3' });
     } catch (error) {
+      const diagnostic = error as { line?: unknown; column?: unknown };
+      const line = typeof diagnostic.line === 'number' ? diagnostic.line : undefined;
+      const column = typeof diagnostic.column === 'number' ? diagnostic.column : undefined;
+      const sourceLines = source.replace(/\r\n/gu, '\n').split('\n');
+      const draftLines = candidate.replace(/\r\n/gu, '\n').split('\n');
+      const contextLines = line
+        ? buildLuaSyntaxContext(sourceLines, draftLines, line)
+        : undefined;
       issues.push({
+        pathJson,
         pathLabel: `模块.${(JSON.parse(pathJson) as Array<string | number>).join('.')}`,
         message: error instanceof Error ? error.message : String(error),
+        line,
+        column,
+        sourceLine: line ? sourceLines[line - 1] : undefined,
+        draftLine: line ? draftLines[line - 1] : undefined,
+        contextLines,
       });
     }
   }
   return issues;
+}
+
+function buildLuaSyntaxContext(
+  sourceLines: string[],
+  draftLines: string[],
+  errorLine: number,
+): Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }> {
+  // Keep the response bounded while giving the editor enough nearby code for
+  // cases where the parser points at a symptom several lines after the cause.
+  const contextRadius = 12;
+  const start = Math.max(1, errorLine - contextRadius);
+  const end = Math.min(Math.max(sourceLines.length, draftLines.length), errorLine + contextRadius);
+  const result: Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }> = [];
+  for (let line = start; line <= end; line += 1) {
+    result.push({
+      line,
+      sourceLine: sourceLines[line - 1] ?? '',
+      draftLine: draftLines[line - 1] ?? '',
+      errorLine: line === errorLine,
+    });
+  }
+  return result;
 }
 
 function collectLuaCode(value: unknown): Map<string, string> {

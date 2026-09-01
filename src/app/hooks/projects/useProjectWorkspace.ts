@@ -15,6 +15,7 @@ import type {
   Tab,
   LuaManagementReport,
 } from '../../../types';
+import { DEFAULT_SCOPE } from '../../../constants';
 import { LOADING_MASK_MINIMUM_MS, PROJECT_SEGMENT_PAGE_SIZE } from '../../constants';
 import type { ShowWorkbenchError } from '../contracts';
 
@@ -35,7 +36,7 @@ export function useProjectWorkspace({
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [selectedSegmentId, setSelectedSegmentId] = useState('');
-  const [scope, setScope] = useState<ScopePreset>('all');
+  const [scope, setScope] = useState<ScopePreset>(DEFAULT_SCOPE);
   const [glossary, setGlossary] = useState<GlossaryTerm[]>([]);
   const [protocols, setProtocols] = useState<ProtocolSchema[]>([]);
   const [projectOverview, setProjectOverview] = useState<ProjectOverview | null>(null);
@@ -188,15 +189,17 @@ export function useProjectWorkspace({
     }
   }, [clearError, onError, project?.id, resourcesLoading]);
 
-  const loadLuaReport = useCallback(async (projectId = project?.id) => {
-    if (!projectId || luaReportLoading) return;
+  const loadLuaReport = useCallback(async (projectId = project?.id, force = false): Promise<LuaManagementReport | null> => {
+    if (!projectId || (!force && luaReportLoading)) return null;
     const requestId = ++luaReportRequestRef.current;
     setLuaReportLoading(true);
     clearError();
+    let loadedReport: LuaManagementReport | null = null;
     try {
       const report = await api<LuaManagementReport>(`/api/projects/${projectId}/lua/diagnostics`);
       if (luaReportRequestRef.current === requestId && selectedProjectIdRef.current === projectId) {
         setLuaReport(report);
+        loadedReport = report;
       }
     } catch (reportError) {
       onError(reportError);
@@ -205,6 +208,7 @@ export function useProjectWorkspace({
         setLuaReportLoading(false);
       }
     }
+    return loadedReport;
   }, [clearError, luaReportLoading, onError, project?.id]);
 
   const invalidateProjectOverview = useCallback(() => setProjectOverview(null), []);

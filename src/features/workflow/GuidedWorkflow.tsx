@@ -115,6 +115,8 @@ export function GuidedWorkflow({
   const modelReady = Boolean(settings?.apiKeyConfigured && settings.model);
   const selected = PRESETS.find((preset) => preset.id === selectedPreset) ?? PRESETS[1];
   const hasFailedJob = project.jobs.some((job) => job.status === 'failed' || job.status === 'review_with_errors');
+  const latestJob = project.jobs[0];
+  const hasCancelledLatestJob = latestJob?.status === 'cancelled';
 
   useEffect(() => {
     setSelectedPreset(presetForScope(scope));
@@ -152,6 +154,7 @@ export function GuidedWorkflow({
             <span className="guided-eyebrow">下一步 · 02</span>
             <h2>扫描完成，选择翻译方式</h2>
             <p>先选一个范围。你可以从快速翻译开始，也可以直接覆盖 RisuAI 卡片中的世界书和脚本内容。</p>
+            <TranslationStageGuide active="text" />
           </div>
           {!modelReady && selectedPreset !== 'audit' && (
             <div className="guided-setup-note">
@@ -183,6 +186,7 @@ export function GuidedWorkflow({
             <span className="guided-eyebrow">正在处理 · 03</span>
             <h2>翻译正在进行</h2>
             <p>任务会在后台逐批处理。你可以打开任务页查看进度，完成后再进入人工审核。</p>
+            <TranslationStageGuide active="text" />
           </div>
           <div className="guided-actions">
             <button className="secondary-button" onClick={onOpenJobs}><Layers3 size={16} />查看任务进度</button>
@@ -200,13 +204,27 @@ export function GuidedWorkflow({
         segment.reviewStatus === 'approved'
         && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
       ));
+      if (hasCancelledLatestJob) {
+        return (
+          <>
+            <div className="guided-next-copy">
+              <span className="guided-eyebrow">任务已取消 · 可继续</span>
+              <h2>翻译任务已取消，可以继续</h2>
+              <p>已完成的文本不会重复翻译；未完成的段落和 Lua/关键词适配会从上次中断处继续。</p>
+            </div>
+            <div className="guided-actions">
+              <button className="primary-button" onClick={onOpenJobs}><Play size={16} />打开任务并继续<ArrowRight size={15} /></button>
+            </div>
+          </>
+        );
+      }
       if (!pendingWithText.length && approvedWithText) {
         return (
           <>
             <div className="guided-next-copy">
               <span className="guided-eyebrow">下一步 · 05</span>
               <h2>审核已通过，可以保存并导出</h2>
-              <p>已有译文已经全部通过审核。点击“保存并导出”会先检查 Lua、脚本引用和卡片结构，校验通过后下载文件。</p>
+            <p>已有译文已经全部通过审核。点击“保存并导出”会先检查 Lua、脚本引用和卡片结构，并自动尝试补齐运行时名称别名；校验通过后下载文件。</p>
             </div>
             <div className="guided-actions">
               <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
@@ -242,7 +260,7 @@ export function GuidedWorkflow({
           <div className="guided-next-copy">
             <span className="guided-eyebrow">最后一步 · 05</span>
             <h2>审核稿已保存，可以继续导出</h2>
-            <p>保存并导出会在下载前再次检查 Lua、脚本引用和卡片结构，之后请在目标客户端实际打开复核。</p>
+            <p>保存并导出会在下载前再次检查 Lua、脚本引用和卡片结构，并自动尝试补齐运行时名称别名；之后请在目标客户端实际打开复核。</p>
           </div>
           <div className="guided-actions">
             <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
@@ -309,7 +327,7 @@ export function GuidedWorkflow({
       {project.scanSummary?.luaSegments ? (
         <div className="guided-lua-tip">
           <Code2 size={16} />
-          <div><strong>检测到 Lua 脚本</strong><span>先在 Lua 管理里确认是否存在立绘匹配功能；只有人名、地名等专有名词才会进入匹配流程。</span></div>
+          <div><strong>检测到 Lua 脚本</strong><span>保存或导出时会自动检查脚本并尝试补齐运行时名称别名；只有人名、地名等专有名词才会进入匹配流程，无法自动处理时可转到 Lua 管理页。</span></div>
           <button className="secondary-button" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 Lua 管理</button>
         </div>
       ) : null}
@@ -317,5 +335,16 @@ export function GuidedWorkflow({
         <div className="guided-scan-note"><CircleAlert size={14} />扫描完成后，你还可以在这里切换翻译预设。</div>
       )}
     </section>
+  );
+}
+
+function TranslationStageGuide({ active }: { active: 'text' | 'adaptation' }) {
+  return (
+    <div className="guided-translation-stages" aria-label="翻译阶段">
+      <strong>翻译分两阶段</strong>
+      <span className={active === 'text' ? 'active' : ''}>1. 文本翻译</span>
+      <span className={active === 'adaptation' ? 'active' : ''}>2. Lua 正则与关键词适配</span>
+      <small>阶段 2 失败时可在任务页单独重试，不会重翻已完成文本。</small>
+    </div>
   );
 }

@@ -2,10 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   applyApprovedSegments,
+  applyRisuRegexAlternativeProposals,
+  applyRisuRegexCoverageProposals,
   bilingualModuleName,
   cardExportName,
   controlReferencesInText,
   findRisuRegexAffectedSegmentIds,
+  isRegexValidationOverrideActive,
+  isRisuDisplayFormattingRegexRule,
   missingProtectionTokens,
   missingProtectedFragments,
   protectText,
@@ -14,6 +18,7 @@ import {
   risuControlReferences,
   risuRegexControlLiterals,
   risuTranslationControlFragments,
+  regexMatchSnippetsInStrings,
   restoreProtectedText,
   scanCard,
   scanRisuModule,
@@ -25,9 +30,10 @@ import {
   detectRisuPortraitRouting,
   inspectRuntimeAliasCoverage,
   inspectTouhouRuntimeAliasCoverage,
+  replaceRisuLuaLine,
   validateRisuLuaChanges,
 } from '../server/domain/risu-lua.js';
-import { normalizeRuntimeNameSegments } from '../server/scheduler.js';
+import { normalizeRuntimeNameSegments, normalizeRisuRegexLanguageAlternatives } from '../server/scheduler.js';
 
 const card = {
   name: 'Alice',
@@ -50,6 +56,39 @@ test('scope presets keep script text opt-in', () => {
   assert.ok(standard.some((item) => item.category === 'greeting'));
   assert.equal(standard.some((item) => item.category === 'script-ui'), false);
   assert.ok(scripted.some((item) => item.category === 'script-ui'));
+});
+
+test('regex diagnostics use bounded hit snippets', () => {
+  const samples = regexMatchSnippetsInStrings({ body: `${'前文 '.repeat(30)}说 后文` }, '说');
+  assert.equal(samples.length, 1);
+  assert.ok(samples[0].includes('【说】'));
+  assert.ok(samples[0].length <= 180);
+});
+
+test('all module scope contains each specialized translation scope', () => {
+  const module = {
+    name: 'Panel suite',
+    lorebook: [{ name: 'School', comment: 'School notes', content: 'The academy is closed.' }],
+    regex: [{ in: '\\[panel\\]', out: '<button title="Open map">Open map</button>' }],
+    trigger: [{ effect: [{ code: [
+      'local prompt = "Use Korean for narration."',
+      'alertError(triggerId, "No retry target")',
+    ].join('\n') }] }],
+  };
+  const identity = (segment: ReturnType<typeof scanRisuModule>[number]) => JSON.stringify([
+    segment.path,
+    segment.start,
+    segment.end,
+    segment.kind,
+    segment.sourceText,
+  ]);
+  const all = new Set(scanRisuModule(module, 'all').map(identity));
+
+  for (const scope of ['core', 'standard', 'visible-scripts', 'all-visible', 'lua-only'] as const) {
+    for (const segment of scanRisuModule(module, scope)) {
+      assert.equal(all.has(identity(segment)), true, `${scope} segment was omitted from all: ${segment.pathLabel}`);
+    }
+  }
 });
 
 test('all scope includes generic visible card strings but protects structural values', () => {
@@ -389,21 +428,58 @@ test('Risu control validation catches status protocol match loss', () => {
   assert.match(issues.map((issue) => issue.message).join('\n'), /正则协议匹配数量/);
 });
 
-test('Risu control validation reports language-sensitive display formatting drift for review', () => {
+test('Risu display-formatting rules accept Chinese no-space replies without static-card cardinality', () => {
   const pattern = '([”"」])[ \\t]+(?!(?:하고|하는|라고|라며|라는|이라고|이라는|라니|と|って)(?![가-힣]))(?![A-Za-z-]+=)(?=[“"「『]?[0-9A-Za-z가-힣ぁ-ヺ一-鿿*(])';
   const originalCard = { data: { first_mes: '"안녕" 다음 장면' } };
   const draftCard = { data: { first_mes: '“你好”下一幕' } };
   const originalModule = {
     regex: [{ type: 'editdisplay', in: pattern, out: '$1\n' }],
   };
+  const draftModule = structuredClone(originalModule);
+  draftModule.regex[0].in = pattern.replace('[ \\t]+', '[ \\t]*');
 
   const issues = validateRisuControlReferences(
-    originalCard, draftCard, originalModule, structuredClone(originalModule),
+    originalCard, draftCard, originalModule, draftModule,
   );
-  assert.equal(issues.length, 1);
-  assert.equal(issues[0].code, 'REGEX_MATCH_COUNT_CHANGED');
-  assert.equal(issues[0].originalMatches, 1);
-  assert.equal(issues[0].draftMatches, 0);
+  assert.deepEqual(issues, []);
+});
+
+test('Risu display-formatting rules retain their capture-only replacement contract', () => {
+  const pattern = '([”"」])[ \\t]+';
+  const originalModule = { regex: [{ type: 'editdisplay', in: pattern, out: '$1\n' }] };
+  const draftModule = structuredClone(originalModule);
+  draftModule.regex[0].out = '$1\n中文文本';
+
+  const issues = validateRisuControlReferences(
+    { data: { first_mes: '“你好” 下一幕' } },
+    { data: { first_mes: '“你好”下一幕' } },
+    originalModule,
+    draftModule,
+  );
+  assert.match(issues.map((issue) => issue.message).join('\n'), /动态展示正则/);
+});
+
+test('Risu HTML injection editdisplay rules are not mistaken for reply formatting rules', () => {
+  assert.equal(isRisuDisplayFormattingRegexRule({ type: 'editdisplay', in: 'marker', out: '<div>状态栏</div>' }), false);
+  assert.equal(isRisuDisplayFormattingRegexRule({ type: 'editdisplay', in: '([”"」])', out: '$1\n' }), true);
+});
+
+test('Risu regex cardinality can be explicitly force-passed for the exact saved rule', () => {
+  const pattern = '([”"」])[ \\t]+(?!(?:하고|하는|라고|라며|라는|이라고|이라는|라니|と|って)(?![가-힣]))';
+  const originalCard = { data: { first_mes: '"안녕" 다음 장면' } };
+  const draftCard = { data: { first_mes: '“你好”下一幕' } };
+  const module = { regex: [{ in: pattern, out: '$1' }] };
+  const override = {
+    '模块.regex.0.in': {
+      pattern,
+      originalMatchCount: 1,
+      draftMatchCount: 0,
+      confirmedAt: '2026-09-01T00:00:00.000Z',
+    },
+  };
+  assert.equal(isRegexValidationOverrideActive(override, '模块.regex.0.in', pattern, 1, 0), true);
+  assert.deepEqual(validateRisuControlReferences(originalCard, draftCard, module, structuredClone(module), override), []);
+  assert.equal(isRegexValidationOverrideActive(override, '模块.regex.0.in', `${pattern}x`, 1, 0), false);
 });
 
 test('Risu regex cardinality reports the translated segments needing manual review', () => {
@@ -419,6 +495,77 @@ test('Risu regex cardinality reports the translated segments needing manual revi
     },
   ];
   assert.deepEqual(findRisuRegexAffectedSegmentIds(pattern, segments), ['affected']);
+});
+
+test('LLM regex proposals append only context-approved literal alternatives', () => {
+  const pattern = '([”"」])[ \\t]+(?!(?:하고|하는|라고|라며|라는|이라고|이라는|라니|と|って)(?![가-힣]))';
+  const module = { regex: [{ in: pattern, out: '$1' }] };
+  const changes = applyRisuRegexAlternativeProposals(module, [{
+    pathLabel: '模块.regex.0.in',
+    anchorAlternatives: ['하고', 'と'],
+    additions: ['的话', 'と', '(dangerous)'],
+  }]);
+  assert.deepEqual(changes, [{ pathLabel: '模块.regex.0.in', addedAlternatives: ['的话'] }]);
+  assert.match(module.regex[0].in, /\|的话\)/u);
+  assert.match(module.regex[0].in, /하고\|하는\|라고/u);
+  assert.doesNotMatch(module.regex[0].in, /dangerous/u);
+  assert.deepEqual(validateRisuControlReferences(
+    { data: { first_mes: '"안녕" 다음 장면' } },
+    { data: { first_mes: '"你好" 下一幕' } },
+    { regex: [{ in: pattern, out: '$1' }] },
+    module,
+  ), []);
+});
+
+test('LLM regex proposals can cite a focused subset of a large alternation group', () => {
+  const module = { regex: [{ in: '(?:하고|하는|라고|と|って)' }] };
+  const changes = applyRisuRegexAlternativeProposals(module, [{
+    pathLabel: '模块.regex.0.in',
+    anchorAlternatives: ['하고'],
+    additions: ['并且'],
+  }]);
+  assert.deepEqual(changes[0]?.addedAlternatives, ['并且']);
+  assert.equal(module.regex[0].in, '(?:하고|하는|라고|と|って|并且)');
+});
+
+test('LLM regex proposal normalization requires known paths and plain literals', () => {
+  const input = {
+    targetLanguage: 'zh-CN',
+    entries: [{ pathLabel: '模块.regex.41.in', pattern: 'x', type: 'editdisplay', out: '', sourceSamples: [], draftSamples: [] }],
+  };
+  assert.deepEqual(normalizeRisuRegexLanguageAlternatives(JSON.stringify({ proposals: [
+    { pathLabel: '模块.regex.999.in', anchorAlternatives: ['x'], additions: ['y'] },
+    { pathLabel: '模块.regex.41.in', anchorAlternatives: ['x'], additions: ['“并列项”', 'bad|syntax'] },
+  ] }), input), [{
+    pathLabel: '模块.regex.41.in', anchorAlternatives: ['x'], additions: ['“并列项”'],
+  }]);
+});
+
+test('coverage regex adaptation may change target-language spacing without losing captures', () => {
+  const original = '([”"」])[ \\t]+(?=[“"「『]?[0-9A-Za-z가-힣])';
+  const module = { regex: [{ in: original, out: '$1' }] };
+  const candidate = '([”"」])[ \\t]*(?=[“"「『]?[0-9A-Za-z가-힣一-鿿])';
+  const changes = applyRisuRegexCoverageProposals(module, [{
+    pathLabel: '模块.regex.0.in', anchorAlternatives: [], additions: [], pattern: candidate,
+  }], { data: { first_mes: '"안녕" 다음' } });
+  assert.equal(changes.length, 1);
+  assert.equal(module.regex[0].in, candidate);
+  assert.deepEqual(validateRisuControlReferences(
+    { data: { first_mes: '"안녕" 다음' } },
+    { data: { first_mes: '“你好”下一幕' } },
+    { regex: [{ in: original, out: '$1' }] },
+    module,
+  ), []);
+});
+
+test('coverage regex adaptation keeps aliases added during stage 2', () => {
+  const current = '(?:하고|并且)[ \\t]+';
+  const module = { regex: [{ in: current, out: '$1' }] };
+  const changes = applyRisuRegexCoverageProposals(module, [{
+    pathLabel: '模块.regex.0.in', anchorAlternatives: [], additions: [], pattern: '(?:하고)[ \\t]*',
+  }], { text: '하고 ' });
+  assert.equal(changes.length, 0);
+  assert.equal(module.regex[0].in, current);
 });
 
 test('Risu control validation allows additive aliases with zero-width UI render rules', () => {
@@ -746,6 +893,45 @@ test('dynamic Lua HTML labels translate without changing concatenation structure
   assert.deepEqual(result.syntaxIssues, []);
 });
 
+test('Risu module application accepts scanner-owned module paths', () => {
+  const module = { name: 'Original module name' };
+  const result = applyRisuModuleSegments(module, [{
+    pathJson: JSON.stringify(['$module', 'name']),
+    sourceText: 'Original module name',
+    start: null,
+    end: null,
+    translatedText: '翻译后的模块名',
+    finalText: null,
+    reviewStatus: 'approved',
+  }]);
+
+  assert.equal(result.draft.name, '翻译后的模块名');
+});
+
+test('Risu module reconstruction starts from the original before replaying stored ranges', () => {
+  const original = {
+    trigger: [{ effect: [{ code: 'local label = "Open map"\nlocal marker = "keep"' }] }],
+  };
+  const segment = scanRisuModule(original, 'lua-only').find((entry) => entry.sourceText === 'Open map');
+  assert.ok(segment);
+  const storedSegment = {
+    pathJson: JSON.stringify(segment.path.slice(1)),
+    start: segment.start,
+    end: segment.end,
+    sourceText: segment.sourceText,
+    translatedText: '打开地图并显示路线',
+    finalText: null,
+    reviewStatus: 'approved' as const,
+    kind: segment.kind,
+  };
+  const draft = applyRisuModuleSegments(original, [storedSegment]).draft;
+  const rebuilt = applyRisuModuleSegments(original, [storedSegment]);
+
+  assert.notEqual((draft.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code, original.trigger[0].effect[0].code);
+  assert.deepEqual(rebuilt.draft, draft);
+  assert.deepEqual(rebuilt.syntaxIssues, []);
+});
+
 test('Lua formatted and long strings write back without changing code structure', () => {
   const code = [
     'local spell = "hakurei_reimu|Fantasy Seal"',
@@ -849,6 +1035,75 @@ test('changed Risu Lua is syntax checked before export', () => {
 
   assert.equal(issues.length, 1);
   assert.equal(issues[0].pathLabel, '模块.trigger.0.effect.0.code');
+});
+
+test('Risu Lua syntax diagnostics include the source and draft error line', () => {
+  const original = { trigger: [{ effect: [{ code: 'local depicted_flashback = true\nreturn depicted_flashback' }] }] };
+  const broken = { trigger: [{ effect: [{ code: 'local depicted_flashback = true\n那 return depicted_flashback' }] }] };
+  const [issue] = validateRisuLuaChanges(original, broken);
+
+  assert.equal(issue.line, 2);
+  assert.equal(issue.column, 1);
+  assert.equal(issue.sourceLine, 'return depicted_flashback');
+  assert.equal(issue.draftLine, '那 return depicted_flashback');
+  assert.equal(issue.pathJson, JSON.stringify(['trigger', 0, 'effect', 0, 'code']));
+});
+
+test('Risu Lua diagnostics identify a Chinese character inserted into an identifier', () => {
+  const sourceLine = 'if direct_reference and not fact.depicted_flashback then return end';
+  const original = { trigger: [{ effect: [{ code: `local fact = { depicted_flashback = true }\n${sourceLine}` }] }] };
+  const broken = { trigger: [{ effect: [{ code: `local fact = { depicted_flashback = true }\n${sourceLine.replace('depicted_flashback', 'depicted_flash那back')}` }] }] };
+  const [issue] = validateRisuLuaChanges(original, broken);
+
+  assert.equal(issue.line, 2);
+  assert.equal(issue.column, 48);
+  assert.equal(issue.message, "[2:48] unexpected symbol '那' near 'depicted_flash'");
+  assert.equal(issue.draftLine, 'if direct_reference and not fact.depicted_flash那back then return end');
+  assert.deepEqual(issue.contextLines, [
+    { line: 1, sourceLine: 'local fact = { depicted_flashback = true }', draftLine: 'local fact = { depicted_flashback = true }', errorLine: false },
+    { line: 2, sourceLine, draftLine: 'if direct_reference and not fact.depicted_flash那back then return end', errorLine: true },
+  ]);
+});
+
+test('Risu Lua syntax context keeps bounded nearby lines for expandable editing', () => {
+  const sourceLines = [
+    'local fact = { depicted_flashback = true }',
+    'local a = 2',
+    'local b = 3',
+    'local c = 4',
+    'if direct_reference and not fact.depicted_flashback then return end',
+    'local f = 6',
+    'local g = 7',
+    'local h = 8',
+    'local i = 9',
+  ];
+  const original = { trigger: [{ effect: [{ code: sourceLines.join('\n') }] }] };
+  const broken = { trigger: [{ effect: [{ code: sourceLines.map((line, index) => index === 4 ? line.replace('depicted_flashback', 'depicted_flash那back') : line).join('\n') }] }] };
+  const [issue] = validateRisuLuaChanges(original, broken);
+
+  assert.equal(issue.line, 5);
+  assert.equal(issue.contextLines?.length, 9);
+  assert.equal(issue.contextLines?.[0]?.line, 1);
+  assert.equal(issue.contextLines?.at(-1)?.line, 9);
+  assert.equal(issue.contextLines?.find((line) => line.errorLine)?.draftLine, 'if direct_reference and not fact.depicted_flash那back then return end');
+});
+
+test('manual Lua syntax line replacement changes only the requested line', () => {
+  const module = { trigger: [{ effect: [{ code: 'local value = 1\n那 return value\nprint(value)' }] }] };
+  const pathJson = JSON.stringify(['trigger', 0, 'effect', 0, 'code']);
+  const result = replaceRisuLuaLine(module, pathJson, 2, 'return value', '那 return value');
+
+  assert.equal(result.ok, true);
+  assert.equal(result.previousLine, '那 return value');
+  assert.equal((module.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code, 'local value = 1\nreturn value\nprint(value)');
+});
+
+test('manual Lua syntax line replacement rejects a stale line', () => {
+  const module = { trigger: [{ effect: [{ code: 'return value' }] }] };
+  const result = replaceRisuLuaLine(module, JSON.stringify(['trigger', 0, 'effect', 0, 'code']), 1, 'return other', 'old line');
+
+  assert.deepEqual(result, { ok: false, reason: 'stale', currentLine: 'return value' });
+  assert.equal((module.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code, 'return value');
 });
 
 test('translated Touhou asset indexes supply missing Chinese runtime aliases', () => {
@@ -1075,4 +1330,24 @@ test('approved Lua translations relocate when stored source ranges become stale'
 
   assert.match(code, /alertInput\(triggerId, "请设置要在直播中使用的昵称。"\)/);
   assert.deepEqual(result.syntaxIssues, []);
+});
+
+test('stale Lua literal offsets cannot replace identifier text', () => {
+  const module = {
+    trigger: [{ effect: [{ code: 'if direct_reference and not fact.depicted_flashback then reference_ttl = 8 end' }] }],
+  };
+  const code = module.trigger[0].effect[0].code;
+  const start = code.indexOf('back then');
+  const result = applyApprovedSegments(module, [{
+    pathJson: JSON.stringify(['trigger', 0, 'effect', 0, 'code']),
+    start,
+    end: start + 'back then'.length,
+    sourceText: 'back then',
+    translatedText: '那时',
+    finalText: null,
+    reviewStatus: 'approved',
+    kind: 'lua-string',
+  }]);
+
+  assert.equal((result.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code, code);
 });

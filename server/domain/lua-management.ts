@@ -2,6 +2,12 @@ import {
   risuControlReferences,
   scanRisuModule,
   validateRisuControlReferences,
+  regexMatchSnippetsInStrings,
+  countRegexMatchesInStrings,
+  risuRegexControlReferences,
+  extractRegexAlternatives,
+  isRegexValidationOverrideActive,
+  type RisuRegexValidationOverrides,
   type ScannedSegment,
 } from './card.js';
 import {
@@ -10,6 +16,7 @@ import {
   detectRisuPortraitRouting,
   inspectRuntimeAliasCoverage,
   validateRisuLuaChanges,
+  runtimeAliasesForOwner,
 } from './risu-lua.js';
 import { detectRisuRuntimeRisks, validateRisuTemplateChanges } from './risu-qa.js';
 import { inspectPortraitRouterRepairs, type PortraitRouterRepairReport } from './portrait-router-repair.js';
@@ -24,6 +31,7 @@ export interface LuaManagementStep {
 }
 
 export interface LuaManagementSegment {
+  id: string;
   pathLabel: string;
   kind: string;
   sourceText: string;
@@ -33,6 +41,9 @@ export interface LuaManagementSegment {
   reviewStatus: string;
   finalText: string | null;
   translatedText: string | null;
+  /** Exact original Lua source line, supplied only when the stored range maps to one line. */
+  sourceCodeLine?: string;
+  sourceCodeLineNumber?: number;
 }
 
 export interface LuaManagementIssue {
@@ -40,6 +51,12 @@ export interface LuaManagementIssue {
   pathLabel: string;
   message: string;
   blocking: boolean;
+  segmentIds: string[];
+  line?: number;
+  column?: number;
+  sourceLine?: string;
+  draftLine?: string;
+  contextLines?: Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }>;
 }
 
 export interface LuaPortraitCandidate {
@@ -48,6 +65,8 @@ export interface LuaPortraitCandidate {
   missingAliases: string[];
   pathLabels: string[];
   status: 'covered' | 'needs-alias';
+  segmentIds: string[];
+  targetAliases: string[];
 }
 
 export interface LuaManagementReport {
@@ -68,18 +87,22 @@ export interface LuaManagementReport {
   portraitFeatureSignals: string[];
   routerRepair: PortraitRouterRepairReport;
   segments: LuaManagementSegment[];
-  controlReferences: Array<{ literal: string; kind: 'regex' | 'lua'; pathLabel: string; pattern: string }>;
+  controlReferences: Array<{ literal: string; kind: 'regex' | 'lua'; pathLabel: string; pattern: string; fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean }>;
   issues: LuaManagementIssue[];
   steps: LuaManagementStep[];
 }
 
 interface StoredSegment {
+  id: string;
+  pathJson: string;
   pathLabel: string;
   kind: string;
   sourceText: string;
   reviewStatus: string;
   finalText: string | null;
   translatedText: string | null;
+  start?: number | null;
+  end?: number | null;
 }
 
 interface ReportInput {
@@ -90,6 +113,7 @@ interface ReportInput {
   storedSegments?: StoredSegment[];
   projectStatus?: string;
   targetLanguage?: string;
+  regexValidationOverrides?: RisuRegexValidationOverrides;
   generatedAt?: string;
 }
 
@@ -117,6 +141,36 @@ function statusForReview(storedSegments: StoredSegment[], visibleCount: number):
   return pending ? 'needs-review' : 'complete';
 }
 
+function originalLuaSourceLine(
+  module: Record<string, unknown>,
+  pathJson: string,
+  start: number | null | undefined,
+  end: number | null | undefined,
+): { line: number; code: string } | null {
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start == null || end == null || start < 0 || end <= start) return null;
+  try {
+    const rawPath = JSON.parse(pathJson) as unknown;
+    if (!Array.isArray(rawPath)) return null;
+    const path = rawPath[0] === '$module' ? rawPath.slice(1) : rawPath;
+    let current: unknown = module;
+    for (const part of path) {
+      if (Array.isArray(current) && typeof part === 'number') current = current[part];
+      else if (current && typeof current === 'object' && !Array.isArray(current) && typeof part === 'string') current = (current as Record<string, unknown>)[part];
+      else return null;
+    }
+    if (typeof current !== 'string' || end > current.length) return null;
+    const lineNumberAt = (offset: number) => current.slice(0, offset).split('\n').length;
+    const line = lineNumberAt(start);
+    if (lineNumberAt(end - 1) !== line) return null;
+    const lineStart = current.lastIndexOf('\n', start - 1) + 1;
+    const lineEnd = current.indexOf('\n', end);
+    const code = current.slice(lineStart, lineEnd === -1 ? current.length : lineEnd);
+    return code.trim() ? { line, code } : null;
+  } catch {
+    return null;
+  }
+}
+
 export function buildLuaManagementReport(input: ReportInput): LuaManagementReport {
   const module = input.originalModule ?? {};
   const draftModule = input.draftModule ?? null;
@@ -125,41 +179,79 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
   const routerRepair = input.originalModule ? inspectPortraitRouterRepairs(module) : { detected: false, canApply: false, findings: [] };
   const scanned = input.originalModule ? scanRisuModule(module, 'lua-only') : [];
   const luaSegments = storedSegments.filter((segment) => segment.kind.startsWith('lua-') || segment.kind === 'runtime-message');
-  const segments: LuaManagementSegment[] = (luaSegments.length ? luaSegments : scanned.map((segment) => ({
-    pathLabel: segment.pathLabel,
-    kind: segment.kind,
-    sourceText: preview(segment.sourceText),
-    reviewStatus: 'untranslated',
-    finalText: null,
-    translatedText: null,
-    start: segment.start,
-    end: segment.end,
-    risk: segment.risk,
-  }))).map((segment) => ({
-    pathLabel: segment.pathLabel,
-    kind: segment.kind,
-    sourceText: preview(segment.sourceText),
-    start: 'start' in segment && (typeof segment.start === 'number' || segment.start === null) ? segment.start : null,
-    end: 'end' in segment && (typeof segment.end === 'number' || segment.end === null) ? segment.end : null,
-    risk: 'risk' in segment && (segment.risk === 'low' || segment.risk === 'medium' || segment.risk === 'high') ? segment.risk : 'medium',
-    reviewStatus: segment.reviewStatus,
-    finalText: segment.finalText,
-    translatedText: segment.translatedText,
-  }));
+  const sourceSegments: Array<LuaManagementSegment & { pathJson: string }> = (luaSegments.length
+    ? luaSegments.map((segment) => ({ ...segment, risk: 'medium' as const }))
+    : scanned.map((segment, index) => ({
+      id: `scan-${index}`,
+      pathJson: JSON.stringify(segment.path),
+      pathLabel: segment.pathLabel,
+      kind: segment.kind,
+      sourceText: preview(segment.sourceText),
+      reviewStatus: 'untranslated',
+      finalText: null,
+      translatedText: null,
+      start: segment.start,
+      end: segment.end,
+      risk: segment.risk,
+    })))
+    .map((segment) => ({
+      id: segment.id,
+      pathJson: segment.pathJson,
+      pathLabel: segment.pathLabel,
+      kind: segment.kind,
+      sourceText: segment.sourceText,
+      start: typeof segment.start === 'number' || segment.start === null ? segment.start : null,
+      end: typeof segment.end === 'number' || segment.end === null ? segment.end : null,
+      risk: segment.risk === 'low' || segment.risk === 'medium' || segment.risk === 'high' ? segment.risk : 'medium',
+      reviewStatus: segment.reviewStatus,
+      finalText: segment.finalText,
+      translatedText: segment.translatedText,
+    }));
+  // Do not surface a translated text slice as though it were Lua source. Only
+  // ranges that map exactly to one original-code line are eligible for this page.
+  const segments: LuaManagementSegment[] = sourceSegments.flatMap(({ pathJson, ...segment }) => {
+    const sourceLocation = originalLuaSourceLine(module, pathJson, segment.start, segment.end);
+    return sourceLocation
+      ? [{ ...segment, sourceCodeLine: sourceLocation.code, sourceCodeLineNumber: sourceLocation.line }]
+      : [];
+  });
 
-  const controlReferences = input.originalModule
-    ? risuControlReferences(module).map((reference) => ({
+  const draftReferences = draftModule ? [...risuControlReferences(draftModule), ...risuRegexControlReferences(draftModule)] : [];
+  const originalReferences = input.originalModule ? [...risuControlReferences(module), ...risuRegexControlReferences(module)] : [];
+  const activeCard = input.draftCard ?? input.originalCard;
+  const displayedReferences = input.originalModule
+    ? (draftReferences.length ? draftReferences : risuControlReferences(module))
+    : [];
+  const controlReferences = displayedReferences.map((reference) => {
+    const originalPattern = originalReferences.find((item) => item.pathLabel === reference.pathLabel)?.pattern || reference.pattern;
+    const originalMatches = reference.kind === 'regex' ? countRegexMatchesInStrings(input.originalCard, originalPattern) : 0;
+    const draftMatches = reference.kind === 'regex' ? countRegexMatchesInStrings(activeCard, reference.pattern) : 0;
+    return {
       literal: reference.literal,
       kind: reference.kind,
       pathLabel: reference.pathLabel,
       pattern: preview(reference.pattern),
-    }))
-    : [];
+      fullPattern: reference.pattern,
+      originalPattern,
+      addedAlternatives: reference.kind === 'regex'
+        ? extractRegexAlternatives(reference.pattern).filter((item) => !extractRegexAlternatives(originalPattern).includes(item))
+        : [],
+      originalMatches,
+      draftMatches,
+      originalSamples: reference.kind === 'regex' ? regexMatchSnippetsInStrings(input.originalCard, originalPattern) : [],
+      draftSamples: reference.kind === 'regex' ? regexMatchSnippetsInStrings(activeCard, reference.pattern) : [],
+      dynamicDisplay: reference.kind === 'regex' && reference.dynamicDisplay === true,
+      forcePassed: reference.kind === 'regex'
+        && isRegexValidationOverrideActive(input.regexValidationOverrides, reference.pathLabel, reference.pattern, originalMatches, draftMatches),
+    };
+  });
   const runtimeCandidates = portraitFeature.detected && input.targetLanguage
     ? collectRuntimeAliasCandidates(module, input.targetLanguage, input.draftCard ?? undefined)
     : [];
   const runtimeCoverageIssues = portraitFeature.detected && input.targetLanguage
-    ? inspectRuntimeAliasCoverage(module, input.targetLanguage, input.draftCard ?? undefined)
+    // Inspect the editable module so aliases already merged in Lua management
+    // are treated as covered instead of being reported again on every reload.
+    ? inspectRuntimeAliasCoverage(draftModule ?? module, input.targetLanguage, input.draftCard ?? undefined)
     : [];
   const runtimeTranslationCandidates = portraitFeature.detected && input.targetLanguage
     ? collectRuntimeAliasTranslationCandidates(module, input.targetLanguage)
@@ -172,7 +264,9 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       names: [],
       missingAliases: [],
       pathLabels: [],
+      segmentIds: [],
       status: 'covered' as const,
+      targetAliases: [],
     };
     if (!current.names.includes(candidate.name)) current.names.push(candidate.name);
     portraitByOwner.set(ownerId, current);
@@ -184,7 +278,9 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       names: [],
       missingAliases: [],
       pathLabels: [],
+      segmentIds: [],
       status: 'needs-alias' as const,
+      targetAliases: [],
     };
     if (!current.missingAliases.includes(issue.alias)) current.missingAliases.push(issue.alias);
     if (!current.pathLabels.includes(issue.pathLabel)) current.pathLabels.push(issue.pathLabel);
@@ -198,7 +294,9 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       names: candidate.aliases,
       missingAliases: [],
       pathLabels: [],
+      segmentIds: [],
       status: 'needs-alias' as const,
+      targetAliases: [],
     };
     if (!current.names.length) current.names.push(...candidate.aliases);
     if (!current.missingAliases.includes('目标语言名称')) current.missingAliases.push('目标语言名称');
@@ -206,24 +304,62 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
     portraitByOwner.set(ownerId, current);
   }
   const portraitCandidates = [...portraitByOwner.values()].sort((left, right) => left.ownerId.localeCompare(right.ownerId));
+  for (const candidate of portraitCandidates) {
+    candidate.targetAliases = runtimeAliasesForOwner(draftModule ?? module, input.targetLanguage || '', candidate.ownerId);
+    const serialized = JSON.stringify(draftModule ?? module);
+    const ownerMarker = '\\"id\\":\\"' + candidate.ownerId.toLocaleLowerCase() + '\\"';
+    const ownerIndex = serialized.toLocaleLowerCase().indexOf(ownerMarker);
+    const window = ownerIndex >= 0 ? serialized.slice(ownerIndex, ownerIndex + 1800) : '';
+    const aliasMarker = '\\"aliases\\":[';
+    const aliasStart = window.indexOf(aliasMarker);
+    const aliasEnd = aliasStart >= 0 ? window.indexOf(']', aliasStart) : -1;
+    const aliasBlock = aliasStart >= 0 && aliasEnd > aliasStart ? window.slice(aliasStart + aliasMarker.length, aliasEnd) : '';
+    const explicitTargetAliases = aliasBlock.split('\\"').map((value) => value.trim())
+      .filter((value) => /[\u4e00-\u9fff]/u.test(value) && !/[\u3040-\u30ff]/u.test(value));
+    candidate.targetAliases = [...new Set([...candidate.targetAliases, ...explicitTargetAliases])];
+    if (candidate.targetAliases.length) {
+      candidate.status = 'covered';
+      candidate.missingAliases = [];
+    }
+    const names = candidate.names.map((name) => name.trim().toLocaleLowerCase()).filter((name) => name.length >= 2);
+    const pathMatches = segments.filter((segment) => candidate.pathLabels.some((path) => segment.pathLabel.startsWith(path)));
+    const textMatches = segments.filter((segment) => names.some((name) => segment.sourceText.toLocaleLowerCase().includes(name)));
+    candidate.segmentIds = [...new Map([...textMatches, ...pathMatches].map((segment) => [segment.id, segment])).values()]
+      .slice(0, 8).map((segment) => segment.id);
+  }
   const issues: LuaManagementIssue[] = [];
+  const issueSegments = (pathLabel: string, message = ''): string[] => {
+    const base = pathLabel.replace(/\s*\[\d+:\d+\].*$/u, '').trim();
+    const candidates = segments.filter((segment) => segment.pathLabel.startsWith(base));
+    const line = Number(message.match(/\[(\d+):\d+\]/u)?.[1] || 0);
+    if (line && candidates.length) {
+      const nearest = candidates.map((segment) => ({ segment, distance: Math.abs(Number(segment.pathLabel.match(/行\s*(\d+)/u)?.[1] || 0) - line) }))
+        .sort((a, b) => a.distance - b.distance)[0];
+      return nearest ? [nearest.segment.id] : [];
+    }
+    return candidates.map((segment) => segment.id);
+  };
   if (draftModule) {
-    validateRisuLuaChanges(module, draftModule).forEach((issue) => issues.push({ ...issue, kind: 'syntax', blocking: true }));
-    validateRisuTemplateChanges(module, draftModule).forEach((issue) => issues.push({ ...issue, kind: 'template', blocking: true }));
+    // A parser position addresses the raw Lua code block, not a translated text
+    // segment near the same line. Linking it to a nearby segment misdirects the
+    // user to unrelated prose, so syntax errors are handled by their own line editor.
+    validateRisuLuaChanges(module, draftModule).forEach((issue) => issues.push({ ...issue, kind: 'syntax', blocking: true, segmentIds: [] }));
+    validateRisuTemplateChanges(module, draftModule).forEach((issue) => issues.push({ ...issue, kind: 'template', blocking: true, segmentIds: issueSegments(issue.pathLabel, issue.message) }));
     if (input.draftCard) {
-      validateRisuControlReferences(input.originalCard, input.draftCard, module, draftModule)
-        .forEach((issue) => issues.push({ ...issue, kind: 'control', blocking: true }));
+      validateRisuControlReferences(input.originalCard, input.draftCard, module, draftModule, input.regexValidationOverrides)
+        .forEach((issue) => issues.push({ ...issue, kind: 'control', blocking: true, segmentIds: issueSegments(issue.pathLabel, issue.message) }));
     }
   }
   if (input.originalModule) {
-    detectRisuRuntimeRisks(module).forEach((issue) => issues.push({ ...issue, kind: 'runtime', blocking: false }));
+    detectRisuRuntimeRisks(module).forEach((issue) => issues.push({ ...issue, kind: 'runtime', blocking: false, segmentIds: issueSegments(issue.pathLabel, issue.message) }));
   }
   for (const candidate of portraitCandidates.filter((item) => item.status === 'needs-alias')) {
     issues.push({
       kind: 'portrait',
       pathLabel: candidate.ownerId,
-      message: `运行时名称目录还缺少 ${candidate.missingAliases.length} 个目标语言别名，翻译任务完成时会自动补齐；导出阶段仅作兜底。`,
+      message: `运行时名称目录还缺少 ${candidate.missingAliases.length} 个目标语言别名，翻译阶段 2 会自动补齐；导出阶段仅作兜底。`,
       blocking: false,
+      segmentIds: candidate.pathLabels.flatMap((path) => issueSegments(path)),
     });
   }
   for (const finding of routerRepair.findings) {
@@ -232,6 +368,7 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       pathLabel: finding.pathLabel,
       message: `${finding.title}：${finding.message}`,
       blocking: false,
+      segmentIds: issueSegments(finding.pathLabel),
     });
   }
 

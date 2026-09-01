@@ -46,17 +46,58 @@ export function useTranslationTasks({
       onOpenSettings();
       return;
     }
+
+    const latestJob = project.jobs[0];
+    const hasPendingSegments = project.segments.some((segment) => (
+      segment.included && ['untranslated', 'rejected'].includes(segment.reviewStatus)
+    ));
+    if (latestJob && ['queued', 'running'].includes(latestJob.status)) {
+      onShowJobs();
+      onNotice('当前翻译任务仍在进行中，已打开任务进度。');
+      return;
+    }
+
+    // The top-level button also controls the follow-up stage. Once the text
+    // queue is empty, reuse the latest completed job instead of creating an
+    // empty text-translation job that would fail with "没有待翻译段落".
+    const postTotal = latestJob ? Math.max(0, latestJob.postTotalItems ?? 0) : 0;
+    const postCompleted = latestJob ? Math.max(0, latestJob.postCompletedItems ?? 0) : 0;
+    const postFailed = latestJob ? Math.max(0, latestJob.postFailedItems ?? 0) : 0;
+    const followUpNeedsRetry = postFailed > 0 || (postTotal > 0 && postCompleted < postTotal);
+    const followUpAction: 'retry-failed' | 'rerun-postprocessing' | null = !hasPendingSegments && latestJob?.status === 'review' && followUpNeedsRetry
+      ? 'rerun-postprocessing'
+      : !hasPendingSegments && latestJob?.status === 'review_with_errors' && (followUpNeedsRetry || latestJob.failedItems > 0)
+        ? 'retry-failed'
+        : null;
+    if (!hasPendingSegments && latestJob && ['review', 'review_with_errors'].includes(latestJob.status) && !followUpAction) {
+      onShowJobs();
+      onNotice('当前翻译和阶段 2 均已完成，没有需要重复执行的内容。');
+      return;
+    }
+    const resumeAction = latestJob && ['paused', 'failed', 'cancelled'].includes(latestJob.status)
+      ? 'resume'
+      : null;
     await runAction('start', async () => {
-      const job = await api<Job>(`/api/projects/${project.id}/jobs`, { method: 'POST', ...jsonBody({}) });
+      const action = followUpAction || resumeAction;
+      const job = action
+        ? await api<Job>(`/api/jobs/${latestJob!.id}/${action}`, { method: 'POST', ...jsonBody({}) })
+        : await api<Job>(`/api/projects/${project.id}/jobs`, { method: 'POST', ...jsonBody({}) });
       setJobDetail(job);
+      if (action === 'rerun-postprocessing') {
+        onNotice('已从顶部按钮启动阶段 2：正文译文保持不变，开始处理 Lua 正则与关键词适配。');
+      } else if (action === 'retry-failed') {
+        onNotice('已从顶部按钮重试失败项与阶段 2。');
+      } else if (action === 'resume') {
+        onNotice('已从顶部按钮继续翻译：未完成段落会从上次中断处继续处理。');
+      }
       onShowJobs();
       await Promise.all([refreshProject(project.id), refreshProjects()]);
     });
-  }, [onOpenSettings, onShowJobs, project, refreshProject, refreshProjects, runAction, settings]);
+  }, [onNotice, onOpenSettings, onShowJobs, project, refreshProject, refreshProjects, runAction, settings]);
 
   const jobAction = useCallback(async (
     jobId: string,
-    action: 'pause' | 'resume' | 'retry-failed' | 'cancel',
+    action: 'pause' | 'resume' | 'retry-failed' | 'rerun-postprocessing' | 'cancel',
   ) => {
     const expectedProjectId = selectedProjectIdRef.current;
     await runAction(action, async () => {
@@ -64,9 +105,16 @@ export function useTranslationTasks({
       if (selectedProjectIdRef.current === expectedProjectId && detail.projectId === expectedProjectId) {
         setJobDetail(detail);
       }
+      if (action === 'retry-failed') {
+        onNotice('已重新加入重试队列：失败段落和阶段 2 的 Lua/关键词适配会再次处理。');
+      } else if (action === 'rerun-postprocessing') {
+        onNotice('已重新执行阶段 2：正文译文保持不变，只复核 Lua 正则与关键词适配。');
+      } else if (action === 'resume') {
+        onNotice('已继续翻译：未完成段落会从上次中断处继续处理。');
+      }
       await Promise.all([refreshProject(expectedProjectId), refreshProjects()]);
     });
-  }, [refreshProject, refreshProjects, runAction]);
+  }, [onNotice, refreshProject, refreshProjects, runAction]);
 
   const retranslateSegments = useCallback(async (segmentIds: string[]) => {
     if (!project || !segmentIds.length) return;

@@ -22,9 +22,9 @@ export const WORKBENCH_DEFAULTS = {
     fallbackLanguage: 'en',
     targetLanguage: 'zh-CN',
     languageBehaviorMode: 'target',
-    concurrency: 400,
-    batchItems: 40,
-    batchChars: 600000,
+    concurrency: 8,
+    batchItems: 8,
+    batchChars: 40000,
     requestTimeoutSeconds: 120,
   },
 } as const;

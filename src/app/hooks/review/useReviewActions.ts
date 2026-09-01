@@ -8,7 +8,7 @@ import {
   protectionConfirmationPrompt,
   sameReviewProblemFamily,
 } from '../../review-alerts';
-import { locateLuaSyntaxSegment } from '../../review-navigation';
+import { integrityIssueDestination } from '../../review-navigation';
 import type { RunWorkbenchAction, ShowUiConfirm } from '../contracts';
 
 interface UseReviewActionsOptions {
@@ -23,7 +23,16 @@ interface UseReviewActionsOptions {
   showUiConfirm: ShowUiConfirm;
   onNotice: (notice: string) => void;
   onShowReview: () => void;
+  onOpenLuaManagement: () => void;
   onFocusReview: (focus: ReviewFocus) => void;
+  onClearReviewFocus: () => void;
+}
+
+interface ApplyProjectResult {
+  ignoredLuaSegments: number;
+  runtimeAliasAdditions: number;
+  runtimeAliasTranslationError?: string;
+  runtimeAliasSegmentationError?: string;
 }
 
 export function useReviewActions({
@@ -38,9 +47,79 @@ export function useReviewActions({
   showUiConfirm,
   onNotice,
   onShowReview,
+  onOpenLuaManagement,
   onFocusReview,
+  onClearReviewFocus,
 }: UseReviewActionsOptions) {
   const selectedSegment = project?.segments.find((segment) => segment.id === selectedSegmentId) ?? null;
+
+  function aliasFailures(result: ApplyProjectResult): string[] {
+    return [result.runtimeAliasTranslationError, result.runtimeAliasSegmentationError]
+      .filter((value): value is string => Boolean(value?.trim()));
+  }
+
+  function isRegexCoverageBlocker(error: unknown): error is ApiError {
+    return error instanceof ApiError && error.payload.code === 'REGEX_MATCH_COUNT_CHANGED';
+  }
+
+  async function chooseLuaFallback(message: string, kind: 'regex' | 'alias' = 'regex'): Promise<boolean> {
+    const detail = kind === 'regex'
+      ? '选择“跳过并继续”会只对当前检测到的正则命中差异建立精确豁免，其他 Lua 语法、模板和脚本完整性检查仍会保留。'
+      : '选择“跳过并继续”会跳过本次别名自动处理并继续保存/导出；其他 Lua 语法、模板和脚本完整性检查仍会保留。';
+    const skip = await showUiConfirm({
+      title: 'Lua 自动处理未完成',
+      message: `${message}\n\n模型已经无法继续处理。${detail}选择“去 Lua 管理检查”可人工检查后再保存。`,
+      confirmLabel: kind === 'regex' ? '跳过并继续' : '跳过别名并继续',
+      cancelLabel: '去 Lua 管理检查',
+      tone: 'warning',
+    });
+    if (!skip) onOpenLuaManagement();
+    return skip;
+  }
+
+  async function forceRegexValidation(): Promise<number> {
+    const result = await api<{ forcedCount: number }>(`/api/projects/${project?.id || selectedProjectId}/lua/regex-validation/force-pass`, {
+      method: 'POST',
+      ...jsonBody({}),
+    });
+    return Number(result.forcedCount) || 0;
+  }
+
+  async function applyWithLuaFallback(navigateOnError: boolean): Promise<ApplyProjectResult | null> {
+    if (!project) return null;
+    let regexSkipAttempted = false;
+    let aliasPrompted = false;
+    while (true) {
+      try {
+        const result = await api<ApplyProjectResult>(`/api/projects/${project.id}/apply`, {
+          method: 'POST',
+          ...jsonBody({}),
+        });
+        const failures = aliasFailures(result);
+        if (navigateOnError && failures.length && !aliasPrompted) {
+          aliasPrompted = true;
+          const skip = await chooseLuaFallback(`运行时名称别名自动处理失败：${failures.join('；')}`, 'alias');
+          if (!skip) return null;
+          onNotice('已按确认跳过本次别名自动处理；其余 Lua 和卡片完整性检查仍会继续。');
+        }
+        return result;
+      } catch (error) {
+        if (navigateOnError && !regexSkipAttempted && isRegexCoverageBlocker(error)) {
+          regexSkipAttempted = true;
+          const skip = await chooseLuaFallback(
+            `${String(error.payload.pathLabel || 'Lua 正则')} 命中数由 ${String(error.payload.originalMatches ?? '?')} 变为 ${String(error.payload.draftMatches ?? '?')}。`,
+          );
+          if (!skip) return null;
+          const forcedCount = await forceRegexValidation();
+          onNotice(forcedCount
+            ? `已为 ${forcedCount} 条当前正则命中差异建立精确豁免，正在重新执行 Lua 检测。`
+            : '没有找到仍然失配的正则规则，正在重新执行 Lua 检测。');
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
 
   async function updateSegment(
     segmentId: string,
@@ -260,42 +339,66 @@ export function useReviewActions({
     if (!project) return;
     await runAction('apply', async () => {
       try {
-        const result = await api<{ ignoredLuaSegments: number }>(`/api/projects/${project.id}/apply`, {
-          method: 'POST',
-          ...jsonBody({}),
-        });
+        const result = await applyWithLuaFallback(true);
+        if (!result) return;
+        const failures = aliasFailures(result);
         onNotice(result.ignoredLuaSegments > 0
-          ? `审核稿已保存并通过 Lua 语法校验；已忽略 ${result.ignoredLuaSegments} 条会改动 Lua 代码的旧扫描译文。`
-          : '审核稿已保存，并通过 Risu Lua 语法校验。');
+          ? `审核稿已保存并通过 Lua 语法校验；已忽略 ${result.ignoredLuaSegments} 条会改动 Lua 代码的旧扫描译文。${failures.length ? ' 别名自动处理未完成，已按确认继续。' : ''}`
+          : failures.length ? '审核稿已保存；别名自动处理未完成，已按确认继续，其余完整性校验已完成。'
+            : result.runtimeAliasAdditions > 0
+              ? `审核稿已保存，并通过 Risu Lua 语法校验；已自动补充 ${result.runtimeAliasAdditions} 个名称别名。`
+              : '审核稿已保存，并通过 Risu Lua 语法校验。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
+        onClearReviewFocus();
       } catch (applyError) {
-        focusRegexMismatch(applyError);
-        const related = locateLuaSyntaxSegment(
-          project.segments,
-          applyError instanceof Error ? applyError.message : String(applyError),
-        );
-        if (related) {
-          setSelectedSegmentId(related.id);
-          onShowReview();
-          onNotice(`已定位到最接近 Lua 报错行的审核项：${related.pathLabel}`);
-        }
+        focusIntegrityIssue(applyError);
         throw applyError;
       }
     });
   }
 
-  async function saveAndExport() {
+  async function applyDraftQuiet() {
+    if (!project) return;
+    await runAction('apply', async () => {
+      try {
+        await api(`/api/projects/${project.id}/apply`, { method: 'POST', ...jsonBody({}) });
+        onNotice('Lua 修改已保存，完整性校验已重新执行。');
+        await Promise.all([refreshProject(project.id), refreshProjects()]);
+        onClearReviewFocus();
+      } catch (error) {
+        focusIntegrityIssue(error, false);
+        throw error;
+      }
+    });
+  }
+
+  async function saveAndExport(navigateOnError = true) {
     if (!project) return;
     await runAction('apply-export', async () => {
       try {
-        const result = await api<{ ignoredLuaSegments: number }>('/api/projects/' + project.id + '/apply', {
-          method: 'POST',
-          ...jsonBody({}),
-        });
-        const response = await fetch('/api/projects/' + project.id + '/export');
-        if (!response.ok) {
+        const result = await applyWithLuaFallback(navigateOnError);
+        if (!result) return;
+        const failures = aliasFailures(result);
+        let response: Response;
+        let exportRegexSkipAttempted = false;
+        while (true) {
+          response = await fetch('/api/projects/' + project.id + '/export');
+          if (response.ok) break;
           const body = await response.json().catch(() => ({ error: response.statusText })) as Record<string, unknown>;
-          throw new ApiError(String(body.error || '请求失败：' + response.status), response.status, body);
+          const exportError = new ApiError(String(body.error || '请求失败：' + response.status), response.status, body);
+          if (navigateOnError && !exportRegexSkipAttempted && isRegexCoverageBlocker(exportError)) {
+            exportRegexSkipAttempted = true;
+            const skip = await chooseLuaFallback(
+              `${String(exportError.payload.pathLabel || 'Lua 正则')} 命中数由 ${String(exportError.payload.originalMatches ?? '?')} 变为 ${String(exportError.payload.draftMatches ?? '?')}。`,
+            );
+            if (!skip) return;
+            const forcedCount = await forceRegexValidation();
+            onNotice(forcedCount
+              ? `已为 ${forcedCount} 条当前正则命中差异建立精确豁免，正在重试导出。`
+              : '没有找到仍然失配的正则规则，正在重试导出。');
+            continue;
+          }
+          throw exportError;
         }
         const disposition = response.headers.get('Content-Disposition') || '';
         const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
@@ -320,44 +423,52 @@ export function useReviewActions({
         window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
         onNotice(result.ignoredLuaSegments > 0
           ? '审核稿已保存，已通过导出前语法检查并开始下载；已忽略 ' + result.ignoredLuaSegments + ' 条会改动 Lua 代码的旧扫描译文。'
-          : '审核稿已保存，已通过导出前语法检查并开始下载。');
+          : failures.length
+            ? '审核稿已保存，已按确认跳过别名自动处理并开始下载。'
+            : result.runtimeAliasAdditions > 0
+              ? `审核稿已保存，已自动补充 ${result.runtimeAliasAdditions} 个名称别名并开始下载。`
+              : '审核稿已保存，已通过导出前语法检查并开始下载。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
+        onClearReviewFocus();
       } catch (exportError) {
-        focusRegexMismatch(exportError);
-        const related = locateLuaSyntaxSegment(
-          project.segments,
-          exportError instanceof Error ? exportError.message : String(exportError),
-        );
-        if (related) {
-          setSelectedSegmentId(related.id);
-          onShowReview();
-          onNotice('已定位到最接近 Lua 报错行的审核项：' + related.pathLabel);
-        }
+        focusIntegrityIssue(exportError, navigateOnError);
         throw exportError;
       }
     });
   }
 
-  function focusRegexMismatch(error: unknown): void {
-    if (!(error instanceof ApiError) || error.payload.code !== 'REGEX_MATCH_COUNT_CHANGED') return;
+  function focusIntegrityIssue(error: unknown, navigate = true): void {
+    if (!(error instanceof ApiError)) return;
     const pathLabel = String(error.payload.pathLabel || '正则协议');
-    const originalMatches = Number(error.payload.originalMatches) || 0;
-    const draftMatches = Number(error.payload.draftMatches) || 0;
+    const originalMatches = Number(error.payload.originalMatches);
+    const draftMatches = Number(error.payload.draftMatches);
     const segmentIds = Array.isArray(error.payload.affectedSegmentIds)
       ? error.payload.affectedSegmentIds.map(String).filter(Boolean)
       : [];
-    if (!segmentIds.length) return;
+    const destination = integrityIssueDestination(error.payload, error.message);
+    if (!segmentIds.length && destination !== 'lua') return;
     onFocusReview({
       pathLabel,
       pattern: String(error.payload.pattern || ''),
-      originalMatches,
-      draftMatches,
+      ...(Number.isFinite(originalMatches) && Number.isFinite(draftMatches) ? { originalMatches, draftMatches } : {}),
+      ...(Number.isFinite(Number(error.payload.line)) ? { line: Number(error.payload.line) } : {}),
+      ...(Number.isFinite(Number(error.payload.column)) ? { column: Number(error.payload.column) } : {}),
+      ...(typeof error.payload.sourceLine === 'string' ? { sourceLine: error.payload.sourceLine } : {}),
+      ...(typeof error.payload.draftLine === 'string' ? { draftLine: error.payload.draftLine } : {}),
       segmentIds,
       problem: String(error.payload.problem || `${pathLabel} 的正则实际命中数由 ${originalMatches} 变为 ${draftMatches}，当前稿中有部分文本不再符合该正则的输入格式。`),
-      fixSuggestion: String(error.payload.fixSuggestion || '逐条对照原文、机翻和人工定稿，恢复该正则要求的文本结构；只修改可见文字，保留键名、分隔符和字段顺序，并保持模块中的正则规则不变。修订后保存并重新校验。'),
+      fixSuggestion: String(error.payload.fixSuggestion || '翻译阶段会结合本卡片的原文、译文和正则上下文，由模型判断是否需要追加目标语言并列项；只追加模型确认的字面量，不会删除或重排原有规则。若模型判断不确定或命中数仍不一致，请在右侧“人工定稿”框对照左侧原文，保留同样的引号、空格、键名、分隔符和字段顺序后再保存。'),
     });
-    onShowReview();
-    onNotice(`已定位 ${segmentIds.length} 条受影响文本：${pathLabel} 命中数 ${originalMatches} → ${draftMatches}。请按审核页中的修正方案逐条处理后再保存。`);
+    if (navigate) {
+      if (destination === 'lua') onOpenLuaManagement();
+      else onShowReview();
+    }
+    const targetPage = destination === 'lua' ? 'Lua 管理页' : '审核页';
+    onNotice(destination === 'lua'
+      ? `已提取脚本错误位置：${pathLabel}。请在${targetPage}展开对应项后人工修改并重新校验。`
+      : Number.isFinite(originalMatches) && Number.isFinite(draftMatches)
+        ? `已定位 ${segmentIds.length} 条受影响文本：${pathLabel} 命中数 ${originalMatches} → ${draftMatches}。请按${targetPage}中的修正方案逐条处理后再保存。`
+        : `已过滤 ${segmentIds.length} 条错误行：${pathLabel}。请按${targetPage}中的修正方案逐条处理后再保存。`);
   }
 
   return {
@@ -368,6 +479,7 @@ export function useReviewActions({
     reviewBulk,
     clearAllTranslationResults,
     applyDraft,
+    applyDraftQuiet,
     saveAndExport,
   };
 }

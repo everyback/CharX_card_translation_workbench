@@ -6,7 +6,16 @@ import Fastify, { type FastifyReply } from 'fastify';
 import { db, id, now } from './db.js';
 import {
   cardName,
+  applyRisuRegexAlternativeProposals,
+  applyRisuRegexCoverageProposals,
+  applyApprovedSegments,
   controlReferencesInText,
+  countRegexMatchesInStrings,
+  regexMatchSnippetsInStrings,
+  isRisuDisplayFormattingRegexRule,
+  isSafeRisuDisplayFormattingRegexChange,
+  isRegexValidationOverrideActive,
+  isZeroWidthCardinalityTrigger,
   missingProtectedFragments,
   risuControlReferences,
   risuTranslationControlFragments,
@@ -14,6 +23,9 @@ import {
   scanRisuModule,
   validateRisuControlReferences,
   type RisuControlReference,
+  type ApplicableSegment,
+  type RisuRegexValidationOverride,
+  type RisuRegexValidationOverrides,
   type ScopePreset,
 } from './domain/card.js';
 import {
@@ -33,7 +45,7 @@ import {
   type PortraitRouterRepairChange,
   type PortraitRouterRepairOverride,
 } from './domain/portrait-router-repair.js';
-import { validateRisuLuaChanges } from './domain/risu-lua.js';
+import { applyRisuModuleSegments, detectRisuPortraitRouting, replaceRisuLuaLine, validateRisuLuaChanges } from './domain/risu-lua.js';
 import { inspectCharxResources, inspectRisuModuleResourcesStreaming, readResourceBytes, resourceContentType, scanCharxResourceJson } from './domain/resources.js';
 import { recognizeImage, type OcrLanguage } from './domain/ocr.js';
 import { editImageText } from './domain/image-edit.js';
@@ -47,7 +59,7 @@ import {
   updateProtocolAnalysis,
   updateProtocolSchema,
 } from './protocol-service.js';
-import { abortJob, analyzeProtocolSemantics, privateImageSettings, publicSettings, scheduleJob, segmentRuntimeNames, translateRuntimeAliases } from './scheduler.js';
+import { abortJob, analyzeProtocolSemantics, analyzeRisuRegexLanguageCoverage, buildRegexWhitespaceProbe, collectRegexCoveragePairs, collectRegexCoveragePairsWithPatterns, privateImageSettings, publicSettings, regexLanguagePayloadSummary, scheduleJob, segmentRuntimeNames, splitRegexLanguageEntries, translateRuntimeAliases, type RisuRegexLanguageEntry } from './scheduler.js';
 import { languageBehaviorDirectiveIssue } from './domain/language-directives.js';
 import { workbenchConfig } from './config.js';
 import { PROJECT_TITLE_COLUMNS } from './repositories/project-queries.js';
@@ -638,7 +650,8 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
   const row = await db.prepare(`
     SELECT status, source_language AS sourceLanguage, target_language AS targetLanguage,
       original_json AS originalJson, draft_json AS draftJson,
-      original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+      original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
+      regex_validation_overrides AS regexValidationOverrides
     FROM projects WHERE id = ?
   `).get(request.params.projectId) as {
     status?: string;
@@ -648,19 +661,24 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
     draftJson?: string | null;
     originalModuleJson?: string | null;
     draftModuleJson?: string | null;
+    regexValidationOverrides?: string | null;
   } | undefined;
   if (!row?.originalJson) return reply.code(404).send({ error: '项目不存在或缺少原始卡片数据。' });
   try {
     const segments = await db.prepare(`
-      SELECT path_label AS pathLabel, kind, source_text AS sourceText,
-        review_status AS reviewStatus, final_text AS finalText, translated_text AS translatedText
+      SELECT id, path_json AS pathJson, path_label AS pathLabel, kind, source_text AS sourceText,
+        start_pos AS start, end_pos AS end, review_status AS reviewStatus, final_text AS finalText, translated_text AS translatedText
       FROM segments
       WHERE project_id = ? AND (kind LIKE 'lua-%' OR kind = 'runtime-message')
       ORDER BY sort_order, path_label
     `).all(request.params.projectId) as Array<{
+      id: string;
+      pathJson: string;
       pathLabel: string;
       kind: string;
       sourceText: string;
+      start: number | null;
+      end: number | null;
       reviewStatus: string;
       finalText: string | null;
       translatedText: string | null;
@@ -681,7 +699,675 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
       storedSegments: segments,
       projectStatus: row.status,
       targetLanguage: row.targetLanguage,
+      regexValidationOverrides: parseRegexValidationOverrides(row.regexValidationOverrides),
     });
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+/** Save one explicitly edited Lua syntax-error line from the Lua management page. */
+app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/syntax-line', async (request, reply) => {
+  const body = asRecord(request.body);
+  const pathJson = typeof body.pathJson === 'string' ? body.pathJson : '';
+  const line = typeof body.line === 'number' ? body.line : Number(body.line);
+  const replacement = typeof body.replacement === 'string' ? body.replacement : null;
+  const expectedLine = typeof body.expectedLine === 'string' ? body.expectedLine : undefined;
+  if (!pathJson || !Number.isInteger(line) || line < 1 || replacement == null) {
+    return reply.code(400).send({ error: '请提供 Lua 路径、有效行号和人工修改后的整行文本。' });
+  }
+  const row = await db.prepare(`
+    SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    FROM projects WHERE id = ?
+  `).get(request.params.projectId) as { originalModuleJson?: string | null; draftModuleJson?: string | null } | undefined;
+  if (!row?.originalModuleJson) return reply.code(404).send({ error: '项目不存在或缺少原始 Risu Lua 模块。' });
+  try {
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const draftModule = row.draftModuleJson
+      ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
+      : structuredClone(originalModule);
+    const result = replaceRisuLuaLine(draftModule, pathJson, line, replacement, expectedLine);
+    if (!result.ok) {
+      if (result.reason === 'stale') {
+        return reply.code(409).send({ error: '当前 Lua 行已被其他操作更新，请刷新诊断后再提交。', currentLine: result.currentLine });
+      }
+      const messages = {
+        'invalid-path': 'Lua 路径无效，无法定位代码。',
+        'not-code': '指定路径不是可编辑的 Lua 代码块。',
+        'line-out-of-range': '指定行号超出当前 Lua 代码范围。',
+        stale: '当前 Lua 行已被其他操作更新，请刷新诊断后再提交。',
+      } as const;
+      return reply.code(400).send({ error: messages[result.reason] });
+    }
+    const remainingSyntaxIssues = validateRisuLuaChanges(originalModule, draftModule);
+    await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(draftModule), now(), request.params.projectId);
+    return {
+      ok: true,
+      pathJson,
+      line,
+      previousLine: result.previousLine,
+      currentLine: replacement,
+      syntaxOk: !remainingSyntaxIssues.length,
+      remainingSyntaxIssues,
+    };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+type RegexCoverageEntry = RisuRegexLanguageEntry & {
+  originalPattern: string;
+  sourceMatches: string[];
+  draftMatches: string[];
+  coveragePaths: string[];
+  coverageRecords: ReturnType<typeof collectRegexCoveragePairs>;
+  sourceMatchCount: number;
+  draftMatchCount: number;
+  modelContext?: ReturnType<typeof regexLanguagePayloadSummary>;
+};
+
+interface RegexCoverageContext {
+  targetLanguage: string;
+  originalCard: Record<string, unknown>;
+  draftCard: Record<string, unknown>;
+  originalModule: Record<string, unknown>;
+  draftModule: Record<string, unknown>;
+  activeCard: Record<string, unknown>;
+  activeModule: Record<string, unknown>;
+  entries: RegexCoverageEntry[];
+}
+
+async function loadRegexCoverageContext(projectId: string, includePathLabel?: string): Promise<RegexCoverageContext | null> {
+  const row = await db.prepare(`
+    SELECT target_language AS targetLanguage, original_json AS originalJson, draft_json AS draftJson,
+      original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    FROM projects WHERE id = ?
+  `).get(projectId) as {
+    targetLanguage?: string;
+    originalJson?: string;
+    draftJson?: string | null;
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+  } | undefined;
+  if (!row?.originalJson || !row.originalModuleJson) return null;
+
+  const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
+  const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : structuredClone(originalCard);
+  const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+  const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
+  // Export validates the stored drafts. Rebuilding from segment rows here can
+  // resurrect an older review revision and present different hit counts.
+  const activeCard = draftCard;
+  const activeModule = draftModule;
+  const originalRules = Array.isArray(originalModule.regex) ? originalModule.regex : [];
+  const entries: RegexCoverageEntry[] = [];
+  for (const [index, rawRule] of originalRules.entries()) {
+    if (!rawRule || typeof rawRule !== 'object' || Array.isArray(rawRule)) continue;
+    const rule = rawRule as Record<string, unknown>;
+    if (typeof rule.in !== 'string' || !rule.in) continue;
+    if (isZeroWidthCardinalityTrigger(rule.in)) continue;
+    const draftRule = Array.isArray(draftModule.regex) && draftModule.regex[index] && typeof draftModule.regex[index] === 'object'
+      ? draftModule.regex[index] as Record<string, unknown>
+      : undefined;
+    const currentPattern = typeof draftRule?.in === 'string' && draftRule.in ? draftRule.in : rule.in;
+    const originalMatches = countRegexMatchesInStrings(originalCard, rule.in);
+    const draftMatches = countRegexMatchesInStrings(activeCard, currentPattern);
+    const dynamicDisplay = isRisuDisplayFormattingRegexRule(rule);
+    const pathLabel = `模块.regex.${index}.in`;
+    if (!dynamicDisplay && (!originalMatches || (originalMatches === draftMatches && pathLabel !== includePathLabel))) continue;
+    const pairs = dynamicDisplay ? [] : collectRegexCoveragePairsWithPatterns(originalCard, activeCard, rule.in, currentPattern);
+    const sourceMatchCount = originalMatches;
+    const draftMatchCount = draftMatches;
+    entries.push({
+      pathLabel,
+      originalPattern: rule.in,
+      pattern: currentPattern,
+      type: typeof rule.type === 'string' ? rule.type : '',
+      out: typeof rule.out === 'string' ? rule.out : '',
+      dynamicDisplay,
+      sourceSamples: pairs.slice(0, 8).map((pair) => pair.sourceText),
+      draftSamples: pairs.slice(0, 8).map((pair) => pair.draftText),
+      sourceMatches: pairs.flatMap((pair) => pair.sourceMatches).slice(0, 2_000),
+      draftMatches: pairs.flatMap((pair) => pair.draftMatches).slice(0, 2_000),
+      coveragePaths: pairs.map((pair) => pair.pathLabel),
+      coverageRecords: pairs,
+      formatProbe: dynamicDisplay ? undefined : buildRegexWhitespaceProbe(originalCard, activeCard, rule.in, currentPattern),
+      sourceMatchCount,
+      draftMatchCount,
+    });
+  }
+  return { targetLanguage: row.targetLanguage || 'zh-CN', originalCard, draftCard, originalModule, draftModule, activeCard, activeModule, entries };
+}
+
+function regexRuleIndexFromPathLabel(pathLabel: string): number | null {
+  const match = pathLabel.match(/^模块\.regex\.(\d+)\.in$/u);
+  if (!match) return null;
+  const index = Number(match[1]);
+  return Number.isSafeInteger(index) && index >= 0 ? index : null;
+}
+
+function regexRuleAt(module: Record<string, unknown>, index: number): Record<string, unknown> | null {
+  if (!Array.isArray(module.regex)) return null;
+  const rule = module.regex[index];
+  return rule && typeof rule === 'object' && !Array.isArray(rule) ? rule as Record<string, unknown> : null;
+}
+
+function parseRegexValidationOverrides(value: string | null | undefined): RisuRegexValidationOverrides {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const result: Record<string, RisuRegexValidationOverride> = {};
+    for (const [pathLabel, raw] of Object.entries(parsed)) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const item = raw as Record<string, unknown>;
+      if (typeof item.pattern !== 'string' || !item.pattern) continue;
+      const originalMatchCount = Number(item.originalMatchCount);
+      const draftMatchCount = Number(item.draftMatchCount);
+      if (!Number.isSafeInteger(originalMatchCount) || originalMatchCount < 0) continue;
+      if (!Number.isSafeInteger(draftMatchCount) || draftMatchCount < 0) continue;
+      result[pathLabel] = {
+        pattern: item.pattern,
+        originalMatchCount,
+        draftMatchCount,
+        confirmedAt: typeof item.confirmedAt === 'string' ? item.confirmedAt : '',
+      };
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function publicRegexCoverageEntry(entry: RegexCoverageEntry): RegexCoverageEntry {
+  return {
+    ...entry,
+    // The confirmation dialog needs representative hits, not the full payload
+    // that is reserved for the one-rule model request.
+    sourceMatches: entry.sourceMatches.slice(0, 24),
+    draftMatches: entry.draftMatches.slice(0, 24),
+    coverageRecords: entry.coverageRecords.slice(0, 24),
+    modelContext: regexLanguagePayloadSummary(entry),
+  };
+}
+
+function regexCoverageValidation(
+  entry: RegexCoverageEntry,
+  candidateModule: Record<string, unknown>,
+  activeCard: Record<string, unknown>,
+  activeModule: Record<string, unknown>,
+  originalModule: Record<string, unknown>,
+): { passed: boolean; sourceMatchCount: number; draftMatchCount: number; dynamicDisplay: boolean; syntaxIssues: string[]; message?: string } {
+  const match = entry.pathLabel.match(/^模块\.regex\.(\d+)\.in$/u);
+  const index = match ? Number(match[1]) : -1;
+  const candidateRule = Array.isArray(candidateModule.regex) && index >= 0
+    ? candidateModule.regex[index]
+    : undefined;
+  const candidatePattern = candidateRule && typeof candidateRule === 'object' && !Array.isArray(candidateRule)
+    ? (candidateRule as Record<string, unknown>).in
+    : undefined;
+  const syntaxIssues = validateRisuLuaChanges(originalModule, candidateModule).map((issue) => issue.message);
+  if (typeof candidatePattern !== 'string' || !candidatePattern) {
+    return { passed: false, sourceMatchCount: entry.sourceMatchCount, draftMatchCount: 0, dynamicDisplay: false, syntaxIssues, message: '候选结果没有保留有效的正则规则。' };
+  }
+  let compiled = true;
+  try { new RegExp(candidatePattern); } catch { compiled = false; }
+  // Runtime display rules process future model replies. Their static card
+  // counts are shown as diagnostics only; ordinary protocol rules still use
+  // the source/draft cardinality check below.
+  const draftMatchCount = countRegexMatchesInStrings(activeCard, candidatePattern);
+  const originalRule = regexRuleAt(originalModule, index);
+  const dynamicDisplay = isRisuDisplayFormattingRegexRule(originalRule);
+  const candidateIsDynamicDisplay = isRisuDisplayFormattingRegexRule(candidateRule as Record<string, unknown> | null);
+  const dynamicDisplaySafe = dynamicDisplay && candidateIsDynamicDisplay && isSafeRisuDisplayFormattingRegexChange(
+    originalRule,
+    candidateRule as Record<string, unknown> | null,
+  );
+  const passed = compiled && !syntaxIssues.length && (dynamicDisplay ? dynamicDisplaySafe : draftMatchCount === entry.sourceMatchCount);
+  return {
+    passed,
+    sourceMatchCount: entry.sourceMatchCount,
+    draftMatchCount,
+    dynamicDisplay,
+    syntaxIssues,
+    message: passed
+      ? (dynamicDisplay ? '动态展示规则已通过编译与结构校验；静态卡片命中仅作样本参考。' : undefined)
+      : dynamicDisplay && !dynamicDisplaySafe
+        ? '动态展示规则必须保留 editdisplay 类型、捕获组和仅由捕获组/换行组成的替换模板。'
+      : compiled ? `候选命中 ${draftMatchCount}，与原文 ${entry.sourceMatchCount} 不一致。` : '候选正则无法编译。',
+  };
+}
+
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-coverage/preview', async (request, reply) => {
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再执行 Lua 正则全量检查。' });
+  try {
+    const context = await loadRegexCoverageContext(request.params.projectId);
+    if (!context) return reply.code(409).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
+    return { ok: true, checked: context.entries.length, rules: context.entries.map(publicRegexCoverageEntry) };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+/**
+ * A quick-flow escape hatch for rules the model could not reconcile.  This
+ * records an exact, current-pattern/current-count acknowledgement; it does
+ * not alter the Lua module or disable any other integrity checks.
+ */
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-validation/force-pass', async (request, reply) => {
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再跳过 Lua 正则检查。' });
+  try {
+    const row = await db.prepare(`
+      SELECT original_json AS originalJson, original_module_json AS originalModuleJson,
+        draft_module_json AS draftModuleJson, target_language AS targetLanguage,
+        regex_validation_overrides AS regexValidationOverrides
+      FROM projects WHERE id = ?
+    `).get(request.params.projectId) as {
+      originalJson?: string;
+      originalModuleJson?: string | null;
+      draftModuleJson?: string | null;
+      targetLanguage?: string;
+      regexValidationOverrides?: string | null;
+    } | undefined;
+    if (!row?.originalJson || !row.originalModuleJson) {
+      return reply.code(404).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
+    }
+    const allSegments = await db.prepare(`
+      SELECT id, path_json AS pathJson, path_label AS pathLabel, kind, source_text AS sourceText,
+        start_pos AS start, end_pos AS end, translated_text AS translatedText,
+        final_text AS finalText, review_status AS reviewStatus
+      FROM segments WHERE project_id = ?
+    `).all(request.params.projectId) as unknown as ApplicableSegment[];
+    const cardSegments: ApplicableSegment[] = [];
+    const moduleSegments: ApplicableSegment[] = [];
+    for (const segment of allSegments) {
+      const segmentPath = JSON.parse(segment.pathJson) as Array<string | number>;
+      if (segmentPath[0] === '$resource') continue;
+      if (segmentPath[0] === '$module') {
+        moduleSegments.push({ ...segment, pathJson: JSON.stringify(segmentPath.slice(1)) });
+      } else {
+        cardSegments.push(segment);
+      }
+    }
+    const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const moduleBase = row.draftModuleJson
+      ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
+      : originalModule;
+    const draftCard = applyApprovedSegments(originalCard, cardSegments);
+    const portraitRouting = detectRisuPortraitRouting(originalModule).detected;
+    const draftModule = applyRisuModuleSegments(
+      moduleBase,
+      moduleSegments,
+      portraitRouting ? row.targetLanguage || '' : '',
+      portraitRouting ? draftCard : undefined,
+    ).draft;
+    const overrides = { ...parseRegexValidationOverrides(row.regexValidationOverrides) } as Record<string, RisuRegexValidationOverride>;
+    const forcedPaths: string[] = [];
+    const originalRules = Array.isArray(originalModule.regex) ? originalModule.regex : [];
+    for (const [index, rawRule] of originalRules.entries()) {
+      if (!rawRule || typeof rawRule !== 'object' || Array.isArray(rawRule)) continue;
+      const originalRule = rawRule as Record<string, unknown>;
+      const originalPattern = typeof originalRule.in === 'string' ? originalRule.in : '';
+      if (!originalPattern || isZeroWidthCardinalityTrigger(originalPattern)) continue;
+      const draftRule = regexRuleAt(draftModule, index);
+      const currentPattern = typeof draftRule?.in === 'string' && draftRule.in ? draftRule.in : originalPattern;
+      const originalMatchCount = countRegexMatchesInStrings(originalCard, originalPattern);
+      const draftMatchCount = countRegexMatchesInStrings(draftCard, currentPattern);
+      if (!originalMatchCount || originalMatchCount === draftMatchCount) continue;
+      const pathLabel = `模块.regex.${index}.in`;
+      overrides[pathLabel] = {
+        pattern: currentPattern,
+        originalMatchCount,
+        draftMatchCount,
+        confirmedAt: now(),
+      };
+      forcedPaths.push(pathLabel);
+    }
+    if (forcedPaths.length) {
+      await db.prepare('UPDATE projects SET regex_validation_overrides = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify(overrides), now(), request.params.projectId);
+    }
+    return { ok: true, forcedCount: forcedPaths.length, paths: forcedPaths };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-coverage/rule', async (request, reply) => {
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再执行 Lua 正则全量检查。' });
+  const body = asRecord(request.body);
+  const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
+  const requestedPattern = typeof body.pattern === 'string' ? body.pattern : undefined;
+  if (!pathLabel) return reply.code(400).send({ error: '请提供要分析的正则规则路径。' });
+  if (requestedPattern !== undefined && (!requestedPattern.trim() || requestedPattern.length > 4_000 || /[\r\n]/u.test(requestedPattern))) {
+    return reply.code(400).send({ error: '请提供有效的不含换行的正则规则，长度不能超过 4000。' });
+  }
+  const clientAbort = new AbortController();
+  const abortWhenClientDisconnects = () => clientAbort.abort();
+  reply.raw.once('close', abortWhenClientDisconnects);
+  try {
+    const context = await loadRegexCoverageContext(request.params.projectId, pathLabel);
+    if (!context) return reply.code(409).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
+    const baseEntry = context.entries.find((candidate) => candidate.pathLabel === pathLabel);
+    if (!baseEntry) return reply.code(404).send({ error: '该规则已不再需要全量修复，预览可能已经过期。' });
+    const entry = requestedPattern && requestedPattern !== baseEntry.pattern
+      ? (() => {
+          const pairs = collectRegexCoveragePairsWithPatterns(
+            context.originalCard,
+            context.activeCard,
+            baseEntry.originalPattern,
+            requestedPattern,
+          );
+          return {
+            ...baseEntry,
+            pattern: requestedPattern,
+            draftMatchCount: countRegexMatchesInStrings(context.activeCard, requestedPattern),
+            draftSamples: pairs.slice(0, 8).map((pair) => pair.draftText),
+            draftMatches: pairs.flatMap((pair) => pair.draftMatches).slice(0, 2_000),
+            coveragePaths: pairs.map((pair) => pair.pathLabel),
+            coverageRecords: pairs,
+            formatProbe: buildRegexWhitespaceProbe(context.originalCard, context.activeCard, baseEntry.originalPattern, requestedPattern),
+          };
+        })()
+      : baseEntry;
+    const proposals = await analyzeRisuRegexLanguageCoverage(context.targetLanguage, [entry], clientAbort.signal);
+    // Model analysis is deliberately read-only. The UI must show the complete
+    // candidate pattern to a human before a separate explicit save can write it.
+    const candidateModule = JSON.parse(JSON.stringify(context.draftModule)) as Record<string, unknown>;
+    if (requestedPattern) {
+      const editableRule = regexRuleAt(candidateModule, regexRuleIndexFromPathLabel(pathLabel) ?? -1);
+      if (editableRule) editableRule.in = requestedPattern;
+    }
+    const coverageChanges = applyRisuRegexCoverageProposals(candidateModule, proposals, context.originalCard);
+    const changes = [
+      ...coverageChanges,
+      ...applyRisuRegexAlternativeProposals(candidateModule, proposals.filter((proposal) => !coverageChanges.some((change) => change.pathLabel === proposal.pathLabel))),
+    ];
+    const candidatePattern = regexRuleAt(candidateModule, regexRuleIndexFromPathLabel(pathLabel) ?? -1)?.in;
+    const validation = regexCoverageValidation(entry, candidateModule, context.activeCard, context.activeModule, context.originalModule);
+    const status = !changes.length ? 'no-change' : validation.passed ? 'validated' : 'rejected';
+    return {
+      ok: true,
+      pathLabel,
+      status,
+      applied: 0,
+      proposals,
+      changes,
+      validation,
+      candidatePattern: typeof candidatePattern === 'string' ? candidatePattern : undefined,
+      modelContext: regexLanguagePayloadSummary(entry),
+    };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    reply.raw.removeListener('close', abortWhenClientDisconnects);
+  }
+});
+
+/** Re-check changed regex rules with the complete before/after hit set. */
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-coverage', async (request, reply) => {
+  const row = await db.prepare(`
+    SELECT target_language AS targetLanguage, original_json AS originalJson, draft_json AS draftJson,
+      original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    FROM projects WHERE id = ?
+  `).get(request.params.projectId) as {
+    targetLanguage?: string;
+    originalJson?: string;
+    draftJson?: string | null;
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+  } | undefined;
+  if (!row?.originalJson || !row.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再执行 Lua 正则全量检查。' });
+  try {
+    const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
+    const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : structuredClone(originalCard);
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
+    // Keep this legacy full-pass endpoint aligned with export as well.
+    const activeCard = draftCard;
+    const activeModule = draftModule;
+    const originalRules = Array.isArray(originalModule.regex) ? originalModule.regex : [];
+    const entries = [] as Array<{
+      pathLabel: string;
+      pattern: string;
+      type: string;
+      out: string;
+      sourceSamples: string[];
+      draftSamples: string[];
+      sourceMatches: string[];
+      draftMatches: string[];
+      coveragePaths: string[];
+      coverageRecords: ReturnType<typeof collectRegexCoveragePairs>;
+      formatProbe?: ReturnType<typeof buildRegexWhitespaceProbe>;
+      sourceMatchCount: number;
+      draftMatchCount: number;
+    }>;
+    for (const [index, rawRule] of originalRules.entries()) {
+      if (!rawRule || typeof rawRule !== 'object' || Array.isArray(rawRule)) continue;
+      const rule = rawRule as Record<string, unknown>;
+      if (typeof rule.in !== 'string' || !rule.in) continue;
+      if (isZeroWidthCardinalityTrigger(rule.in)) continue;
+      const draftRule = Array.isArray(draftModule.regex) && draftModule.regex[index] && typeof draftModule.regex[index] === 'object'
+        ? draftModule.regex[index] as Record<string, unknown>
+        : undefined;
+      const currentPattern = typeof draftRule?.in === 'string' && draftRule.in ? draftRule.in : rule.in;
+      const originalMatches = countRegexMatchesInStrings(originalCard, rule.in);
+      const draftMatches = countRegexMatchesInStrings(activeCard, currentPattern);
+      if (!originalMatches || originalMatches === draftMatches) continue;
+      const pairs = collectRegexCoveragePairsWithPatterns(originalCard, activeCard, rule.in, currentPattern);
+      const sourceMatchCount = originalMatches;
+      const draftMatchCount = draftMatches;
+      entries.push({
+        pathLabel: `模块.regex.${index}.in`,
+        pattern: currentPattern,
+        type: typeof rule.type === 'string' ? rule.type : '',
+        out: typeof rule.out === 'string' ? rule.out : '',
+        sourceSamples: pairs.slice(0, 8).map((pair) => pair.sourceText),
+        draftSamples: pairs.slice(0, 8).map((pair) => pair.draftText),
+        sourceMatches: pairs.flatMap((pair) => pair.sourceMatches).slice(0, 2_000),
+        draftMatches: pairs.flatMap((pair) => pair.draftMatches).slice(0, 2_000),
+        coveragePaths: pairs.map((pair) => pair.pathLabel),
+        coverageRecords: pairs,
+        formatProbe: buildRegexWhitespaceProbe(originalCard, activeCard, rule.in, currentPattern),
+        sourceMatchCount,
+        draftMatchCount,
+      });
+    }
+    if (!entries.length) return { ok: true, checked: 0, changedRules: 0, applied: 0, proposals: [] };
+    const batches = splitRegexLanguageEntries(entries);
+    const proposalBatches = await Promise.all(batches.map((batch) => analyzeRisuRegexLanguageCoverage(row.targetLanguage || 'zh-CN', batch)));
+    const proposals = proposalBatches.flat();
+    const coverageChanges = applyRisuRegexCoverageProposals(draftModule, proposals, originalCard);
+    const changes = [
+      ...coverageChanges,
+      ...applyRisuRegexAlternativeProposals(draftModule, proposals.filter((proposal) => !coverageChanges.some((change) => change.pathLabel === proposal.pathLabel))),
+    ];
+    return {
+      ok: true,
+      checked: entries.length,
+      changedRules: changes.length,
+      applied: 0,
+      proposals,
+      changes,
+    };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+type RegexRuleCardContext = {
+  originalCard: Record<string, unknown>;
+  draftCard: Record<string, unknown>;
+  originalPattern: string;
+  currentPattern: string;
+  dynamicDisplay: boolean;
+};
+
+async function loadRegexRuleCardContext(projectId: string, pathLabel: string): Promise<RegexRuleCardContext | null> {
+  const index = regexRuleIndexFromPathLabel(pathLabel);
+  if (index == null) return null;
+  const row = await db.prepare(`
+    SELECT original_json AS originalJson, draft_json AS draftJson,
+      original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    FROM projects WHERE id = ?
+  `).get(projectId) as {
+    originalJson?: string;
+    draftJson?: string | null;
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+  } | undefined;
+  if (!row?.originalJson || !row.originalModuleJson) return null;
+  const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
+  const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : structuredClone(originalCard);
+  const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+  const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
+  const originalRule = regexRuleAt(originalModule, index);
+  const draftRule = regexRuleAt(draftModule, index);
+  const originalPattern = typeof originalRule?.in === 'string' ? originalRule.in : '';
+  const currentPattern = typeof draftRule?.in === 'string' && draftRule.in ? draftRule.in : originalPattern;
+  if (!originalPattern || !draftRule) return null;
+  return { originalCard, draftCard, originalPattern, currentPattern, dynamicDisplay: isRisuDisplayFormattingRegexRule(originalRule) && isRisuDisplayFormattingRegexRule(draftRule) };
+}
+
+function testRegexRuleOnCards(pathLabel: string, pattern: string, context: RegexRuleCardContext) {
+  let compiled = true;
+  let compileMessage: string | undefined;
+  try { new RegExp(pattern); } catch (error) {
+    compiled = false;
+    compileMessage = error instanceof Error ? error.message : String(error);
+  }
+  const sourceMatchCount = compiled ? countRegexMatchesInStrings(context.originalCard, pattern) : 0;
+  const draftMatchCount = compiled ? countRegexMatchesInStrings(context.draftCard, pattern) : 0;
+  return {
+    ok: compiled,
+    pathLabel,
+    pattern,
+    compiled,
+    sourceMatchCount,
+    draftMatchCount,
+    dynamicDisplay: context.dynamicDisplay,
+    sourceSamples: compiled ? regexMatchSnippetsInStrings(context.originalCard, pattern, 12) : [],
+    draftSamples: compiled ? regexMatchSnippetsInStrings(context.draftCard, pattern, 12) : [],
+    ...(compileMessage ? { message: `正则无法编译：${compileMessage}` } : {
+      message: context.dynamicDisplay
+        ? '动态展示规则已通过编译；静态卡片命中仅作样本参考。'
+        : sourceMatchCount === draftMatchCount
+        ? '原文与当前稿命中数一致。'
+        : `原文与当前稿命中数不同：${sourceMatchCount} → ${draftMatchCount}。`,
+    }),
+  };
+}
+
+/** Test a manually edited regex without changing the project draft. */
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-test', async (request, reply) => {
+  const body = asRecord(request.body);
+  const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
+  const pattern = typeof body.pattern === 'string' ? body.pattern : '';
+  if (!pathLabel || !pattern || pattern.length > 4_000 || /[\r\n]/u.test(pattern)) {
+    return reply.code(400).send({ error: '请提供有效的正则路径和不含换行的规则，长度不能超过 4000。' });
+  }
+  try {
+    const context = await loadRegexRuleCardContext(request.params.projectId, pathLabel);
+    if (!context) return reply.code(404).send({ error: '找不到该正则规则或当前卡片没有 Lua 模块。' });
+    return testRegexRuleOnCards(pathLabel, pattern, context);
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+/** Save a manually edited regex input into draft_module_json after syntax validation. */
+app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-rule', async (request, reply) => {
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再保存正则规则。' });
+  const body = asRecord(request.body);
+  const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
+  const pattern = typeof body.pattern === 'string' ? body.pattern : '';
+  const expectedPattern = typeof body.expectedPattern === 'string' ? body.expectedPattern : undefined;
+  const forcePass = body.forcePass === true;
+  if (!pathLabel || !pattern || pattern.length > 4_000 || /[\r\n]/u.test(pattern)) {
+    return reply.code(400).send({ error: '请提供有效的正则路径和不含换行的规则，长度不能超过 4000。' });
+  }
+  try {
+    const context = await loadRegexRuleCardContext(request.params.projectId, pathLabel);
+    if (!context) return reply.code(404).send({ error: '找不到该正则规则或当前卡片没有 Lua 模块。' });
+    if (expectedPattern !== undefined && expectedPattern !== context.currentPattern) {
+      return reply.code(409).send({ error: '当前正则已被其他操作更新，请刷新诊断后再保存。', currentPattern: context.currentPattern });
+    }
+    const test = testRegexRuleOnCards(pathLabel, pattern, context);
+    if (!test.compiled) return reply.code(400).send({ error: test.message || '正则无法编译。' });
+    const row = await db.prepare('SELECT draft_module_json AS draftModuleJson, original_module_json AS originalModuleJson, regex_validation_overrides AS regexValidationOverrides FROM projects WHERE id = ?')
+      .get(request.params.projectId) as { draftModuleJson?: string | null; originalModuleJson?: string | null; regexValidationOverrides?: string | null } | undefined;
+    if (!row?.originalModuleJson) return reply.code(404).send({ error: '项目不存在或缺少原始 Risu Lua 模块。' });
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
+    const index = regexRuleIndexFromPathLabel(pathLabel);
+    const rule = index == null ? null : regexRuleAt(draftModule, index);
+    const originalRule = index == null ? null : regexRuleAt(originalModule, index);
+    if (!rule) return reply.code(404).send({ error: '找不到可保存的正则规则。' });
+    const dynamicDisplay = isRisuDisplayFormattingRegexRule(originalRule);
+    const candidateRule = { ...rule, in: pattern };
+    if (dynamicDisplay && !isSafeRisuDisplayFormattingRegexChange(originalRule, candidateRule)) {
+      return reply.code(400).send({ error: '动态展示规则必须保留 editdisplay 类型、捕获组和仅由捕获组/换行组成的替换模板。' });
+    }
+    const previousPattern = typeof rule.in === 'string' ? rule.in : context.currentPattern;
+    rule.in = pattern;
+    const overrides = { ...parseRegexValidationOverrides(row.regexValidationOverrides) } as Record<string, RisuRegexValidationOverride>;
+    const forcePassed = !dynamicDisplay && forcePass && test.sourceMatchCount !== test.draftMatchCount;
+    if (forcePassed) {
+      overrides[pathLabel] = {
+        pattern,
+        originalMatchCount: test.sourceMatchCount,
+        draftMatchCount: test.draftMatchCount,
+        confirmedAt: now(),
+      };
+    } else {
+      delete overrides[pathLabel];
+    }
+    await db.prepare('UPDATE projects SET draft_module_json = ?, regex_validation_overrides = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(draftModule), JSON.stringify(overrides), now(), request.params.projectId);
+    return { ...test, saved: true, previousPattern, forcePassed };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/runtime-aliases', async (request, reply) => {
+  const row = await db.prepare(`SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
+    target_language AS targetLanguage FROM projects WHERE id = ?`).get(request.params.projectId) as {
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+    targetLanguage?: string;
+  } | undefined;
+  if (!row?.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可修改的 Risu Lua 模块。' });
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再合并名称别名。' });
+  const body = asRecord(request.body);
+  const ownerId = typeof body.ownerId === 'string' ? body.ownerId.trim() : '';
+  const aliases = Array.isArray(body.aliases)
+    ? body.aliases.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean)
+    : [];
+  if (!ownerId || !aliases.length) return reply.code(400).send({ error: '请提供 ownerId 和至少一个目标语言别名。' });
+  try {
+    const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
+    const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
+    const result = applyRisuModuleSegments(draftModule, [], row.targetLanguage || '', undefined, { [ownerId]: aliases });
+    if (!result.runtimeAliasAdditions) return reply.code(409).send({ error: '没有发现可合并的新别名，请检查 ownerId 或重复项。' });
+    await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(result.draft), now(), request.params.projectId);
+    return { ok: true, ownerId, aliases, added: result.runtimeAliasAdditions };
   } catch (error) {
     return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -986,10 +1672,12 @@ app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/pause', async (request
 });
 
 app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/resume', async (request, reply) => {
-  const result = await db.prepare("UPDATE jobs SET status = 'queued', last_error = NULL, updated_at = ? WHERE id = ? AND status IN ('paused', 'failed')")
+  const result = await db.prepare("UPDATE jobs SET status = 'queued', last_error = NULL, updated_at = ? WHERE id = ? AND status IN ('paused', 'failed', 'cancelled')")
     .run(now(), request.params.jobId);
   if (!result.changes) return reply.code(409).send({ error: '任务当前不能继续。' });
-  await db.prepare("UPDATE job_items SET status = 'pending', last_error = NULL, updated_at = ? WHERE job_id = ? AND status IN ('running', 'failed')")
+  await db.prepare("UPDATE job_items SET status = 'pending', last_error = NULL, updated_at = ? WHERE job_id = ? AND status IN ('running', 'failed', 'cancelled')")
+    .run(now(), request.params.jobId);
+  await db.prepare("UPDATE projects SET status = 'translating', updated_at = ? WHERE id = (SELECT project_id FROM jobs WHERE id = ?)")
     .run(now(), request.params.jobId);
   scheduleJob(request.params.jobId);
   return await translationJobs.jobById(request.params.jobId);
@@ -1000,8 +1688,25 @@ app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/retry-failed', async (
   if (!job) return reply.code(404).send({ error: '任务不存在。' });
   await db.prepare("UPDATE job_items SET status = 'pending', last_error = NULL, updated_at = ? WHERE job_id = ? AND status = 'failed'")
     .run(now(), request.params.jobId);
-  await db.prepare("UPDATE jobs SET status = 'queued', failed_items = 0, last_error = NULL, updated_at = ? WHERE id = ?")
+  await db.prepare("UPDATE jobs SET status = 'queued', failed_items = 0, post_completed_items = 0, post_failed_items = 0, last_error = NULL, updated_at = ? WHERE id = ?")
     .run(now(), request.params.jobId);
+  scheduleJob(request.params.jobId);
+  return await translationJobs.jobById(request.params.jobId);
+});
+
+app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/rerun-postprocessing', async (request, reply) => {
+  const result = await db.prepare(`
+    UPDATE jobs
+    SET status = 'queued', post_completed_items = 0, post_failed_items = 0,
+      last_error = NULL, updated_at = ?
+    WHERE id = ? AND status IN ('review', 'review_with_errors')
+      AND (COALESCE(post_failed_items, 0) > 0 OR COALESCE(post_completed_items, 0) < COALESCE(post_total_items, 0))
+  `).run(now(), request.params.jobId);
+  if (!result.changes) return reply.code(409).send({ error: '阶段 2 已完成或当前没有可重试的失败项，无需重复执行。' });
+  await db.prepare("UPDATE projects SET status = 'translating', updated_at = ? WHERE id = (SELECT project_id FROM jobs WHERE id = ?)")
+    .run(now(), request.params.jobId);
+  await db.prepare('INSERT INTO job_logs(job_id, level, message, created_at) VALUES (?, ?, ?, ?)')
+    .run(request.params.jobId, 'info', '已请求重新执行阶段 2：正文译文保持不变，只复核 Lua 正则与关键词适配。', now());
   scheduleJob(request.params.jobId);
   return await translationJobs.jobById(request.params.jobId);
 });

@@ -15,7 +15,7 @@ export function JobsView({
   jobs: Job[];
   selected: Job | null;
   onSelect: (job: Job) => void;
-  onAction: (jobId: string, action: 'pause' | 'resume' | 'retry-failed' | 'cancel') => void;
+  onAction: (jobId: string, action: 'pause' | 'resume' | 'retry-failed' | 'rerun-postprocessing' | 'cancel') => void;
   onOpenReview: () => void;
   languageBehaviorMode: 'target' | 'preserve';
   targetLanguage: string;
@@ -41,9 +41,11 @@ export function JobsView({
       || (totalWorkItems > 0 && processedWorkItems >= totalWorkItems))
   ));
   const hasFollowUpFailure = postFailedItems > 0;
+  const followUpNeedsRetry = hasFollowUpFailure || (postTotalItems > 0 && postProcessedItems < postTotalItems);
   const mainTranslationRemaining = job ? Math.max(0, job.totalItems - processedItems) : 0;
   const followUpPending = postTotalItems > 0 && mainTranslationRemaining > 0;
   const followUpInProgress = postTotalItems > 0 && !followUpPending && postProcessedItems < postTotalItems;
+  const hasTranslationFailure = Boolean(job && (job.failedItems > 0 || hasFollowUpFailure || job.status === 'review_with_errors'));
   return (
     <section className="jobs-layout">
       <div className="job-list">
@@ -65,26 +67,29 @@ export function JobsView({
           <div className="job-title-row"><div><h2>任务进度</h2><span>{job.model} · 卡片语言设定：{languageBehaviorMode === 'preserve' ? '保留卡片原设定' : `跟随${targetLanguage}`}</span></div><strong>{percent}%</strong></div>
           <div className="progress-track"><span style={{ width: `${percent}%` }} /></div>
           <div className="job-metrics"><span>成功 <b>{job.completedItems}</b></span><span>失败 <b>{job.failedItems}</b></span><span>翻译中 <b>{translatingItems}</b></span><span>总计（含后续） <b>{totalWorkItems}</b></span></div>
+          {job.status === 'queued' && <div className="job-live-status" role="status">任务已排队，等待模型请求开始；日志会实时显示阶段和返回结果。</div>}
+          {job.status === 'running' && translatingItems > 0 && <div className="job-live-status active" role="status">正在请求模型，收到返回后会自动提交本批结果；请查看下方运行日志。</div>}
           {postTotalItems > 0 && (
             <div className={`job-follow-up ${followUpPending ? 'pending' : followUpInProgress ? 'active' : hasFollowUpFailure ? 'failed' : 'complete'}`} role="status" aria-live="polite">
-              <div className="job-follow-up-heading"><strong>后续处理：运行时名称本地化</strong><b>{postProcessedItems}/{postTotalItems}</b></div>
-              <span>{followUpPending ? `主翻译完成后处理 ${postTotalItems} 个目录。` : followUpInProgress ? `正在处理 ${postTotalItems - postProcessedItems} 个目录，处理完成后进入审核。` : hasFollowUpFailure ? `有 ${postFailedItems} 个目录未完成，导出阶段会再次尝试。` : '运行时名称目录已处理完成，可以进入审核。'}</span>
+              <div className="job-follow-up-heading"><strong>阶段 2：Lua 正则与关键词适配</strong><b>运行时名称 {postProcessedItems}/{postTotalItems}</b></div>
+              <span>{followUpPending ? `文本翻译完成后处理 Lua 正则、关键词和 ${postTotalItems} 个运行时名称。` : followUpInProgress ? `正在处理 Lua 正则、关键词和剩余 ${postTotalItems - postProcessedItems} 个运行时名称，完成后进入审核。` : hasFollowUpFailure ? `有 ${postFailedItems} 个运行时名称未完成，导出阶段会再次尝试。` : 'Lua 正则、关键词和运行时名称已处理完成，可以进入审核。'}</span>
             </div>
           )}
           {translationFinished && (
             <div className="job-complete-callout" role="status" aria-live="polite">
               <span className="job-complete-icon"><ShieldCheck size={18} /></span>
               <div className="job-complete-copy">
-                <strong>{job.failedItems > 0 || hasFollowUpFailure ? '翻译已完成，但有项目需要留意' : '翻译已完成，下一步进入审核'}</strong>
-                <span>{job.failedItems > 0 || hasFollowUpFailure ? '请先查看失败项和后续处理提示，再确认哪些译文可以通过。' : '请在审核页对照原文、译文和风险提示，确认后点击“保存”或“保存并导出”。'}</span>
+                <strong>{hasTranslationFailure ? '翻译已完成，但有项目需要留意' : '翻译已完成，下一步进入审核'}</strong>
+                <span>{hasTranslationFailure ? '请先查看失败项和阶段 2 的适配提示，再确认哪些译文可以通过。' : '请在审核页对照原文、译文和风险提示，确认后点击“保存”或“保存并导出”。'}</span>
               </div>
               <button className="primary-button" type="button" onClick={onOpenReview}><CheckCheck size={16} />进入审核</button>
             </div>
           )}
           <div className="job-actions">
             {['queued', 'running'].includes(job.status) && <button onClick={() => onAction(job.id, 'pause')}><Pause size={16} />暂停</button>}
-            {['paused', 'failed'].includes(job.status) && <button onClick={() => onAction(job.id, 'resume')}><Play size={16} />继续</button>}
-            {job.failedItems > 0 && <button onClick={() => onAction(job.id, 'retry-failed')}><RefreshCw size={16} />重试失败项</button>}
+            {['paused', 'failed', 'cancelled'].includes(job.status) && <button onClick={() => onAction(job.id, 'resume')}><Play size={16} />继续翻译</button>}
+            {(job.failedItems > 0 || hasFollowUpFailure || job.status === 'review_with_errors') && <button onClick={() => onAction(job.id, 'retry-failed')}><RefreshCw size={16} />{job.failedItems > 0 && (hasFollowUpFailure || job.status === 'review_with_errors') ? '重试失败项与阶段 2' : hasFollowUpFailure || job.status === 'review_with_errors' ? '重试阶段 2' : '重试失败项'}</button>}
+            {job.status === 'review' && followUpNeedsRetry && <button onClick={() => onAction(job.id, 'rerun-postprocessing')}><RefreshCw size={16} />重试阶段 2</button>}
             {['queued', 'running', 'paused'].includes(job.status) && <button onClick={() => onAction(job.id, 'cancel')}><Square size={15} />取消</button>}
           </div>
           {job.lastError && <div className="job-error">{job.lastError}</div>}

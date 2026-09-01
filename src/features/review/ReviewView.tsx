@@ -98,6 +98,9 @@ export function ReviewView({
   const safePending = pendingWithText.filter((segment) => segment.riskLevel === 'low' && segment.qaFlags.length === 0);
   const [draft, setDraft] = useState('');
   const selectedRowRef = useRef<HTMLButtonElement>(null);
+  const regexRepairExamples = useMemo(() => selected && reviewFocus && reviewFocusIds.has(selected.id) && reviewFocus.pattern
+    ? findRegexRepairExamples(selected.sourceText, draft, reviewFocus.pattern)
+    : [], [selected, draft, reviewFocus, reviewFocusIds]);
   useEffect(() => setDraft(selected?.finalText ?? selected?.translatedText ?? ''), [selected?.id, selected?.finalText, selected?.translatedText]);
   useEffect(() => {
     selectedRowRef.current?.scrollIntoView({ block: 'nearest' });
@@ -120,20 +123,8 @@ export function ReviewView({
           {reviewFocus && (
             <div className="review-focus-banner">
               <FilterX size={15} />
-              <div className="review-focus-copy">
-                <strong>命中问题</strong>
-                <span>{reviewFocus.problem}</span>
-                {reviewFocus.pattern && (
-                  <details className="review-focus-rule">
-                    <summary>查看实际正则规则</summary>
-                    <code>{reviewFocus.pattern}</code>
-                  </details>
-                )}
-                <strong>修正方案</strong>
-                <span>{reviewFocus.fixSuggestion}</span>
-                <small>已过滤 {reviewFocus.segmentIds.length} 条待人工检查文本；处理完成后点击“保存修改”或再次保存导出。</small>
-              </div>
-              <button type="button" title="显示全部审核项" onClick={onClearReviewFocus}>显示全部</button>
+              <span>已过滤 {reviewFocus.segmentIds.length} 条错误行：{reviewFocus.pathLabel}{reviewFocus.originalMatches != null && reviewFocus.draftMatches != null ? `（${reviewFocus.originalMatches} → ${reviewFocus.draftMatches}）` : ''}</span>
+              <button type="button" title="关闭提示并显示全部审核项" aria-label="关闭提示并显示全部审核项" onClick={onClearReviewFocus}><X size={14} /></button>
             </div>
           )}
           <div className="review-queue-header">
@@ -273,10 +264,21 @@ export function ReviewView({
               <div className="review-focus-detail-heading"><CircleAlert size={16} /><strong>本条文本命中脚本完整性问题</strong></div>
               <div><b>命中问题：</b>{reviewFocus.problem}</div>
               <div><b>修正方案：</b>{reviewFocus.fixSuggestion}</div>
-              <small>校验路径：{reviewFocus.pathLabel} · 匹配数 {reviewFocus.originalMatches} → {reviewFocus.draftMatches}</small>
+              {regexRepairExamples.length > 0 && (
+                <div className="review-focus-examples">
+                  <strong>本条具体修改位置（请改右侧“人工定稿”）</strong>
+                  {regexRepairExamples.map((example, index) => (
+                    <div className="review-focus-example" key={`${example.current}:${index}`}>
+                      <span>当前</span><code>{example.current}</code>
+                      <span>建议</span><code>{example.suggested}</code>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <small>校验路径：{reviewFocus.pathLabel}{reviewFocus.originalMatches != null && reviewFocus.draftMatches != null ? ` · 匹配数 ${reviewFocus.originalMatches} → ${reviewFocus.draftMatches}` : ''}</small>
               {reviewFocus.pattern && (
                 <details className="review-focus-detail-rule">
-                  <summary>查看本次校验使用的正则</summary>
+                  <summary>查看技术细节（一般不用修改）</summary>
                   <code>{reviewFocus.pattern}</code>
                 </details>
               )}
@@ -327,4 +329,48 @@ function segmentSummary(value: string): string {
   const compact = value.replace(/\s+/g, ' ').trim();
   if (!compact) return '空文本';
   return compact.length > 42 ? `${compact.slice(0, 42)}...` : compact;
+}
+
+interface RegexRepairExample {
+  current: string;
+  suggested: string;
+}
+
+function findRegexRepairExamples(source: string, draft: string, pattern: string): RegexRepairExample[] {
+  if (!source || !draft || !pattern) return [];
+  const sourceMatches = collectRegexMatches(source, pattern);
+  const draftMatches = collectRegexMatches(draft, pattern);
+  if (sourceMatches.length <= draftMatches.length || !sourceMatches.some((match) => /^["”」][ \t]/.test(match))) return [];
+
+  const examples: RegexRepairExample[] = [];
+  const missingSpace = /(["”」])(?=[A-Za-z0-9\u3400-\u9fff\u3040-\u30ff])/g;
+  let match: RegExpExecArray | null;
+  while (examples.length < 3 && (match = missingSpace.exec(draft))) {
+    const start = Math.max(0, match.index - 24);
+    const end = Math.min(draft.length, match.index + 26);
+    const current = compactExample(draft.slice(start, end), start > 0, end < draft.length);
+    const suggested = compactExample(`${draft.slice(start, match.index + 1)} ${draft.slice(match.index + 1, end)}`, start > 0, end < draft.length);
+    examples.push({ current, suggested });
+  }
+  return examples;
+}
+
+function collectRegexMatches(value: string, pattern: string): string[] {
+  try {
+    const regex = new RegExp(pattern, 'g');
+    const matches: string[] = [];
+    let match: RegExpExecArray | null;
+    while (matches.length < 100_000 && (match = regex.exec(value))) {
+      matches.push(match[0]);
+      if (!match[0].length) regex.lastIndex += 1;
+    }
+    return matches;
+  } catch {
+    return [];
+  }
+}
+
+function compactExample(value: string, hasPrefix: boolean, hasSuffix: boolean): string {
+  const compact = value.replace(/\s+/g, ' ').trim();
+  return `${hasPrefix ? '…' : ''}${compact}${hasSuffix ? '…' : ''}`;
 }

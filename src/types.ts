@@ -104,7 +104,7 @@ export interface Segment {
   reviewStatus: 'untranslated' | 'pending' | 'approved' | 'rejected';
   included: boolean;
   qaFlags: string[];
-  controlReferences: ControlReference[];
+  controlReferences: Array<ControlReference & { fullPattern?: string; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean }>;
   translationError: string | null;
   sortOrder: number;
   updatedAt: string;
@@ -112,9 +112,13 @@ export interface Segment {
 
 export interface ReviewFocus {
   pathLabel: string;
-  pattern: string;
-  originalMatches: number;
-  draftMatches: number;
+  pattern?: string;
+  originalMatches?: number;
+  draftMatches?: number;
+  line?: number;
+  column?: number;
+  sourceLine?: string;
+  draftLine?: string;
   segmentIds: string[];
   problem: string;
   fixSuggestion: string;
@@ -153,7 +157,7 @@ export interface ProjectDetail extends ProjectSummary {
   originalHash: string;
   createdAt: string;
   segments: Segment[];
-  controlReferences: ControlReference[];
+  controlReferences: Array<ControlReference & { originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean }>;
   jobs: Job[];
   scanSummary?: ScanSummary;
 }
@@ -185,7 +189,111 @@ export interface LuaManagementStep {
   message: string;
 }
 
+export type RegexCoverageRuleStatus = 'pending' | 'queued' | 'processing' | 'returned' | 'validated' | 'no-change' | 'rejected' | 'failed' | 'cancelled';
+
+export interface RegexCoverageValidation {
+  passed: boolean;
+  sourceMatchCount: number;
+  draftMatchCount: number;
+  dynamicDisplay?: boolean;
+  syntaxIssues?: string[];
+  message?: string;
+}
+
+export interface RegexLanguagePayloadSummary {
+  totalRecords: number;
+  totalUniqueRecords: number;
+  selectedRecords: number;
+  totalSourceMatches: number;
+  totalDraftMatches: number;
+  selectedSourceMatches: number;
+  selectedDraftMatches: number;
+  truncated: boolean;
+  sampling: string;
+  budgetChars: number;
+  contextChars: number;
+  dynamicDisplay?: boolean;
+  strata: { coverageDifference: number; textDifference: number; stable: number };
+  formatProbe?: {
+    kind: string;
+    sourceMatchCount: number;
+    draftMatchCount: number;
+    baselineSourceMatchCount: number;
+    baselineDraftMatchCount: number;
+    totalRecords: number;
+    selectedRecords: number;
+    truncated: boolean;
+  };
+}
+
+export interface RegexCoverageChange {
+  pathLabel: string;
+  addedAlternatives: string[];
+}
+
+export interface RegexCoverageRule {
+  pathLabel: string;
+  originalPattern?: string;
+  pattern: string;
+  type: string;
+  out: string;
+  dynamicDisplay?: boolean;
+  sourceSamples: string[];
+  draftSamples: string[];
+  sourceMatches?: string[];
+  draftMatches?: string[];
+  coveragePaths?: string[];
+  sourceMatchCount: number;
+  draftMatchCount: number;
+  status?: RegexCoverageRuleStatus;
+  proposals?: Array<Record<string, unknown>>;
+  changes?: RegexCoverageChange[];
+  validation?: RegexCoverageValidation;
+  candidatePattern?: string;
+  modelContext?: RegexLanguagePayloadSummary;
+  error?: string;
+}
+
+export interface RegexCoveragePreview {
+  ok: boolean;
+  checked: number;
+  rules: RegexCoverageRule[];
+}
+
+export interface RegexCoverageRuleResult {
+  ok: boolean;
+  pathLabel: string;
+  status: RegexCoverageRuleStatus;
+  applied: number;
+  proposals: Array<Record<string, unknown>>;
+  changes: RegexCoverageChange[];
+  validation: RegexCoverageValidation;
+  candidatePattern?: string;
+  modelContext?: RegexLanguagePayloadSummary;
+  message?: string;
+}
+
+export interface RegexRuleTestResult {
+  ok: boolean;
+  pathLabel: string;
+  pattern: string;
+  compiled: boolean;
+  sourceMatchCount: number;
+  draftMatchCount: number;
+  dynamicDisplay?: boolean;
+  sourceSamples: string[];
+  draftSamples: string[];
+  message?: string;
+}
+
+export interface RegexRuleSaveResult extends RegexRuleTestResult {
+  saved: boolean;
+  previousPattern: string;
+  forcePassed: boolean;
+}
+
 export interface LuaManagementSegment {
+  id: string;
   pathLabel: string;
   kind: string;
   sourceText: string;
@@ -195,13 +303,22 @@ export interface LuaManagementSegment {
   reviewStatus: string;
   finalText: string | null;
   translatedText: string | null;
+  sourceCodeLine?: string;
+  sourceCodeLineNumber?: number;
 }
 
 export interface LuaManagementIssue {
   kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router';
+  pathJson?: string;
   pathLabel: string;
   message: string;
   blocking: boolean;
+  segmentIds: string[];
+  line?: number;
+  column?: number;
+  sourceLine?: string;
+  draftLine?: string;
+  contextLines?: Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }>;
 }
 
 export interface LuaPortraitCandidate {
@@ -210,6 +327,8 @@ export interface LuaPortraitCandidate {
   missingAliases: string[];
   pathLabels: string[];
   status: 'covered' | 'needs-alias';
+  segmentIds: string[];
+  targetAliases?: string[];
 }
 
 export interface PortraitRouterRepairFinding {
@@ -259,7 +378,7 @@ export interface LuaManagementReport {
   portraitFeatureSignals: string[];
   routerRepair: PortraitRouterRepairReport;
   segments: LuaManagementSegment[];
-  controlReferences: ControlReference[];
+  controlReferences: Array<ControlReference & { fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean }>;
   issues: LuaManagementIssue[];
   steps: LuaManagementStep[];
 }
