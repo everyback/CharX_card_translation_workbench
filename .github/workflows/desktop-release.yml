@@ -2,6 +2,10 @@ name: Windows Desktop Releases
 
 on:
   push:
+    branches:
+      - master
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -22,6 +26,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}".Substring(1)
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($packageVersion -ne $tagVersion) {
+            throw "Release tag ${{ github.ref_name }} does not match package.json version $packageVersion"
+          }
 
       - name: Use Node.js 22
         uses: actions/setup-node@v6
@@ -44,7 +58,7 @@ jobs:
       - name: Upload portable EXE
         uses: actions/upload-artifact@v6
         with:
-          name: cardloom-translate-portable
+          name: cardloom-translate-portable-${{ github.run_id }}
           path: release/CardLoom-Translate-Portable-*.exe
           if-no-files-found: error
           retention-days: 14
@@ -55,7 +69,7 @@ jobs:
       - name: Upload installer EXE
         uses: actions/upload-artifact@v6
         with:
-          name: cardloom-translate-installer
+          name: cardloom-translate-installer-${{ github.run_id }}
           path: |
             release/CardLoom-Translate-Setup-*.exe
             release/CardLoom-Translate-Setup-*.blockmap
@@ -75,13 +89,13 @@ jobs:
       - name: Download portable artifact
         uses: actions/download-artifact@v6
         with:
-          name: cardloom-translate-portable
+          name: cardloom-translate-portable-${{ github.run_id }}
           path: release-assets
 
       - name: Download installer artifact
         uses: actions/download-artifact@v6
         with:
-          name: cardloom-translate-installer
+          name: cardloom-translate-installer-${{ github.run_id }}
           path: release-assets
 
       - name: Publish GitHub Release
@@ -102,13 +116,13 @@ jobs:
       - name: Download portable artifact
         uses: actions/download-artifact@v6
         with:
-          name: cardloom-translate-portable
+          name: cardloom-translate-portable-${{ github.run_id }}
           path: release-assets
 
       - name: Download installer artifact
         uses: actions/download-artifact@v6
         with:
-          name: cardloom-translate-installer
+          name: cardloom-translate-installer-${{ github.run_id }}
           path: release-assets
 
       - name: Update Nightly Release

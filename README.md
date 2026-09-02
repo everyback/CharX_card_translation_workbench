@@ -251,7 +251,7 @@ npm run desktop:all
 
 便携版把 SQLite、上传文件和缓存放在 EXE 同目录的 `data/`；安装版把这些数据放在 Electron 的 Windows 用户数据目录。两种版本都只在本机 `127.0.0.1` 启动服务。
 
-推送到 GitHub 后，`.github/workflows/desktop-release.yml` 会自动编译这两种 EXE，并将构建产物上传到 Actions 运行记录。推送到 `master` 的普通提交会自动更新一个可下载的 `CardLoom Translate Nightly` 预发布版本；推送 `v` 开头的标签（例如 `v0.1.0`）时，会创建独立的正式 GitHub Release 并附加安装包。
+推送到 GitHub 后，`.github/workflows/desktop-release.yml` 会自动编译这两种 EXE，并将构建产物上传到 Actions 运行记录。推送到 `master` 的普通提交会自动更新一个可下载的 `CardLoom Translate Nightly` 预发布版本；正式版本应先同步推进 `package.json` 与 `package-lock.json` 的版本号，再推送同号 `v` 前缀标签（例如 `v0.1.3`）。工作流会校验标签与包版本一致，创建独立的正式 GitHub Release，并永久保留带版本号的安装包；旧版本不会被 Nightly 覆盖。
 
 当前 Actions 产物未配置 Windows 代码签名证书，首次运行可能显示“未知发布者”；这不影响程序启动。后续配置证书 Secret 后再开启签名即可。
 

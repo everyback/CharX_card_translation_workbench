@@ -227,7 +227,7 @@ npm run desktop:all
 
 The portable build stores SQLite data, uploads, and caches in `data/` next to the EXE. The installer build stores them in Electron's Windows user-data directory. Both variants bind the local service to `127.0.0.1` only.
 
-After a GitHub push, `.github/workflows/desktop-release.yml` builds both EXEs and uploads them to the Actions run. A normal push to `master` automatically updates the downloadable `CardLoom Translate Nightly` prerelease. Pushing a `v`-prefixed tag (for example, `v0.1.0`) creates a separate formal GitHub Release with the installer assets.
+After a GitHub push, `.github/workflows/desktop-release.yml` builds both EXEs and uploads them to the Actions run. A normal push to `master` automatically updates the downloadable `CardLoom Translate Nightly` prerelease. For a formal version, first advance the version in both `package.json` and `package-lock.json`, then push a matching `v`-prefixed tag (for example, `v0.1.3`). The workflow verifies that the tag matches the package version, creates a separate GitHub Release, and permanently keeps its versioned installer assets; older releases are not overwritten by Nightly.
 
 The current Actions artifacts are unsigned because no Windows code-signing certificate secret is configured. Windows may show an “Unknown publisher” warning on first launch; this does not prevent the application from running.
 
