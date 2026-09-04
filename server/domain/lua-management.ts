@@ -17,6 +17,7 @@ import {
   inspectRuntimeAliasCoverage,
   validateRisuLuaChanges,
   runtimeAliasesForOwner,
+  staleRisuModuleNamespaceProtocolPaths,
 } from './risu-lua.js';
 import { detectRisuRuntimeRisks, validateRisuTemplateChanges } from './risu-qa.js';
 import { inspectPortraitRouterRepairs, type PortraitRouterRepairReport } from './portrait-router-repair.js';
@@ -47,7 +48,7 @@ export interface LuaManagementSegment {
 }
 
 export interface LuaManagementIssue {
-  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router';
+  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router' | 'namespace';
   pathLabel: string;
   message: string;
   blocking: boolean;
@@ -75,6 +76,7 @@ export interface LuaManagementReport {
   sourceCount: number;
   visibleCount: number;
   controlReferenceCount: number;
+  regexCount: number;
   pendingCount: number;
   approvedCount: number;
   blockerCount: number;
@@ -86,8 +88,10 @@ export interface LuaManagementReport {
   portraitFeatureDetected: boolean;
   portraitFeatureSignals: string[];
   routerRepair: PortraitRouterRepairReport;
+  namespaceHandling: 'unconfirmed' | 'preserved' | 'review' | 'translated';
   segments: LuaManagementSegment[];
-  controlReferences: Array<{ literal: string; kind: 'regex' | 'lua'; pathLabel: string; pattern: string; fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean }>;
+  controlReferences: Array<{ literal: string; kind: 'regex' | 'lua'; pathLabel: string; pattern: string; out?: string; fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean; runtimePostprocess?: boolean }>;
+  regexRules: Array<{ literal: string; kind: 'regex'; pathLabel: string; pattern: string; out?: string; fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean; runtimePostprocess?: boolean }>;
   issues: LuaManagementIssue[];
   steps: LuaManagementStep[];
 }
@@ -171,14 +175,52 @@ function originalLuaSourceLine(
   }
 }
 
+function namespaceTarget(segment: StoredSegment | undefined): string {
+  return (segment?.finalText || segment?.translatedText || '').trim();
+}
+
 export function buildLuaManagementReport(input: ReportInput): LuaManagementReport {
   const module = input.originalModule ?? {};
   const draftModule = input.draftModule ?? null;
+  const sourceNamespace = typeof module.namespace === 'string' ? module.namespace.trim() : '';
   const storedSegments = input.storedSegments ?? [];
   const portraitFeature = input.originalModule ? detectRisuPortraitRouting(module) : { detected: false, signals: [], codePaths: [] };
-  const routerRepair = input.originalModule ? inspectPortraitRouterRepairs(module) : { detected: false, canApply: false, findings: [] };
+  // Router repair is a draft-only edit. Report the effective current module so
+  // a repair is not shown as pending again after the page is refreshed.
+  const routerRepair = input.originalModule
+    ? inspectPortraitRouterRepairs(draftModule ?? module)
+    : { detected: false, canApply: false, findings: [] };
   const scanned = input.originalModule ? scanRisuModule(module, 'lua-only') : [];
   const luaSegments = storedSegments.filter((segment) => segment.kind.startsWith('lua-') || segment.kind === 'runtime-message');
+  const storedNamespaceSegment = storedSegments.find((segment) => (
+    (segment.pathJson === JSON.stringify(['$module', 'namespace']) || segment.pathJson === JSON.stringify(['namespace']))
+    && segment.sourceText === module.namespace
+  ));
+  const namespaceTargetText = namespaceTarget(storedNamespaceSegment);
+  const namespaceHandling = !sourceNamespace
+    ? 'unconfirmed' as const
+    : storedNamespaceSegment?.reviewStatus === 'approved' && namespaceTargetText === sourceNamespace
+      ? 'preserved' as const
+      : storedNamespaceSegment?.reviewStatus === 'approved' && namespaceTargetText
+        ? 'translated' as const
+        : storedNamespaceSegment?.reviewStatus === 'pending'
+          ? 'review' as const
+          : 'unconfirmed' as const;
+  const namespaceSegment = input.originalModule && typeof module.namespace === 'string'
+    ? {
+      id: storedNamespaceSegment?.id ?? 'module-namespace',
+      pathJson: JSON.stringify(['namespace']),
+      pathLabel: '$module.namespace',
+      kind: 'field',
+      sourceText: module.namespace,
+      reviewStatus: storedNamespaceSegment?.reviewStatus ?? 'untranslated',
+      finalText: storedNamespaceSegment?.finalText ?? null,
+      translatedText: storedNamespaceSegment?.translatedText ?? null,
+      start: null,
+      end: null,
+      risk: 'high' as const,
+    }
+    : null;
   const sourceSegments: Array<LuaManagementSegment & { pathJson: string }> = (luaSegments.length
     ? luaSegments.map((segment) => ({ ...segment, risk: 'medium' as const }))
     : scanned.map((segment, index) => ({
@@ -207,20 +249,32 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       finalText: segment.finalText,
       translatedText: segment.translatedText,
     }));
+  if (namespaceSegment) sourceSegments.unshift(namespaceSegment);
   // Do not surface a translated text slice as though it were Lua source. Only
   // ranges that map exactly to one original-code line are eligible for this page.
   const segments: LuaManagementSegment[] = sourceSegments.flatMap(({ pathJson, ...segment }) => {
+    if (pathJson === JSON.stringify(['namespace'])) return [segment];
     const sourceLocation = originalLuaSourceLine(module, pathJson, segment.start, segment.end);
     return sourceLocation
       ? [{ ...segment, sourceCodeLine: sourceLocation.code, sourceCodeLineNumber: sourceLocation.line }]
       : [];
   });
 
-  const draftReferences = draftModule ? [...risuControlReferences(draftModule), ...risuRegexControlReferences(draftModule)] : [];
-  const originalReferences = input.originalModule ? [...risuControlReferences(module), ...risuRegexControlReferences(module)] : [];
+  const uniqueReferences = <T extends { kind: string; pathLabel: string; pattern: string }>(references: T[]): T[] => (
+    [...new Map(references.map((reference) => [`${reference.kind}:${reference.pathLabel}:${reference.pattern}`, reference])).values()]
+  );
+  const draftReferences = draftModule
+    ? uniqueReferences([...risuControlReferences(draftModule), ...risuRegexControlReferences(draftModule)])
+    : [];
+  const originalReferences = input.originalModule
+    ? uniqueReferences([...risuControlReferences(module), ...risuRegexControlReferences(module)])
+    : [];
   const activeCard = input.draftCard ?? input.originalCard;
+  // Keep every original rule visible, including a rule that was accidentally
+  // deleted from an older draft; when a path exists in both modules, show the
+  // current draft value so the editor can repair it in place.
   const displayedReferences = input.originalModule
-    ? (draftReferences.length ? draftReferences : risuControlReferences(module))
+    ? [...new Map([...originalReferences, ...draftReferences].map((reference) => [reference.pathLabel, reference])).values()]
     : [];
   const controlReferences = displayedReferences.map((reference) => {
     const originalPattern = originalReferences.find((item) => item.pathLabel === reference.pathLabel)?.pattern || reference.pattern;
@@ -232,6 +286,7 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       pathLabel: reference.pathLabel,
       pattern: preview(reference.pattern),
       fullPattern: reference.pattern,
+      out: reference.kind === 'regex' ? reference.out : undefined,
       originalPattern,
       addedAlternatives: reference.kind === 'regex'
         ? extractRegexAlternatives(reference.pattern).filter((item) => !extractRegexAlternatives(originalPattern).includes(item))
@@ -241,10 +296,12 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       originalSamples: reference.kind === 'regex' ? regexMatchSnippetsInStrings(input.originalCard, originalPattern) : [],
       draftSamples: reference.kind === 'regex' ? regexMatchSnippetsInStrings(activeCard, reference.pattern) : [],
       dynamicDisplay: reference.kind === 'regex' && reference.dynamicDisplay === true,
+      runtimePostprocess: reference.kind === 'regex' && reference.runtimePostprocess === true,
       forcePassed: reference.kind === 'regex'
         && isRegexValidationOverrideActive(input.regexValidationOverrides, reference.pathLabel, reference.pattern, originalMatches, draftMatches),
     };
   });
+  const regexRules = controlReferences.filter((reference): reference is typeof reference & { kind: 'regex' } => reference.kind === 'regex');
   const runtimeCandidates = portraitFeature.detected && input.targetLanguage
     ? collectRuntimeAliasCandidates(module, input.targetLanguage, input.draftCard ?? undefined)
     : [];
@@ -339,6 +396,49 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
     }
     return candidates.map((segment) => segment.id);
   };
+  if (namespaceSegment) {
+    const target = namespaceTargetText;
+    if (namespaceSegment.reviewStatus !== 'approved' || !target) {
+      issues.push({
+        kind: 'namespace',
+        pathLabel: namespaceSegment.pathLabel,
+        message: namespaceHandling === 'review'
+          ? '该名称处于旧的待审核状态。请在本页人工核对并确认最终名称；确认后会同步已识别的模块内部引用。'
+          : '请在本页人工核对命名空间。保留原文或手动填写最终名称后再确认，系统不会推断用途。',
+        blocking: true,
+        segmentIds: [namespaceSegment.id],
+      });
+    } else if (!draftModule) {
+      issues.push({
+        kind: 'namespace',
+        pathLabel: namespaceSegment.pathLabel,
+        message: target === sourceNamespace
+          ? '已人工确认保留原文；生成 Lua 草稿后会再次检查该内部标识符。'
+          : `已确认目标名称「${target}」，但尚未生成 Lua 草稿，无法验证替换和内部引用同步。`,
+        blocking: false,
+        segmentIds: [namespaceSegment.id],
+      });
+    } else if (typeof draftModule.namespace !== 'string' || draftModule.namespace.trim() !== target) {
+      issues.push({
+        kind: 'namespace',
+        pathLabel: namespaceSegment.pathLabel,
+        message: `已确认目标名称「${target}」，但当前 Lua 草稿仍为「${typeof draftModule.namespace === 'string' ? draftModule.namespace : '未设置'}」。请重新应用审核结果。`,
+        blocking: true,
+        segmentIds: [namespaceSegment.id],
+      });
+    } else if (target !== sourceNamespace) {
+      const stalePaths = staleRisuModuleNamespaceProtocolPaths(draftModule, sourceNamespace);
+      if (stalePaths.length) {
+        issues.push({
+          kind: 'namespace',
+          pathLabel: namespaceSegment.pathLabel,
+          message: `发现 ${stalePaths.length} 处模块内部协议仍引用旧名称：${stalePaths.slice(0, 2).join('、')}${stalePaths.length > 2 ? ' 等' : ''}。请重新应用审核结果以同步替换。`,
+          blocking: true,
+          segmentIds: [namespaceSegment.id],
+        });
+      }
+    }
+  }
   if (draftModule) {
     // A parser position addresses the raw Lua code block, not a translated text
     // segment near the same line. Linking it to a nearby segment misdirects the
@@ -384,7 +484,7 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       id: 'scan',
       title: '扫描脚本',
       status: hasModule ? 'complete' : 'not-applicable',
-      message: hasModule ? `已发现 ${sourceCount} 个 Lua 代码块。` : '当前卡片没有 Risu 模块，跳过 Lua 扫描。',
+      message: hasModule ? `已发现 ${sourceCount} 个 Lua 代码块、${regexRules.length} 条正则规则；均已提取到本页管理。` : '当前卡片没有 Risu 模块，跳过 Lua 扫描。',
     },
     {
       id: 'classify',
@@ -434,6 +534,7 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
     sourceCount,
     visibleCount,
     controlReferenceCount: controlReferences.length,
+    regexCount: regexRules.length,
     pendingCount,
     approvedCount,
     blockerCount,
@@ -445,8 +546,10 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
     portraitFeatureDetected: portraitFeature.detected,
     portraitFeatureSignals: portraitFeature.signals,
     routerRepair,
+    namespaceHandling,
     segments,
     controlReferences,
+    regexRules,
     issues,
     steps,
   };

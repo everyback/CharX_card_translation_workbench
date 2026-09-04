@@ -13,6 +13,7 @@ import {
   countRegexMatchesInStrings,
   regexMatchSnippetsInStrings,
   isRisuDisplayFormattingRegexRule,
+  isRisuOutputPostprocessRegexRule,
   isSafeRisuDisplayFormattingRegexChange,
   isRegexValidationOverrideActive,
   isZeroWidthCardinalityTrigger,
@@ -59,7 +60,7 @@ import {
   updateProtocolAnalysis,
   updateProtocolSchema,
 } from './protocol-service.js';
-import { abortJob, analyzeProtocolSemantics, analyzeRisuRegexLanguageCoverage, buildRegexWhitespaceProbe, collectRegexCoveragePairs, collectRegexCoveragePairsWithPatterns, privateImageSettings, publicSettings, regexLanguagePayloadSummary, scheduleJob, segmentRuntimeNames, splitRegexLanguageEntries, translateRuntimeAliases, type RisuRegexLanguageEntry } from './scheduler.js';
+import { abortJob, analyzeProtocolSemantics, analyzeRisuRegexLanguageCoverage, buildRegexWhitespaceProbe, collectRegexCoveragePairs, collectRegexCoveragePairsWithPatterns, privateImageSettings, publicSettings, recoverInterruptedJobs, regexLanguagePayloadSummary, scheduleJob, segmentRuntimeNames, splitRegexLanguageEntries, translateRuntimeAliases, type RisuRegexLanguageEntry } from './scheduler.js';
 import { languageBehaviorDirectiveIssue } from './domain/language-directives.js';
 import { workbenchConfig } from './config.js';
 import { PROJECT_TITLE_COLUMNS } from './repositories/project-queries.js';
@@ -67,6 +68,7 @@ import { createScanService } from './application/scan-service.js';
 import { createProjectService } from './application/project-service.js';
 import { createTranslationJobService } from './application/translation-job-service.js';
 import { createExportService, ProjectWorkflowError } from './application/export-service.js';
+import { createNamespaceReviewService } from './application/namespace-review-service.js';
 import {
   createReviewService,
   describeMissingProtectedFragments,
@@ -109,6 +111,7 @@ const projectService = createProjectService({
   clock: now,
   languageRoute: publicSettings,
 });
+const namespaceReviewService = createNamespaceReviewService({ database: db, createId: id, clock: now });
 const { createProject } = projectService;
 const reviewService = createReviewService({
   database: db,
@@ -669,7 +672,12 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
       SELECT id, path_json AS pathJson, path_label AS pathLabel, kind, source_text AS sourceText,
         start_pos AS start, end_pos AS end, review_status AS reviewStatus, final_text AS finalText, translated_text AS translatedText
       FROM segments
-      WHERE project_id = ? AND (kind LIKE 'lua-%' OR kind = 'runtime-message')
+      WHERE project_id = ? AND (
+        kind LIKE 'lua-%'
+        OR kind = 'runtime-message'
+        OR path_json = '[\"$module\",\"namespace\"]'
+        OR path_json = '[\"namespace\"]'
+      )
       ORDER BY sort_order, path_label
     `).all(request.params.projectId) as Array<{
       id: string;
@@ -703,6 +711,19 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
     });
   } catch (error) {
     return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/namespace-decision', async (request, reply) => {
+  const body = asRecord(request.body);
+  const targetNamespace = text(body.targetNamespace).trim();
+  if (!targetNamespace) {
+    return reply.code(400).send({ error: '请填写确认后的模块命名空间。' });
+  }
+  try {
+    return await namespaceReviewService.confirm(request.params.projectId, targetNamespace);
+  } catch (error) {
+    return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -814,9 +835,11 @@ async function loadRegexCoverageContext(projectId: string, includePathLabel?: st
     const originalMatches = countRegexMatchesInStrings(originalCard, rule.in);
     const draftMatches = countRegexMatchesInStrings(activeCard, currentPattern);
     const dynamicDisplay = isRisuDisplayFormattingRegexRule(rule);
+    const runtimePostprocess = isRisuOutputPostprocessRegexRule(rule);
+    const runtimeRule = dynamicDisplay || runtimePostprocess;
     const pathLabel = `模块.regex.${index}.in`;
-    if (!dynamicDisplay && (!originalMatches || (originalMatches === draftMatches && pathLabel !== includePathLabel))) continue;
-    const pairs = dynamicDisplay ? [] : collectRegexCoveragePairsWithPatterns(originalCard, activeCard, rule.in, currentPattern);
+    if (!runtimeRule && (!originalMatches || (originalMatches === draftMatches && pathLabel !== includePathLabel))) continue;
+    const pairs = runtimeRule ? [] : collectRegexCoveragePairsWithPatterns(originalCard, activeCard, rule.in, currentPattern);
     const sourceMatchCount = originalMatches;
     const draftMatchCount = draftMatches;
     entries.push({
@@ -826,13 +849,14 @@ async function loadRegexCoverageContext(projectId: string, includePathLabel?: st
       type: typeof rule.type === 'string' ? rule.type : '',
       out: typeof rule.out === 'string' ? rule.out : '',
       dynamicDisplay,
+      runtimePostprocess,
       sourceSamples: pairs.slice(0, 8).map((pair) => pair.sourceText),
       draftSamples: pairs.slice(0, 8).map((pair) => pair.draftText),
       sourceMatches: pairs.flatMap((pair) => pair.sourceMatches).slice(0, 2_000),
       draftMatches: pairs.flatMap((pair) => pair.draftMatches).slice(0, 2_000),
       coveragePaths: pairs.map((pair) => pair.pathLabel),
       coverageRecords: pairs,
-      formatProbe: dynamicDisplay ? undefined : buildRegexWhitespaceProbe(originalCard, activeCard, rule.in, currentPattern),
+      formatProbe: runtimeRule ? undefined : buildRegexWhitespaceProbe(originalCard, activeCard, rule.in, currentPattern),
       sourceMatchCount,
       draftMatchCount,
     });
@@ -898,7 +922,7 @@ function regexCoverageValidation(
   activeCard: Record<string, unknown>,
   activeModule: Record<string, unknown>,
   originalModule: Record<string, unknown>,
-): { passed: boolean; sourceMatchCount: number; draftMatchCount: number; dynamicDisplay: boolean; syntaxIssues: string[]; message?: string } {
+): { passed: boolean; sourceMatchCount: number; draftMatchCount: number; dynamicDisplay: boolean; runtimePostprocess: boolean; syntaxIssues: string[]; message?: string } {
   const match = entry.pathLabel.match(/^模块\.regex\.(\d+)\.in$/u);
   const index = match ? Number(match[1]) : -1;
   const candidateRule = Array.isArray(candidateModule.regex) && index >= 0
@@ -909,7 +933,7 @@ function regexCoverageValidation(
     : undefined;
   const syntaxIssues = validateRisuLuaChanges(originalModule, candidateModule).map((issue) => issue.message);
   if (typeof candidatePattern !== 'string' || !candidatePattern) {
-    return { passed: false, sourceMatchCount: entry.sourceMatchCount, draftMatchCount: 0, dynamicDisplay: false, syntaxIssues, message: '候选结果没有保留有效的正则规则。' };
+    return { passed: false, sourceMatchCount: entry.sourceMatchCount, draftMatchCount: 0, dynamicDisplay: false, runtimePostprocess: false, syntaxIssues, message: '候选结果没有保留有效的正则规则。' };
   }
   let compiled = true;
   try { new RegExp(candidatePattern); } catch { compiled = false; }
@@ -919,22 +943,34 @@ function regexCoverageValidation(
   const draftMatchCount = countRegexMatchesInStrings(activeCard, candidatePattern);
   const originalRule = regexRuleAt(originalModule, index);
   const dynamicDisplay = isRisuDisplayFormattingRegexRule(originalRule);
+  const runtimePostprocess = isRisuOutputPostprocessRegexRule(originalRule);
   const candidateIsDynamicDisplay = isRisuDisplayFormattingRegexRule(candidateRule as Record<string, unknown> | null);
   const dynamicDisplaySafe = dynamicDisplay && candidateIsDynamicDisplay && isSafeRisuDisplayFormattingRegexChange(
     originalRule,
     candidateRule as Record<string, unknown> | null,
   );
-  const passed = compiled && !syntaxIssues.length && (dynamicDisplay ? dynamicDisplaySafe : draftMatchCount === entry.sourceMatchCount);
+  const candidateIsRuntimePostprocess = isRisuOutputPostprocessRegexRule(candidateRule as Record<string, unknown> | null);
+  const candidateOutput = candidateRule && typeof candidateRule === 'object' && !Array.isArray(candidateRule)
+    ? (candidateRule as Record<string, unknown>).out
+    : undefined;
+  const runtimePostprocessSafe = runtimePostprocess && candidateIsRuntimePostprocess
+    && candidateRule && typeof candidateRule === 'object' && typeof (candidateRule as Record<string, unknown>).type === 'string'
+    && typeof candidateOutput === 'string'
+    && (candidateRule as Record<string, unknown>).type === originalRule?.type
+    && candidateOutput.length <= 16_000;
+  const passed = compiled && !syntaxIssues.length && (dynamicDisplay ? dynamicDisplaySafe : runtimePostprocess ? runtimePostprocessSafe : draftMatchCount === entry.sourceMatchCount);
   return {
     passed,
     sourceMatchCount: entry.sourceMatchCount,
     draftMatchCount,
     dynamicDisplay,
+    runtimePostprocess,
     syntaxIssues,
     message: passed
-      ? (dynamicDisplay ? '动态展示规则已通过编译与结构校验；静态卡片命中仅作样本参考。' : undefined)
+      ? (dynamicDisplay ? '动态展示规则已通过编译与结构校验；静态卡片命中仅作样本参考。' : runtimePostprocess ? '聊天后处理规则已通过编译与 editoutput 结构校验；静态卡片命中仅作样本参考。' : undefined)
       : dynamicDisplay && !dynamicDisplaySafe
         ? '动态展示规则必须保留 editdisplay 类型、捕获组和仅由捕获组/换行组成的替换模板。'
+      : runtimePostprocess && !runtimePostprocessSafe ? '聊天后处理规则必须保留 editoutput 类型和有效替换输出。'
       : compiled ? `候选命中 ${draftMatchCount}，与原文 ${entry.sourceMatchCount} 不一致。` : '候选正则无法编译。',
   };
 }
@@ -1060,7 +1096,8 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
     if (!baseEntry) return reply.code(404).send({ error: '该规则已不再需要全量修复，预览可能已经过期。' });
     const entry = requestedPattern && requestedPattern !== baseEntry.pattern
       ? (() => {
-          const pairs = collectRegexCoveragePairsWithPatterns(
+          const runtimeRule = baseEntry.dynamicDisplay || baseEntry.runtimePostprocess;
+          const pairs = runtimeRule ? [] : collectRegexCoveragePairsWithPatterns(
             context.originalCard,
             context.activeCard,
             baseEntry.originalPattern,
@@ -1074,7 +1111,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
             draftMatches: pairs.flatMap((pair) => pair.draftMatches).slice(0, 2_000),
             coveragePaths: pairs.map((pair) => pair.pathLabel),
             coverageRecords: pairs,
-            formatProbe: buildRegexWhitespaceProbe(context.originalCard, context.activeCard, baseEntry.originalPattern, requestedPattern),
+            formatProbe: runtimeRule ? undefined : buildRegexWhitespaceProbe(context.originalCard, context.activeCard, baseEntry.originalPattern, requestedPattern),
           };
         })()
       : baseEntry;
@@ -1152,6 +1189,8 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
       formatProbe?: ReturnType<typeof buildRegexWhitespaceProbe>;
       sourceMatchCount: number;
       draftMatchCount: number;
+      dynamicDisplay?: boolean;
+      runtimePostprocess?: boolean;
     }>;
     for (const [index, rawRule] of originalRules.entries()) {
       if (!rawRule || typeof rawRule !== 'object' || Array.isArray(rawRule)) continue;
@@ -1164,8 +1203,11 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
       const currentPattern = typeof draftRule?.in === 'string' && draftRule.in ? draftRule.in : rule.in;
       const originalMatches = countRegexMatchesInStrings(originalCard, rule.in);
       const draftMatches = countRegexMatchesInStrings(activeCard, currentPattern);
-      if (!originalMatches || originalMatches === draftMatches) continue;
-      const pairs = collectRegexCoveragePairsWithPatterns(originalCard, activeCard, rule.in, currentPattern);
+      const dynamicDisplay = isRisuDisplayFormattingRegexRule(rule);
+      const runtimePostprocess = isRisuOutputPostprocessRegexRule(rule);
+      const runtimeRule = dynamicDisplay || runtimePostprocess;
+      if (!runtimeRule && (!originalMatches || originalMatches === draftMatches)) continue;
+      const pairs = runtimeRule ? [] : collectRegexCoveragePairsWithPatterns(originalCard, activeCard, rule.in, currentPattern);
       const sourceMatchCount = originalMatches;
       const draftMatchCount = draftMatches;
       entries.push({
@@ -1173,13 +1215,15 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
         pattern: currentPattern,
         type: typeof rule.type === 'string' ? rule.type : '',
         out: typeof rule.out === 'string' ? rule.out : '',
+        dynamicDisplay,
+        runtimePostprocess,
         sourceSamples: pairs.slice(0, 8).map((pair) => pair.sourceText),
         draftSamples: pairs.slice(0, 8).map((pair) => pair.draftText),
         sourceMatches: pairs.flatMap((pair) => pair.sourceMatches).slice(0, 2_000),
         draftMatches: pairs.flatMap((pair) => pair.draftMatches).slice(0, 2_000),
         coveragePaths: pairs.map((pair) => pair.pathLabel),
         coverageRecords: pairs,
-        formatProbe: buildRegexWhitespaceProbe(originalCard, activeCard, rule.in, currentPattern),
+        formatProbe: runtimeRule ? undefined : buildRegexWhitespaceProbe(originalCard, activeCard, rule.in, currentPattern),
         sourceMatchCount,
         draftMatchCount,
       });
@@ -1211,7 +1255,9 @@ type RegexRuleCardContext = {
   draftCard: Record<string, unknown>;
   originalPattern: string;
   currentPattern: string;
+  currentOutput: string;
   dynamicDisplay: boolean;
+  runtimePostprocess: boolean;
 };
 
 async function loadRegexRuleCardContext(projectId: string, pathLabel: string): Promise<RegexRuleCardContext | null> {
@@ -1236,8 +1282,18 @@ async function loadRegexRuleCardContext(projectId: string, pathLabel: string): P
   const draftRule = regexRuleAt(draftModule, index);
   const originalPattern = typeof originalRule?.in === 'string' ? originalRule.in : '';
   const currentPattern = typeof draftRule?.in === 'string' && draftRule.in ? draftRule.in : originalPattern;
+  const originalOutput = typeof originalRule?.out === 'string' ? originalRule.out : '';
+  const currentOutput = typeof draftRule?.out === 'string' ? draftRule.out : originalOutput;
   if (!originalPattern || !draftRule) return null;
-  return { originalCard, draftCard, originalPattern, currentPattern, dynamicDisplay: isRisuDisplayFormattingRegexRule(originalRule) && isRisuDisplayFormattingRegexRule(draftRule) };
+  return {
+    originalCard,
+    draftCard,
+    originalPattern,
+    currentPattern,
+    currentOutput,
+    dynamicDisplay: isRisuDisplayFormattingRegexRule(originalRule) && isRisuDisplayFormattingRegexRule(draftRule),
+    runtimePostprocess: isRisuOutputPostprocessRegexRule(originalRule) && isRisuOutputPostprocessRegexRule(draftRule),
+  };
 }
 
 function testRegexRuleOnCards(pathLabel: string, pattern: string, context: RegexRuleCardContext) {
@@ -1257,11 +1313,14 @@ function testRegexRuleOnCards(pathLabel: string, pattern: string, context: Regex
     sourceMatchCount,
     draftMatchCount,
     dynamicDisplay: context.dynamicDisplay,
+    runtimePostprocess: context.runtimePostprocess,
     sourceSamples: compiled ? regexMatchSnippetsInStrings(context.originalCard, pattern, 12) : [],
     draftSamples: compiled ? regexMatchSnippetsInStrings(context.draftCard, pattern, 12) : [],
     ...(compileMessage ? { message: `正则无法编译：${compileMessage}` } : {
       message: context.dynamicDisplay
         ? '动态展示规则已通过编译；静态卡片命中仅作样本参考。'
+        : context.runtimePostprocess
+        ? '聊天后处理规则已通过编译；静态卡片命中仅作样本参考。'
         : sourceMatchCount === draftMatchCount
         ? '原文与当前稿命中数一致。'
         : `原文与当前稿命中数不同：${sourceMatchCount} → ${draftMatchCount}。`,
@@ -1295,15 +1354,24 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex
   const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
   const pattern = typeof body.pattern === 'string' ? body.pattern : '';
   const expectedPattern = typeof body.expectedPattern === 'string' ? body.expectedPattern : undefined;
+  const hasOutput = Object.prototype.hasOwnProperty.call(body, 'out');
+  const output = typeof body.out === 'string' ? body.out : undefined;
+  const expectedOutput = typeof body.expectedOut === 'string' ? body.expectedOut : undefined;
   const forcePass = body.forcePass === true;
   if (!pathLabel || !pattern || pattern.length > 4_000 || /[\r\n]/u.test(pattern)) {
     return reply.code(400).send({ error: '请提供有效的正则路径和不含换行的规则，长度不能超过 4000。' });
+  }
+  if ((hasOutput && output === undefined) || (output !== undefined && output.length > 16_000)) {
+    return reply.code(400).send({ error: '聊天后处理替换输出必须是长度不超过 16000 的文本。' });
   }
   try {
     const context = await loadRegexRuleCardContext(request.params.projectId, pathLabel);
     if (!context) return reply.code(404).send({ error: '找不到该正则规则或当前卡片没有 Lua 模块。' });
     if (expectedPattern !== undefined && expectedPattern !== context.currentPattern) {
       return reply.code(409).send({ error: '当前正则已被其他操作更新，请刷新诊断后再保存。', currentPattern: context.currentPattern });
+    }
+    if (expectedOutput !== undefined && expectedOutput !== context.currentOutput) {
+      return reply.code(409).send({ error: '当前聊天后处理输出已被其他操作更新，请刷新诊断后再保存。', currentOutput: context.currentOutput });
     }
     const test = testRegexRuleOnCards(pathLabel, pattern, context);
     if (!test.compiled) return reply.code(400).send({ error: test.message || '正则无法编译。' });
@@ -1317,19 +1385,34 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex
     const originalRule = index == null ? null : regexRuleAt(originalModule, index);
     if (!rule) return reply.code(404).send({ error: '找不到可保存的正则规则。' });
     const dynamicDisplay = isRisuDisplayFormattingRegexRule(originalRule);
-    const candidateRule = { ...rule, in: pattern };
+    const runtimePostprocess = isRisuOutputPostprocessRegexRule(originalRule);
+    if (hasOutput && !runtimePostprocess) {
+      return reply.code(400).send({ error: '只有 editoutput 聊天后处理规则可以修改替换输出。' });
+    }
+    const candidateRule: Record<string, unknown> = { ...rule, in: pattern, ...(output !== undefined ? { out: output } : {}) };
     if (dynamicDisplay && !isSafeRisuDisplayFormattingRegexChange(originalRule, candidateRule)) {
       return reply.code(400).send({ error: '动态展示规则必须保留 editdisplay 类型、捕获组和仅由捕获组/换行组成的替换模板。' });
     }
+    if (runtimePostprocess && (candidateRule.type !== originalRule?.type || !isRisuOutputPostprocessRegexRule(candidateRule))) {
+      return reply.code(400).send({ error: '聊天后处理规则必须保留 editoutput 类型、有效匹配正则和有效替换输出。' });
+    }
+    // Validation compares the original protocol pattern with the saved draft
+    // pattern. A language-adapted candidate can match the original card a
+    // different number of times, so the override must retain the true
+    // original-pattern baseline rather than the candidate test count.
+    const validationSourceMatchCount = countRegexMatchesInStrings(context.originalCard, context.originalPattern);
+    const validationDraftMatchCount = countRegexMatchesInStrings(context.draftCard, pattern);
     const previousPattern = typeof rule.in === 'string' ? rule.in : context.currentPattern;
+    const previousOut = typeof rule.out === 'string' ? rule.out : context.currentOutput;
     rule.in = pattern;
+    if (output !== undefined) rule.out = output;
     const overrides = { ...parseRegexValidationOverrides(row.regexValidationOverrides) } as Record<string, RisuRegexValidationOverride>;
-    const forcePassed = !dynamicDisplay && forcePass && test.sourceMatchCount !== test.draftMatchCount;
+    const forcePassed = !dynamicDisplay && !runtimePostprocess && forcePass && validationSourceMatchCount !== validationDraftMatchCount;
     if (forcePassed) {
       overrides[pathLabel] = {
         pattern,
-        originalMatchCount: test.sourceMatchCount,
-        draftMatchCount: test.draftMatchCount,
+        originalMatchCount: validationSourceMatchCount,
+        draftMatchCount: validationDraftMatchCount,
         confirmedAt: now(),
       };
     } else {
@@ -1337,7 +1420,16 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex
     }
     await db.prepare('UPDATE projects SET draft_module_json = ?, regex_validation_overrides = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(draftModule), JSON.stringify(overrides), now(), request.params.projectId);
-    return { ...test, saved: true, previousPattern, forcePassed };
+    return {
+      ...test,
+      validationSourceMatchCount,
+      validationDraftMatchCount,
+      saved: true,
+      previousPattern,
+      previousOut,
+      out: typeof rule.out === 'string' ? rule.out : context.currentOutput,
+      forcePassed,
+    };
   } catch (error) {
     return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -1422,7 +1514,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router
     if (!repairedOriginal.applied.length && !repairedDraft.applied.length) {
       return { ok: true, applied: [], report: repairedDraft.report };
     }
-    const finalOriginal = applyPortraitRouterChangeOverrides(originalModule, requestedChanges, repairedOriginal.changes);
     const draftChanges = requestedChanges.flatMap((override) => {
       const sourceChange = repairedOriginal.changes.find((change) => change.id === override.id && change.pathLabel === override.pathLabel);
       const targetChange = repairedDraft.changes.find((change) => change.id === override.id && change.pathLabel === override.pathLabel);
@@ -1434,19 +1525,18 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router
       }];
     });
     const finalDraft = applyPortraitRouterChangeOverrides(draftModule, draftChanges, repairedDraft.changes, { requireBefore: false });
-    const syntaxIssues = validateRisuLuaChanges(finalOriginal, finalDraft);
+    const syntaxIssues = validateRisuLuaChanges(originalModule, finalDraft);
     if (syntaxIssues.length) return reply.code(409).send({ error: `路由修复后的 Lua 语法校验失败：${syntaxIssues[0].pathLabel} ${syntaxIssues[0].message}` });
-    const templateIssues = validateRisuTemplateChanges(finalOriginal, finalDraft);
+    const templateIssues = validateRisuTemplateChanges(originalModule, finalDraft);
     if (templateIssues.length) return reply.code(409).send({ error: `路由修复破坏了模板结构：${templateIssues[0].pathLabel} ${templateIssues[0].message}` });
-    const controlIssues = validateRisuControlReferences(originalCard, draftCard, finalOriginal, finalDraft);
+    const controlIssues = validateRisuControlReferences(originalCard, draftCard, originalModule, finalDraft);
     if (controlIssues.length) return reply.code(409).send({ error: `路由修复破坏了控制引用：${controlIssues[0].pathLabel} ${controlIssues[0].message}` });
 
     await db.prepare(`
       UPDATE projects
-      SET original_module_json = ?, draft_module_json = ?, updated_at = ?
+      SET draft_module_json = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      JSON.stringify(finalOriginal),
       JSON.stringify(finalDraft),
       now(),
       request.params.projectId,
@@ -1460,6 +1550,32 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router
   } catch (error) {
     return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
   }
+});
+
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/reset-draft', async (request, reply) => {
+  const row = await db.prepare(`
+    SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
+      regex_validation_overrides AS regexValidationOverrides
+    FROM projects WHERE id = ?
+  `).get(request.params.projectId) as {
+    originalModuleJson?: string | null;
+    draftModuleJson?: string | null;
+    regexValidationOverrides?: string | null;
+  } | undefined;
+  if (!row) return reply.code(404).send({ error: '项目不存在。' });
+  if (!row.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可恢复的原始 Risu Lua 模块。' });
+  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+    .get(request.params.projectId) as { count: number };
+  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再恢复 Lua 草稿。' });
+
+  const hasDraftChanges = row.draftModuleJson !== row.originalModuleJson || Boolean(row.regexValidationOverrides);
+  if (!hasDraftChanges) return { ok: true, reset: false };
+  await db.prepare(`
+    UPDATE projects
+    SET draft_module_json = original_module_json, regex_validation_overrides = NULL, updated_at = ?
+    WHERE id = ?
+  `).run(now(), request.params.projectId);
+  return { ok: true, reset: true };
 });
 
 app.delete<{ Params: { projectId: string } }>('/api/projects/:projectId', async (request, reply) => {
@@ -1637,7 +1753,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/clear-resu
     await db.prepare(`
       UPDATE projects SET
         draft_json = original_json,
-        draft_module_json = original_module_json,
         draft_source_blob = NULL,
         draft_storage_path = NULL,
         draft_storage_bytes = NULL,
@@ -1964,6 +2079,10 @@ export async function startWorkbenchServer(options: { host?: string; port?: numb
   const host = options.host || workbenchConfig.host;
   const port = options.port || workbenchConfig.port;
   serverAddress = await app.listen({ host, port });
+  // Reattach persisted jobs after the process has restarted. Without this,
+  // queued/running rows remain visible forever even though their items may
+  // already be complete.
+  await recoverInterruptedJobs();
   return { address: serverAddress, host, port };
 }
 

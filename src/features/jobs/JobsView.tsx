@@ -37,8 +37,7 @@ export function JobsView({
     : 0;
   const translationFinished = Boolean(job && (
     translatingItems === 0
-    && (['review', 'review_with_errors', 'failed'].includes(job.status)
-      || (totalWorkItems > 0 && processedWorkItems >= totalWorkItems))
+    && ['review', 'review_with_errors', 'failed'].includes(job.status)
   ));
   const hasFollowUpFailure = postFailedItems > 0;
   const followUpNeedsRetry = hasFollowUpFailure || (postTotalItems > 0 && postProcessedItems < postTotalItems);
@@ -69,6 +68,7 @@ export function JobsView({
           <div className="job-metrics"><span>成功 <b>{job.completedItems}</b></span><span>失败 <b>{job.failedItems}</b></span><span>翻译中 <b>{translatingItems}</b></span><span>总计（含后续） <b>{totalWorkItems}</b></span></div>
           {job.status === 'queued' && <div className="job-live-status" role="status">任务已排队，等待模型请求开始；日志会实时显示阶段和返回结果。</div>}
           {job.status === 'running' && translatingItems > 0 && <div className="job-live-status active" role="status">正在请求模型，收到返回后会自动提交本批结果；请查看下方运行日志。</div>}
+          {job.status === 'running' && translatingItems === 0 && <div className="job-live-status active" role="status">正文段落已处理完成，正在执行阶段 2；阶段 2 完成后会自动进入审核。</div>}
           {postTotalItems > 0 && (
             <div className={`job-follow-up ${followUpPending ? 'pending' : followUpInProgress ? 'active' : hasFollowUpFailure ? 'failed' : 'complete'}`} role="status" aria-live="polite">
               <div className="job-follow-up-heading"><strong>阶段 2：Lua 正则与关键词适配</strong><b>运行时名称 {postProcessedItems}/{postTotalItems}</b></div>

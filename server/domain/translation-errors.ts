@@ -2,6 +2,7 @@ export function shouldSplitTranslationBatch(error: unknown): boolean {
   const message = (error instanceof Error ? `${error.name}: ${error.message}` : String(error)).toLowerCase();
   if (/timeout|timed out|aborted due to timeout/.test(message)) return true;
   if (/模型漏翻|缺少保护占位符|没有返回可读取的文本|世界书中文别名无效|翻译质量不合格/.test(message)) return true;
+  if (/模型接口\s+524(?:\D|$)/.test(message)) return true;
   return /模型接口 (?:400|413|422)/.test(message)
     && /context|token|length|large|size|limit|maximum|too long|请求体|上下文|长度|过大|限制/.test(message);
 }

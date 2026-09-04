@@ -189,6 +189,7 @@ export function applyRisuModuleSegments(
     return false;
   });
   const draft = applySelectedLanguagePromptBridge(applyApprovedSegments(original, safeSegments));
+  synchronizeModuleNamespaceReferences(original, draft);
   const runtimeAliasAdditions = synchronizeTouhouRuntimeAliases(draft, targetLanguage, additionalAliasSource)
     + synchronizeRuntimeAliasMap(draft, runtimeAliases);
   return {
@@ -197,6 +198,75 @@ export function applyRisuModuleSegments(
     runtimeAliasAdditions,
     syntaxIssues: validateRisuLuaChanges(original, draft),
   };
+}
+
+/**
+ * Namespace translations are allowed only through an approved module field.
+ * Keep the module's own runtime protocol calls in sync so a translated key
+ * still resolves its assets and enabled-state checks at chat time.
+ */
+export function staleRisuModuleNamespaceProtocolPaths(
+  module: Record<string, unknown>,
+  sourceNamespace: string,
+): string[] {
+  const source = sourceNamespace.trim();
+  if (!source) return [];
+  const escaped = source.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const protocol = new RegExp(`module_?(?:assetlist|enabled)::${escaped}(?=[:}])`, 'u');
+  const paths: string[] = [];
+  const visit = (value: unknown, path: Array<string | number>): void => {
+    if (typeof value === 'string') {
+      if (protocol.test(value)) paths.push(`模块.${path.join('.')}`);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => visit(item, [...path, index]));
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    Object.entries(value).forEach(([key, item]) => visit(item, [...path, key]));
+  };
+  visit(module, []);
+  return paths;
+}
+
+function synchronizeModuleNamespaceReferences(
+  original: Record<string, unknown>,
+  draft: Record<string, unknown>,
+): void {
+  const source = typeof original.namespace === 'string' ? original.namespace.trim() : '';
+  const target = typeof draft.namespace === 'string' ? draft.namespace.trim() : '';
+  replaceRisuModuleNamespaceReferences(draft, source, target);
+}
+
+/** Replace only recognized internal resource references for an explicit namespace decision. */
+export function replaceRisuModuleNamespaceReferences(
+  module: Record<string, unknown>,
+  sourceNamespace: string,
+  targetNamespace: string,
+): void {
+  const source = sourceNamespace.trim();
+  const target = targetNamespace.trim();
+  if (!source || !target || source === target) return;
+  const escaped = source.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const protocol = new RegExp(`(module_?(?:assetlist|enabled)::)${escaped}(?=[:}])`, 'gu');
+  const visit = (value: unknown): void => {
+    if (typeof value === 'string') return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const record = value as Record<string, unknown>;
+    for (const [key, child] of Object.entries(record)) {
+      if (typeof child === 'string') {
+        record[key] = child.replace(protocol, `$1${target}`);
+      } else {
+        visit(child);
+      }
+    }
+  };
+  visit(module);
 }
 
 export function synchronizeRuntimeAliasMap(module: Record<string, unknown>, aliases?: RuntimeAliasMap): number {

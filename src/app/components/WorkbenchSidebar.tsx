@@ -7,9 +7,10 @@ import {
   Info,
   Languages,
   LoaderCircle,
+  Search,
   Settings as SettingsIcon,
 } from 'lucide-react';
-import type { RefObject } from 'react';
+import { useMemo, useState, type RefObject } from 'react';
 import { STATUS_LABELS } from '../../constants';
 import type { ProjectSummary, Settings } from '../../types';
 
@@ -38,6 +39,15 @@ export function WorkbenchSidebar({
   onOpenAbout,
   aboutActive,
 }: WorkbenchSidebarProps) {
+  const [query, setQuery] = useState('');
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredProjects = useMemo(() => projects.filter((item) => {
+    if (!normalizedQuery) return true;
+    return [item.name, item.originalName, item.translatedName]
+      .filter((value): value is string => Boolean(value))
+      .some((value) => value.toLowerCase().includes(normalizedQuery));
+  }), [normalizedQuery, projects]);
+
   return (
     <aside className="sidebar">
       <div className="brand-row">
@@ -52,6 +62,16 @@ export function WorkbenchSidebar({
         {busy === 'import' ? <LoaderCircle className="spin" size={17} /> : <FileUp size={17} />}
         导入卡片 / 模块
       </button>
+      <div className="project-search">
+        <Search size={15} aria-hidden="true" />
+        <input
+          type="search"
+          aria-label="搜索卡片名称"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="搜索卡片名称"
+        />
+      </div>
       <input
         ref={fileInputRef}
         className="hidden-input"
@@ -66,10 +86,10 @@ export function WorkbenchSidebar({
       />
       <div className="sidebar-heading">
         <span>项目</span>
-        <span>{projects.length}</span>
+        <span>{normalizedQuery ? `${filteredProjects.length} / ${projects.length}` : projects.length}</span>
       </div>
       <nav className="project-list">
-        {projects.map((item) => (
+        {filteredProjects.map((item) => (
           <button
             key={item.id}
             className={`project-item ${item.id === selectedProjectId ? 'active' : ''}`}
@@ -92,7 +112,12 @@ export function WorkbenchSidebar({
             {item.pendingReviewCount > 0 && <span className="count-pill">{item.pendingReviewCount}</span>}
           </button>
         ))}
-        {!projects.length && <div className="empty-sidebar"><FolderOpen size={20} />尚无项目</div>}
+        {!filteredProjects.length && (
+          <div className="empty-sidebar">
+            <FolderOpen size={20} />
+            {projects.length ? '没有匹配的卡片' : '尚无项目'}
+          </div>
+        )}
       </nav>
 
       <div className="sidebar-footer">

@@ -266,7 +266,7 @@ You can start with the following page values and adjust them for the card size a
 | `WORKBENCH_UPLOAD_LIMIT_MB` | Per-file upload limit; `0` means no extra limit | `0` |
 | `WORKBENCH_DB_WORKERS` | SQLite worker count | `3` |
 
-Higher concurrency and larger batches increase memory use, model cost, and rate-limit risk. Adjust them for the card size and provider limits.
+Text translation and stage 2 share the same model-request channel. Concurrency and batch settings accept any positive integer with no product-specific upper bound; larger values increase memory use, context length, model cost, and rate-limit risk, so tune them to the provider's actual limits.
 
 ## Data and Security
 

@@ -22,6 +22,12 @@ export interface SegmentReconciliationPlan {
   preservedCount: number;
 }
 
+function isNamespaceDecisionSegment(segment: PreviousSegment): boolean {
+  const pathJson = String(segment.path_json);
+  return (pathJson === JSON.stringify(['$module', 'namespace']) || pathJson === JSON.stringify(['namespace']))
+    && String(segment.kind) === 'field';
+}
+
 export function segmentIdentity(
   pathJson: string,
   kind: string,
@@ -87,11 +93,14 @@ export function reconcileScannedSegments(
     return { segment, sortOrder, previousId };
   });
 
-  return {
-    retained,
-    obsoleteIds: previousSegments
-      .map((segment) => String(segment.id))
-      .filter((segmentId) => !retainedIds.has(segmentId)),
+    return {
+      retained,
+      obsoleteIds: previousSegments
+        // Namespace decisions are made in Lua management, not inferred from
+        // a regular scan. Keep the decision row so re-scanning cannot turn a
+        // confirmed internal key back into an invisible pending review item.
+        .filter((segment) => !retainedIds.has(String(segment.id)) && !isNamespaceDecisionSegment(segment))
+        .map((segment) => String(segment.id)),
     preservedCount: retained.filter((item) => item.previousId).length,
   };
 }

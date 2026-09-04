@@ -30,6 +30,10 @@ test('scan reconciliation preserves reviewed segments across source position cha
       id: 'obsolete', path_json: '["data","personality"]', kind: 'field', source_text: '已删除原文', start_pos: null, end_pos: null,
       final_text: '不应保留', review_status: 'approved', included: 1, qa_flags: '[]', translated_text: null,
     },
+    {
+      id: 'namespace-decision', path_json: '["$module","namespace"]', kind: 'field', source_text: 'mahou_shoujo_ni_akogarete', start_pos: null, end_pos: null,
+      final_text: 'mahou_shoujo_ni_akogarete', review_status: 'approved', included: 1, qa_flags: '[]', translated_text: 'mahou_shoujo_ni_akogarete',
+    },
   ];
 
   const plan = reconcileScannedSegments([

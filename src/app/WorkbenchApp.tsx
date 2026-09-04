@@ -259,7 +259,7 @@ export function WorkbenchApp() {
     writeWorkbenchRoute({ tab, projectId: routeProjectId, segmentId: routeSegmentId });
   }, [selectedProjectId, selectedSegmentId, tab]);
 
-  const { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, deleteProject } = useProjectActions({
+  const { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject } = useProjectActions({
     project,
     scope,
     setProject,
@@ -434,7 +434,7 @@ export function WorkbenchApp() {
               <button className={tab === 'glossary' ? 'active' : ''} onClick={() => setTab('glossary')}>术语库</button>
               <button className={tab === 'references' ? 'active' : ''} onClick={() => setTab('references')}>引用</button>
               <button className={tab === 'protocols' ? 'active' : ''} onClick={() => setTab('protocols')}>协议</button>
-              <button className={tab === 'lua' ? 'active' : ''} onClick={() => setTab('lua')}>Lua 管理</button>
+              <button className={tab === 'lua' ? 'active' : ''} onClick={() => setTab('lua')}>脚本管理</button>
               <button className={tab === 'resources' ? 'active' : ''} onClick={() => setTab('resources')}>资源</button>
             </div>
 
@@ -523,6 +523,7 @@ export function WorkbenchApp() {
                 onScan={() => void scan('lua-only')}
                 onPreviewRouterRepair={previewPortraitRouter}
                 onApplyRouterRepair={repairPortraitRouter}
+                onResetLuaDraft={resetLuaDraft}
                 onPreviewError={showError}
                 onSaveLuaSyntaxLine={async (pathJson, line, replacement, expectedLine) => {
                   const result = await api<{ syntaxOk: boolean; remainingSyntaxIssues?: unknown[] }>(`/api/projects/${project.id}/lua/syntax-line`, {
@@ -533,6 +534,15 @@ export function WorkbenchApp() {
                   return result;
                 }}
                 onOpenExport={() => void saveLuaAndExport()}
+                onConfirmNamespace={async (targetNamespace) => {
+                  const result = await api<{ sourceNamespace: string; targetNamespace: string }>(`/api/projects/${project.id}/lua/namespace-decision`, {
+                    method: 'POST', ...jsonBody({ targetNamespace }),
+                  });
+                  setNotice(result.sourceNamespace === result.targetNamespace
+                    ? '已人工确认保留原始 namespace；未跳转审核页，也未改写资源引用。'
+                    : `已人工确认 namespace 为「${result.targetNamespace}」，并同步已识别的模块内部引用。`);
+                  await Promise.all([loadLuaReport(project.id, true), refreshProject(project.id), refreshProjects()]);
+                }}
                 reviewFocus={reviewFocus}
                 onClearReviewFocus={() => setReviewFocus(null)}
                 onSaveAliases={async (ownerId, aliases) => {
@@ -549,9 +559,9 @@ export function WorkbenchApp() {
                 onTestRegexRule={(pathLabel, pattern) => api<RegexRuleTestResult>(`/api/projects/${project.id}/lua/regex-test`, {
                   method: 'POST', ...jsonBody({ pathLabel, pattern }),
                 })}
-                onSaveRegexRule={async (pathLabel, pattern, expectedPattern, forcePass) => {
+                onSaveRegexRule={async (pathLabel, pattern, expectedPattern, forcePass, out, expectedOut) => {
                   const result = await api<RegexRuleSaveResult>(`/api/projects/${project.id}/lua/regex-rule`, {
-                    method: 'PATCH', ...jsonBody({ pathLabel, pattern, expectedPattern, forcePass }),
+                    method: 'PATCH', ...jsonBody({ pathLabel, pattern, expectedPattern, forcePass, ...(out !== undefined ? { out } : {}), ...(expectedOut !== undefined ? { expectedOut } : {}) }),
                   });
                   await loadLuaReport(project.id);
                   return result;

@@ -4,9 +4,7 @@ import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldS
 import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments } from '../server/domain/card.js';
 import {
   chatCompletionsEndpoint,
-  MAX_TRANSLATION_BATCH_CHARS,
-  MAX_TRANSLATION_BATCH_ITEMS,
-  MAX_TRANSLATION_CONCURRENCY,
+  readStreamingMessageContent,
   buildRegexWhitespaceProbe,
   collectRegexSamplePairs,
   collectRegexCoveragePairs,
@@ -41,10 +39,45 @@ test('model request timeout accepts seconds and stays within safe bounds', () =>
   assert.equal(modelRequestTimeoutMilliseconds(45), 45_000);
 });
 
-test('translation throughput limits keep batches small enough for real parallel requests', () => {
-  assert.equal(MAX_TRANSLATION_CONCURRENCY, 8);
-  assert.equal(MAX_TRANSLATION_BATCH_ITEMS, 8);
-  assert.equal(MAX_TRANSLATION_BATCH_CHARS, 40_000);
+test('streaming model responses accumulate SSE deltas across UTF-8 chunks', async () => {
+  const payload = [
+    'data: {"choices":[{"delta":{"content":"<<<ID:1>>>"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"译"}}]}\n\n',
+    'data: {"choices":[{"delta":{"content":"文<<<END>>>"}}]}\n\n',
+    'data: [DONE]\n\n',
+  ].join('');
+  const bytes = new TextEncoder().encode(payload);
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes.slice(0, 19));
+      controller.enqueue(bytes.slice(19, 23));
+      controller.enqueue(bytes.slice(23));
+      controller.close();
+    },
+  });
+  assert.equal(await readStreamingMessageContent(stream), '<<<ID:1>>>译文<<<END>>>');
+});
+
+test('streaming model responses surface provider errors from SSE events', async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"error":{"message":"upstream unavailable"}}\n\n'));
+      controller.close();
+    },
+  });
+  await assert.rejects(readStreamingMessageContent(stream), /模型接口流式错误.*upstream unavailable/u);
+});
+
+test('translation throughput settings have no product-specific upper bound', () => {
+  const entries = Array.from({ length: 32 }, (_, index) => ({
+    pathLabel: `模块.regex.${index}.in`,
+    pattern: 'a',
+    type: 'normal',
+    out: 'b',
+    sourceSamples: [],
+    draftSamples: [],
+  }));
+  assert.equal(splitRegexLanguageEntries(entries, 1_000_000, 1_000_000).length, 1);
 });
 
 test('coverage regex prompt permits language-specific word-boundary syntax adaptation', () => {
@@ -62,7 +95,7 @@ test('coverage regex prompt permits language-specific word-boundary syntax adapt
   assert.doesNotMatch(samplePrompt, /完整候选正则/u);
 });
 
-test('Lua regex adaptation splits large context into provider-sized concurrent batches', () => {
+test('Lua regex adaptation follows the configured batch size', () => {
   const entries = Array.from({ length: 10 }, (_, index) => ({
     pathLabel: `模块.regex.${index}.in`,
     pattern: 'a'.repeat(1_500),
@@ -71,12 +104,12 @@ test('Lua regex adaptation splits large context into provider-sized concurrent b
     sourceSamples: ['s'.repeat(600), 's'.repeat(600), 's'.repeat(600)],
     draftSamples: ['d'.repeat(600), 'd'.repeat(600), 'd'.repeat(600)],
   }));
-  const batches = splitRegexLanguageEntries(entries);
+  const batches = splitRegexLanguageEntries(entries, 8, 40_000);
 
   assert.equal(batches.length, 2);
   assert.equal(batches.flat().length, entries.length);
-  assert.ok(batches.every((batch) => batch.length <= MAX_TRANSLATION_BATCH_ITEMS));
-  assert.ok(batches.every((batch) => batch.reduce((chars, entry) => chars + JSON.stringify(regexLanguagePayloadEntry(entry)).length, 0) <= MAX_TRANSLATION_BATCH_CHARS));
+  assert.ok(batches.every((batch) => batch.length <= 8));
+  assert.ok(batches.every((batch) => batch.reduce((chars, entry) => chars + JSON.stringify(regexLanguagePayloadEntry(entry)).length, 0) <= 40_000));
 });
 
 test('Lua regex adaptation sends only matching, source-draft paired context to the model', () => {
@@ -109,6 +142,26 @@ test('runtime display regex analysis does not send static card materials', () =>
   assert.equal(Object.hasOwn(payload, 'fullCoverage'), false);
   assert.equal(JSON.stringify(payload).includes('卡片原文素材'), false);
   assert.match(String(payload.runtimeRequirement), /中文无空格/);
+});
+
+test('runtime editoutput analysis does not require card matches or expose card samples', () => {
+  const payload = regexLanguagePayloadEntry({
+    pathLabel: '模块.regex.9.in',
+    originalPattern: '<img cmd="([^"]+)">',
+    pattern: '<img(?:\\s+)cmd="([^"]+)">',
+    type: 'editoutput',
+    out: '',
+    runtimePostprocess: true,
+    sourceSamples: ['卡片原文素材'],
+    draftSamples: ['卡片译文素材'],
+    sourceMatchCount: 0,
+    draftMatchCount: 0,
+  });
+  assert.equal(payload.runtimePostprocess, true);
+  assert.equal(Object.hasOwn(payload, 'samples'), false);
+  assert.equal(Object.hasOwn(payload, 'fullCoverage'), false);
+  assert.equal(JSON.stringify(payload).includes('卡片原文素材'), false);
+  assert.match(String(payload.runtimeScope), /后处理/);
 });
 
 test('whitespace probes keep prose spacing evidence ahead of CSS quote noise', () => {
@@ -253,6 +306,18 @@ test('stage 2 regex entries retain the current rule and complete paired hit cove
   assert.deepEqual(entries[0].coverageRecords?.map((record) => record.pathLabel), ['$.first', '$.second']);
 });
 
+test('stage 2 retains every eligible regex rule without a fixed rule-count cap', () => {
+  const rules = Array.from({ length: 81 }, (_, index) => ({ in: `pattern-${index}`, out: '$1' }));
+  const entries = collectRegexLanguageEntries(
+    { regex: rules },
+    { regex: rules },
+    {},
+    {},
+  );
+
+  assert.equal(entries.length, 81);
+});
+
 test('stage 2 uses complete match counts even when its evidence is bounded', () => {
   const text = Array.from({ length: 250 }, () => '" a').join(' ');
   const entries = collectRegexLanguageEntries(
@@ -299,6 +364,7 @@ test('translation batches split on size-sensitive and malformed batch responses'
   assert.equal(shouldSplitTranslationBatch(new Error('S2 世界书中文别名无效：译文仍含韩文')), true);
   assert.equal(shouldSplitTranslationBatch(new Error('S2 翻译质量不合格：可能残留韩文：엄마')), true);
   assert.equal(shouldSplitTranslationBatch(new Error('模型接口 400：maximum context length exceeded')), true);
+  assert.equal(shouldSplitTranslationBatch(new Error('模型接口 524：{"error":{"message":"Upstream model provider is temporarily unavailable.","type":"server_error"}}')), true);
 });
 
 test('translation batches keep ordinary provider failures on the retry path', () => {

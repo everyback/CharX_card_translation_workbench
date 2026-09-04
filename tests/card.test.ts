@@ -7,9 +7,11 @@ import {
   bilingualModuleName,
   cardExportName,
   controlReferencesInText,
+  countRegexMatchesInStrings,
   findRisuRegexAffectedSegmentIds,
   isRegexValidationOverrideActive,
   isRisuDisplayFormattingRegexRule,
+  isRisuOutputPostprocessRegexRule,
   missingProtectionTokens,
   missingProtectedFragments,
   protectText,
@@ -464,6 +466,20 @@ test('Risu HTML injection editdisplay rules are not mistaken for reply formattin
   assert.equal(isRisuDisplayFormattingRegexRule({ type: 'editdisplay', in: '([”"」])', out: '$1\n' }), true);
 });
 
+test('Risu editoutput rules are runtime post-processors even with an empty replacement', () => {
+  const originalCard = { data: { first_mes: '卡片静态文本' } };
+  const draftCard = { data: { first_mes: '已翻译的静态文本' } };
+  const originalModule = { regex: [{ type: 'editoutput', in: '<img cmd="([^"]+)">', out: '' }] };
+  const draftModule = structuredClone(originalModule);
+  draftModule.regex[0].in = '<img(?:\\s+)cmd="([^"]+)">';
+  draftModule.regex[0].out = '<img cmd="$1">';
+
+  assert.equal(isRisuOutputPostprocessRegexRule(originalModule.regex[0]), true);
+  assert.deepEqual(validateRisuControlReferences(
+    originalCard, draftCard, originalModule, draftModule,
+  ), []);
+});
+
 test('Risu regex cardinality can be explicitly force-passed for the exact saved rule', () => {
   const pattern = '([”"」])[ \\t]+(?!(?:하고|하는|라고|라며|라는|이라고|이라는|라니|と|って)(?![가-힣]))';
   const originalCard = { data: { first_mes: '"안녕" 다음 장면' } };
@@ -480,6 +496,34 @@ test('Risu regex cardinality can be explicitly force-passed for the exact saved 
   assert.equal(isRegexValidationOverrideActive(override, '模块.regex.0.in', pattern, 1, 0), true);
   assert.deepEqual(validateRisuControlReferences(originalCard, draftCard, module, structuredClone(module), override), []);
   assert.equal(isRegexValidationOverrideActive(override, '模块.regex.0.in', `${pattern}x`, 1, 0), false);
+});
+
+test('Risu regex force-pass stores the original-pattern baseline for adapted drafts', () => {
+  const originalPattern = '\\|\\s*name:\\s*([^|]+?)\\s*\\|\\s*title:\\s*([^|]+?)\\s*\\|';
+  const draftPattern = '\\|\\s*[^|:]+:\\s*([^|]+?)\\s*\\|\\s*[^|:]+:\\s*([^|]+?)\\s*\\|';
+  const originalCard = { data: { first_mes: '| name: Alice | title: Noble |' } };
+  const draftCard = { data: { first_mes: '| 姓名: Alice | 爵位: Noble |\n| 姓名: Bob | 爵位: Commoner |' } };
+  const originalMatchCount = countRegexMatchesInStrings(originalCard, originalPattern);
+  const draftMatchCount = countRegexMatchesInStrings(draftCard, draftPattern);
+  assert.equal(originalMatchCount, 1);
+  assert.equal(draftMatchCount, 2);
+
+  const override = {
+    '模块.regex.0.in': {
+      pattern: draftPattern,
+      originalMatchCount,
+      draftMatchCount,
+      confirmedAt: '2026-09-03T00:00:00.000Z',
+    },
+  };
+  const originalModule = { regex: [{ in: originalPattern, out: '$1' }] };
+  const draftModule = { regex: [{ in: draftPattern, out: '$1' }] };
+  assert.equal(isRegexValidationOverrideActive(
+    override, '模块.regex.0.in', draftPattern, originalMatchCount, draftMatchCount,
+  ), true);
+  assert.deepEqual(validateRisuControlReferences(
+    originalCard, draftCard, originalModule, draftModule, override,
+  ), []);
 });
 
 test('Risu regex cardinality reports the translated segments needing manual review', () => {
@@ -747,6 +791,17 @@ test('Risu module names are included outside script-only scopes', () => {
   assert.equal(segments[0].sourceText, 'UnderArrest Extra Assets');
 });
 
+test('Risu module namespace stays out of ordinary translation candidates', () => {
+  const segments = scanRisuModule({
+    namespace: 'mahou_shoujo_ni_akogarete',
+    metadata: 'Translatable metadata',
+  }, 'all');
+
+  const namespace = segments.find((segment) => segment.path.at(-1) === 'namespace');
+  assert.equal(namespace, undefined);
+  assert.equal(segments.some((segment) => segment.sourceText === 'Translatable metadata'), true);
+});
+
 test('Risu module runtime prompts are opt-in script segments', () => {
   const module = {
     trigger: [{ effect: [{ code: 'alertError(triggerId, "패널 리롤 대상 없음")' }] }],
@@ -906,6 +961,25 @@ test('Risu module application accepts scanner-owned module paths', () => {
   }]);
 
   assert.equal(result.draft.name, '翻译后的模块名');
+});
+
+test('Risu module application translates namespace and synchronizes internal asset protocols', () => {
+  const module = {
+    namespace: 'mahou_shoujo_ni_akogarete',
+    trigger: [{ effect: [{ code: 'return {{module_assetlist::mahou_shoujo_ni_akogarete}}' }] }],
+  };
+  const result = applyRisuModuleSegments(module, [{
+    pathJson: JSON.stringify(['namespace']),
+    sourceText: module.namespace,
+    start: null,
+    end: null,
+    translatedText: '憧憬魔法少女',
+    finalText: null,
+    reviewStatus: 'approved',
+  }]);
+
+  assert.equal(result.draft.namespace, '憧憬魔法少女');
+  assert.equal((result.draft.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code, 'return {{module_assetlist::憧憬魔法少女}}');
 });
 
 test('Risu module reconstruction starts from the original before replaying stored ranges', () => {

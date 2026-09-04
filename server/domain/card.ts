@@ -37,9 +37,13 @@ export interface ApplicableSegment {
 export interface RisuControlReference {
   literal: string;
   kind: 'regex' | 'lua';
+  /** Replacement template for a Risu regex rule, when the rule has one. */
+  out?: string;
   embedded?: boolean;
   /** Runtime-only display formatting rules cannot be proven from static card text. */
   dynamicDisplay?: boolean;
+  /** Runtime post-processing rules run on generated chat output, not card text. */
+  runtimePostprocess?: boolean;
   path: Array<string | number>;
   pathLabel: string;
   pattern: string;
@@ -109,6 +113,7 @@ interface RisuRegexInput {
   type: string;
   out: string;
   dynamicDisplay: boolean;
+  runtimePostprocess: boolean;
 }
 
 const CORE_KEYS = new Set([
@@ -328,6 +333,9 @@ export function scanRisuModule(module: Record<string, unknown>, scope: ScopePres
   if (scope !== 'lua-only' && typeof module.name === 'string') {
     add(fieldSegment(['$module', 'name'], module.name, 'name', 'low'));
   }
+  // A namespace is an internal runtime key, not ordinary card copy. It is
+  // handled by Lua management: retain it by default, or explicitly create a
+  // review item only when the author confirms it is user-visible.
   if (scope !== 'core' && scope !== 'lua-only' && Array.isArray(module.lorebook)) {
     module.lorebook.forEach((entry, index) => {
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
@@ -373,6 +381,10 @@ export function scanRisuModule(module: Record<string, unknown>, scope: ScopePres
     for (const [key, child] of Object.entries(value)) {
       if (path.length === 1 && path[0] === '$module' && key === 'name') continue;
       if (path.length === 1 && path[0] === '$module' && key === 'lorebook') continue;
+      // Namespace is an internal runtime key. Lua management owns its explicit
+      // preserve-or-review decision, so the generic text scan must not create
+      // a second, opaque translation candidate for it.
+      if (path.length === 1 && path[0] === '$module' && key === 'namespace') continue;
       visit(child, [...path, key]);
     }
   };
@@ -421,7 +433,9 @@ export function risuControlReferences(module: Record<string, unknown>): RisuCont
           path: inputPath,
           pathLabel: pathLabel(['$module', ...inputPath]),
           pattern: entry.in,
+          out: entry.out,
           dynamicDisplay: isRisuDisplayFormattingRegexRule(entry),
+          runtimePostprocess: isRisuOutputPostprocessRegexRule(entry),
         });
       }
     }
@@ -491,7 +505,7 @@ export function validateRisuControlReferences(
   for (const reference of references) {
     const originalValue = String(getAt(originalModule, reference.path) ?? '');
     const draftValue = String(getAt(draftModule, reference.path) ?? '');
-    if (reference.kind === 'regex' && !reference.dynamicDisplay && originalValue !== draftValue
+    if (reference.kind === 'regex' && !reference.dynamicDisplay && !reference.runtimePostprocess && originalValue !== draftValue
       && !isAdditiveRegexExtension(originalValue, draftValue)
       && !isSafeRegexLanguageAdaptation(originalValue, draftValue, originalCard)) {
       report({ pathLabel: reference.pathLabel, message: `正则触发规则已改动：${reference.literal}` });
@@ -516,6 +530,17 @@ export function validateRisuControlReferences(
       // editdisplay runs when Risu renders message text. Static card strings
       // are diagnostic samples only, so Chinese no-space writing must not be
       // blocked by a source/draft cardinality comparison.
+      continue;
+    }
+    if (reference.runtimePostprocess) {
+      if (!draftInput || !isSafeRisuOutputPostprocessInputChange(reference, draftInput)) {
+        report({
+          pathLabel: reference.pathLabel,
+          message: '聊天后处理正则必须保留 editoutput 类型、有效匹配正则和有效替换输出。',
+        });
+      }
+      // editoutput runs against generated chat output. Static card counts are
+      // useful diagnostics only and must not block a valid runtime rule.
       continue;
     }
     const languageAdapted = draftPattern !== reference.pattern
@@ -729,6 +754,14 @@ export function isRisuDisplayFormattingRegexRule(rule: Record<string, unknown> |
     && isDisplayFormattingReplacement(output, countCapturingGroups(pattern));
 }
 
+/** Risu rules that post-process generated chat output after the model reply. */
+export function isRisuOutputPostprocessRegexRule(rule: Record<string, unknown> | null | undefined): boolean {
+  const pattern = typeof rule?.in === 'string' ? rule.in : '';
+  return String(rule?.type ?? '').trim().toLowerCase() === 'editoutput'
+    && Boolean(pattern)
+    && typeof rule?.out === 'string';
+}
+
 function isDisplayFormattingReplacement(output: string, captureCount: number): boolean {
   if (!output || !/^(?:\$\d+|\r?\n)+$/u.test(output)) return false;
   const references = [...output.matchAll(/\$(\d+)/gu)].map((match) => Number(match[1]));
@@ -761,6 +794,20 @@ function isSafeRisuDisplayFormattingInputChange(original: RisuRegexInput, candid
     { type: original.type, in: original.pattern, out: original.out },
     { type: candidate.type, in: candidate.pattern, out: candidate.out },
   );
+}
+
+function isSafeRisuOutputPostprocessInputChange(original: RisuRegexInput, candidate: RisuRegexInput): boolean {
+  const originalRule = { type: original.type, in: original.pattern, out: original.out };
+  const candidateRule = { type: candidate.type, in: candidate.pattern, out: candidate.out };
+  if (!isRisuOutputPostprocessRegexRule(originalRule) || !isRisuOutputPostprocessRegexRule(candidateRule)) return false;
+  if (original.type.trim().toLowerCase() !== candidate.type.trim().toLowerCase()) return false;
+  // An editoutput template is exactly the part a user needs to repair when it
+  // removes a generated image tag. Empty output remains valid: it deliberately
+  // deletes a match in Risu's own rule format.
+  if (candidate.out.length > 16_000) return false;
+  if (candidate.pattern.length > 4_000 || /[\r\n]/u.test(candidate.pattern)) return false;
+  try { new RegExp(candidate.pattern); } catch { return false; }
+  return true;
 }
 
 function countCapturingGroups(pattern: string): number {
@@ -1247,18 +1294,21 @@ function collectRisuRegexInputs(module: Record<string, unknown>): RisuRegexInput
       type: typeof rule.type === 'string' ? rule.type : '',
       out: typeof rule.out === 'string' ? rule.out : '',
       dynamicDisplay: isRisuDisplayFormattingRegexRule(rule),
+      runtimePostprocess: isRisuOutputPostprocessRegexRule(rule),
     });
   });
   return inputs;
 }
 
-export function risuRegexControlReferences(module: Record<string, unknown>): Array<{ literal: string; kind: 'regex'; pathLabel: string; pattern: string; dynamicDisplay: boolean }> {
+export function risuRegexControlReferences(module: Record<string, unknown>): Array<{ literal: string; kind: 'regex'; pathLabel: string; pattern: string; out: string; dynamicDisplay: boolean; runtimePostprocess: boolean }> {
   return collectRisuRegexInputs(module).map((entry) => ({
     literal: entry.pattern,
     kind: 'regex' as const,
     pathLabel: entry.pathLabel,
     pattern: entry.pattern,
+    out: entry.out,
     dynamicDisplay: entry.dynamicDisplay,
+    runtimePostprocess: entry.runtimePostprocess,
   }));
 }
 

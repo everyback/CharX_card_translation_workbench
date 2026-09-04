@@ -6,6 +6,7 @@ export interface ControlReference {
   kind: 'regex' | 'lua';
   pathLabel: string;
   pattern: string;
+  out?: string;
 }
 
 export type ProtocolPolicy = 'translate' | 'protect' | 'manual';
@@ -56,6 +57,7 @@ export interface Settings {
   apiBaseUrl: string;
   apiKeyConfigured: boolean;
   model: string;
+  streamingEnabled: boolean;
   sourceLanguage: string;
   fallbackLanguage: string;
   targetLanguage: string;
@@ -104,7 +106,7 @@ export interface Segment {
   reviewStatus: 'untranslated' | 'pending' | 'approved' | 'rejected';
   included: boolean;
   qaFlags: string[];
-  controlReferences: Array<ControlReference & { fullPattern?: string; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean }>;
+  controlReferences: Array<ControlReference & { fullPattern?: string; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean; runtimePostprocess?: boolean }>;
   translationError: string | null;
   sortOrder: number;
   updatedAt: string;
@@ -196,6 +198,7 @@ export interface RegexCoverageValidation {
   sourceMatchCount: number;
   draftMatchCount: number;
   dynamicDisplay?: boolean;
+  runtimePostprocess?: boolean;
   syntaxIssues?: string[];
   message?: string;
 }
@@ -213,6 +216,7 @@ export interface RegexLanguagePayloadSummary {
   budgetChars: number;
   contextChars: number;
   dynamicDisplay?: boolean;
+  runtimePostprocess?: boolean;
   strata: { coverageDifference: number; textDifference: number; stable: number };
   formatProbe?: {
     kind: string;
@@ -238,6 +242,7 @@ export interface RegexCoverageRule {
   type: string;
   out: string;
   dynamicDisplay?: boolean;
+  runtimePostprocess?: boolean;
   sourceSamples: string[];
   draftSamples: string[];
   sourceMatches?: string[];
@@ -281,14 +286,19 @@ export interface RegexRuleTestResult {
   sourceMatchCount: number;
   draftMatchCount: number;
   dynamicDisplay?: boolean;
+  runtimePostprocess?: boolean;
   sourceSamples: string[];
   draftSamples: string[];
   message?: string;
 }
 
 export interface RegexRuleSaveResult extends RegexRuleTestResult {
+  validationSourceMatchCount?: number;
+  validationDraftMatchCount?: number;
   saved: boolean;
   previousPattern: string;
+  out?: string;
+  previousOut?: string;
   forcePassed: boolean;
 }
 
@@ -308,7 +318,7 @@ export interface LuaManagementSegment {
 }
 
 export interface LuaManagementIssue {
-  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router';
+  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router' | 'namespace';
   pathJson?: string;
   pathLabel: string;
   message: string;
@@ -366,6 +376,7 @@ export interface LuaManagementReport {
   sourceCount: number;
   visibleCount: number;
   controlReferenceCount: number;
+  regexCount: number;
   pendingCount: number;
   approvedCount: number;
   blockerCount: number;
@@ -377,8 +388,10 @@ export interface LuaManagementReport {
   portraitFeatureDetected: boolean;
   portraitFeatureSignals: string[];
   routerRepair: PortraitRouterRepairReport;
+  namespaceHandling: 'unconfirmed' | 'preserved' | 'review' | 'translated';
   segments: LuaManagementSegment[];
-  controlReferences: Array<ControlReference & { fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean }>;
+  controlReferences: Array<ControlReference & { fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean; runtimePostprocess?: boolean }>;
+  regexRules: Array<ControlReference & { kind: 'regex'; fullPattern?: string; originalPattern?: string; addedAlternatives?: string[]; originalMatches?: number; draftMatches?: number; originalSamples?: string[]; draftSamples?: string[]; forcePassed?: boolean; dynamicDisplay?: boolean; runtimePostprocess?: boolean }>;
   issues: LuaManagementIssue[];
   steps: LuaManagementStep[];
 }

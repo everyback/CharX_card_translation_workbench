@@ -68,9 +68,9 @@ export function useReviewActions({
       : '选择“跳过并继续”会跳过本次别名自动处理并继续保存/导出；其他 Lua 语法、模板和脚本完整性检查仍会保留。';
     const skip = await showUiConfirm({
       title: 'Lua 自动处理未完成',
-      message: `${message}\n\n模型已经无法继续处理。${detail}选择“去 Lua 管理检查”可人工检查后再保存。`,
+      message: `${message}\n\n模型已经无法继续处理。${detail}选择“去 脚本管理检查”可人工检查后再保存。`,
       confirmLabel: kind === 'regex' ? '跳过并继续' : '跳过别名并继续',
-      cancelLabel: '去 Lua 管理检查',
+      cancelLabel: '去 脚本管理检查',
       tone: 'warning',
     });
     if (!skip) onOpenLuaManagement();
@@ -319,7 +319,7 @@ export function useReviewActions({
     if (!resultCount) return;
     if (!await showUiConfirm({
       title: '删除全部翻译结果',
-      message: `确认删除当前项目全部 ${resultCount} 条翻译、人工定稿和审核结果？\n已生成的审核稿也会恢复为原始卡内容，此操作不可撤销。`,
+      message: `确认删除当前项目全部 ${resultCount} 条翻译、人工定稿和审核结果？\n卡片正文和资源审核稿会恢复为原始内容，但 Lua 草稿不受影响；此操作不可撤销。`,
       confirmLabel: '全部删除',
       tone: 'danger',
     })) return;
@@ -330,7 +330,7 @@ export function useReviewActions({
         ...jsonBody({}),
       });
       setSelectedSegmentId('');
-      onNotice(`已删除全部 ${result.cleared} 条翻译结果，原始卡内容保持不变。`);
+      onNotice(`已删除全部 ${result.cleared} 条翻译结果；卡片正文和资源草稿已恢复，Lua 草稿保持不变。`);
       await Promise.all([refreshProject(project.id), refreshProjects()]);
     });
   }
@@ -463,7 +463,7 @@ export function useReviewActions({
       if (destination === 'lua') onOpenLuaManagement();
       else onShowReview();
     }
-    const targetPage = destination === 'lua' ? 'Lua 管理页' : '审核页';
+    const targetPage = destination === 'lua' ? '脚本管理页' : '审核页';
     onNotice(destination === 'lua'
       ? `已提取脚本错误位置：${pathLabel}。请在${targetPage}展开对应项后人工修改并重新校验。`
       : Number.isFinite(originalMatches) && Number.isFinite(draftMatches)

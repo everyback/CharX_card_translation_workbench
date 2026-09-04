@@ -16,6 +16,7 @@ import {
   collectRuntimeAliasCandidates,
   collectRuntimeAliasTranslationCandidates,
   detectRisuPortraitRouting,
+  staleRisuModuleNamespaceProtocolPaths,
   validateRisuLuaChanges,
 } from '../domain/risu-lua.js';
 import { validateRisuTemplateChanges } from '../domain/risu-qa.js';
@@ -54,6 +55,81 @@ export interface ExportPayload {
   contentType: string;
   filename: string;
   body: Uint8Array | string;
+}
+
+function isModuleNamespaceSegment(
+  segment: ApplicableSegment,
+  path: Array<string | number>,
+  originalModule: Record<string, unknown> | null,
+): boolean {
+  return path.length === 1
+    && path[0] === 'namespace'
+    && typeof originalModule?.namespace === 'string'
+    && segment.sourceText === originalModule.namespace;
+}
+
+function findModuleNamespaceSegment(
+  segments: readonly ApplicableSegment[],
+  sourceNamespace: string,
+): ApplicableSegment | undefined {
+  return segments.find((segment) => {
+    try {
+      const path = JSON.parse(segment.pathJson) as unknown;
+      return Array.isArray(path)
+        && ((path.length === 2 && path[0] === '$module' && path[1] === 'namespace')
+          || (path.length === 1 && path[0] === 'namespace'))
+        && segment.sourceText === sourceNamespace;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function assertRisuModuleNamespaceIntegrity(
+  originalModule: Record<string, unknown> | null,
+  draftModule: Record<string, unknown> | null,
+  segments: readonly ApplicableSegment[],
+  exporting: boolean,
+): void {
+  const sourceNamespace = typeof originalModule?.namespace === 'string' ? originalModule.namespace.trim() : '';
+  if (!sourceNamespace) return;
+
+  const namespaceSegment = findModuleNamespaceSegment(segments, sourceNamespace);
+  const targetNamespace = (namespaceSegment?.finalText || namespaceSegment?.translatedText || '').trim();
+  const segmentIds = namespaceSegment?.id ? [namespaceSegment.id] : [];
+  const action = exporting ? '导出' : '应用';
+  if (namespaceSegment?.reviewStatus !== 'approved' || !targetNamespace) {
+    throw new ProjectWorkflowError(`模块命名空间「${sourceNamespace}」尚未审核。请先在审核页翻译或人工确认后再${action}。`, 409, {
+      code: 'RISU_NAMESPACE_UNREVIEWED',
+      pathLabel: '$module.namespace',
+      affectedSegmentIds: segmentIds,
+    });
+  }
+
+  const actualNamespace = typeof draftModule?.namespace === 'string' ? draftModule.namespace.trim() : '';
+  if (actualNamespace !== targetNamespace) {
+    throw new ProjectWorkflowError(`已审核的模块命名空间目标为「${targetNamespace}」，但当前 Lua 草稿仍为「${actualNamespace || '未设置'}」。请重新应用审核结果。`, 409, {
+      code: 'RISU_NAMESPACE_NOT_APPLIED',
+      pathLabel: '$module.namespace',
+      affectedSegmentIds: segmentIds,
+      expectedNamespace: targetNamespace,
+      actualNamespace,
+    });
+  }
+
+  // Keeping an internal namespace unchanged leaves its existing protocol
+  // references correct. They are stale only after an approved rename.
+  const stalePaths = targetNamespace !== sourceNamespace && draftModule
+    ? staleRisuModuleNamespaceProtocolPaths(draftModule, sourceNamespace)
+    : [];
+  if (stalePaths.length) {
+    throw new ProjectWorkflowError(`当前 Lua 草稿仍有 ${stalePaths.length} 处模块内部协议引用旧名称「${sourceNamespace}」。请重新应用审核结果。`, 409, {
+      code: 'RISU_NAMESPACE_REFERENCE_STALE',
+      pathLabel: '$module.namespace',
+      affectedSegmentIds: segmentIds,
+      stalePaths,
+    });
+  }
 }
 
 function parseRegexValidationOverrides(value: string | null | undefined): RisuRegexValidationOverrides {
@@ -118,13 +194,21 @@ export function createExportService({ database, clock, targetLanguage, review, s
         translated_text AS translatedText, final_text AS finalText, review_status AS reviewStatus
       FROM segments WHERE project_id = ?
     `).all(projectId) as unknown as ApplicableSegment[];
+    const originalModule = project.original_module_json
+      ? JSON.parse(project.original_module_json) as Record<string, unknown>
+      : null;
+    const existingDraftModule = project.draftModuleJson
+      ? JSON.parse(project.draftModuleJson) as Record<string, unknown>
+      : null;
     const cardSegments: ApplicableSegment[] = [];
     const moduleSegments: ApplicableSegment[] = [];
     const resourceSegments: ApplicableSegment[] = [];
     for (const segment of segments) {
       const path = JSON.parse(segment.pathJson) as Array<string | number>;
       if (path[0] === '$resource') resourceSegments.push(segment);
-      else if (path[0] === '$module') moduleSegments.push({ ...segment, pathJson: JSON.stringify(path.slice(1)) });
+      else if (path[0] === '$module' || isModuleNamespaceSegment(segment, path, originalModule)) {
+        moduleSegments.push({ ...segment, pathJson: JSON.stringify(path[0] === '$module' ? path.slice(1) : path) });
+      }
       else cardSegments.push(segment);
     }
 
@@ -150,12 +234,6 @@ export function createExportService({ database, clock, targetLanguage, review, s
         draftSourceBlob = replaceResourceBytes(project.sourceFormat, draftSourceBlob, replacement.resourcePath, replacement.imageBlob);
       }
     }
-    const originalModule = project.original_module_json
-      ? JSON.parse(project.original_module_json) as Record<string, unknown>
-      : null;
-    const existingDraftModule = project.draftModuleJson
-      ? JSON.parse(project.draftModuleJson) as Record<string, unknown>
-      : null;
     if (moduleSegments.length && !originalModule) {
       throw new ProjectWorkflowError('项目缺少原始 Risu 模块，无法应用模块译文。请重新扫描项目。', 409);
     }
@@ -213,13 +291,14 @@ export function createExportService({ database, clock, targetLanguage, review, s
         ...(issue.sourceLine ? { sourceLine: issue.sourceLine.slice(0, 500) } : {}),
         ...(issue.draftLine ? { draftLine: issue.draftLine.slice(0, 500) } : {}),
         problem: `Lua 语法错误：${issue.message}`,
-        fixSuggestion: '请打开 Lua 管理页，展开这条语法错误，按行号和列号人工检查当前稿错误行；只修改确认后的整行，保留 Lua 代码、引号、括号和字段分隔符，再保存并重新校验。系统不会自动改写这行。',
+        fixSuggestion: '请打开 脚本管理页，展开这条语法错误，按行号和列号人工检查当前稿错误行；只修改确认后的整行，保留 Lua 代码、引号、括号和字段分隔符，再保存并重新校验。系统不会自动改写这行。',
       });
     }
     const appliedModule = moduleResult?.draft ?? null;
     const draftModule = appliedModule && project.sourceFormat === 'charx'
       ? synchronizeRisuModuleLorebook(draft, appliedModule)
       : appliedModule;
+    assertRisuModuleNamespaceIntegrity(originalModule, draftModule, segments, false);
     assertRisuIntegrity(
       JSON.parse(project.original_json) as Record<string, unknown>,
       draft,
@@ -317,6 +396,18 @@ export function createExportService({ database, clock, targetLanguage, review, s
     const draftModule = storedDraftModule && project.sourceFormat === 'charx'
       ? synchronizeRisuModuleLorebook(draft, storedDraftModule)
       : storedDraftModule;
+    const namespaceSegments = await database.prepare(`
+      SELECT id, path_json AS pathJson, path_label AS pathLabel, source_text AS sourceText,
+        start_pos AS start, end_pos AS end, translated_text AS translatedText,
+        final_text AS finalText, review_status AS reviewStatus
+      FROM segments
+      WHERE project_id = ? AND path_json IN (?, ?)
+    `).all(
+      projectId,
+      JSON.stringify(['$module', 'namespace']),
+      JSON.stringify(['namespace']),
+    ) as unknown as ApplicableSegment[];
+    assertRisuModuleNamespaceIntegrity(originalModule, draftModule, namespaceSegments, true);
     const exportCard = project.sourceFormat === 'risum' && draftModule
       ? { name: text(draftModule.name) || project.name || '' }
       : draft;
@@ -413,7 +504,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
           ...(issue.sourceLine ? { sourceLine: issue.sourceLine.slice(0, 500) } : {}),
           ...(issue.draftLine ? { draftLine: issue.draftLine.slice(0, 500) } : {}),
           problem: `Lua 语法错误：${issue.message}`,
-          fixSuggestion: '请在 Lua 管理页展开对应错误，按错误行和列人工检查当前稿错误行，保留 Lua 代码、引号、括号和字段分隔符，只修正确认后的整行后再保存。系统不会自动改写这行。',
+          fixSuggestion: '请在 脚本管理页展开对应错误，按错误行和列人工检查当前稿错误行，保留 Lua 代码、引号、括号和字段分隔符，只修正确认后的整行后再保存。系统不会自动改写这行。',
         });
       }
     }

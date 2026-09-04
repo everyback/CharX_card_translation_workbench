@@ -71,8 +71,24 @@ export function useProjectActions({
         method: 'POST', ...jsonBody({ changes: changes ?? [] }),
       });
       onNotice(result.applied.length
-        ? `已固化 ${result.applied.length} 项路由修复到模块基线和当前草稿；不会影响后续保存。`
+        ? `已将 ${result.applied.length} 项路由修复写入当前翻译稿模块；原始模块保持不变。`
         : '当前模块没有可应用的已知路由修复。');
+      await Promise.all([refreshProject(project.id), refreshProjects()]);
+    });
+  }
+
+  async function resetLuaDraft() {
+    if (!project || !await showUiConfirm({
+      title: '恢复原始 Lua 草稿',
+      message: '这只会恢复 Lua 模块草稿，并清除 Lua 页面已保存的语法修复、正则覆盖、名称别名和路由修复。卡片正文、翻译结果、资源草稿和原始模块不会被修改。',
+      confirmLabel: '恢复 Lua 草稿',
+      tone: 'danger',
+    })) return;
+    await runAction('lua-reset', async () => {
+      const result = await api<{ reset: boolean }>(`/api/projects/${project.id}/lua/reset-draft`, {
+        method: 'POST', ...jsonBody({}),
+      });
+      onNotice(result.reset ? '已恢复原始 Lua 草稿；原始模块保持不变。' : '当前 Lua 草稿已经是原始模块，无需恢复。');
       await Promise.all([refreshProject(project.id), refreshProjects()]);
     });
   }
@@ -91,5 +107,5 @@ export function useProjectActions({
     });
   }
 
-  return { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, deleteProject };
+  return { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject };
 }

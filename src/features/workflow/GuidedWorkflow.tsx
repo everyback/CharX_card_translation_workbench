@@ -327,8 +327,8 @@ export function GuidedWorkflow({
       {project.scanSummary?.luaSegments ? (
         <div className="guided-lua-tip">
           <Code2 size={16} />
-          <div><strong>检测到 Lua 脚本</strong><span>保存或导出时会自动检查脚本并尝试补齐运行时名称别名；只有人名、地名等专有名词才会进入匹配流程，无法自动处理时可转到 Lua 管理页。</span></div>
-          <button className="secondary-button" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 Lua 管理</button>
+          <div><strong>检测到 Lua 脚本</strong><span>保存或导出时会自动检查脚本并尝试补齐运行时名称别名；只有人名、地名等专有名词才会进入匹配流程，无法自动处理时可转到 脚本管理页。</span></div>
+          <button className="secondary-button" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 脚本管理</button>
         </div>
       ) : null}
       {project.status === 'new' && (

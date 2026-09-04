@@ -8,6 +8,7 @@ import {
   Minus,
   Play,
   Plus,
+  RotateCcw,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -16,14 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { LuaManagementReport, LuaManagementStepStatus, PortraitRouterRepairChange, PortraitRouterRepairPreview, RegexCoveragePreview, RegexCoverageRule, RegexCoverageRuleResult, RegexCoverageRuleStatus, RegexRuleSaveResult, RegexRuleTestResult, ReviewFocus } from '../../types';
-
-const STATUS_LABELS: Record<LuaManagementStepStatus, string> = {
-  complete: '已完成',
-  'needs-review': '待处理',
-  blocked: '已阻断',
-  'not-applicable': '不适用',
-};
+import type { LuaManagementReport, PortraitRouterRepairChange, PortraitRouterRepairPreview, RegexCoveragePreview, RegexCoverageRule, RegexCoverageRuleResult, RegexCoverageRuleStatus, RegexRuleSaveResult, RegexRuleTestResult, ReviewFocus } from '../../types';
 
 const ISSUE_LABELS = {
   syntax: 'Lua 语法',
@@ -32,6 +26,7 @@ const ISSUE_LABELS = {
   control: '控制引用',
   portrait: '立绘别名',
   router: '路由修复',
+  namespace: '命名空间',
 } as const;
 
 function summarizeMatchSamples(samples?: string[]): string {
@@ -148,9 +143,11 @@ export function LuaManagementView({
   onScan,
   onPreviewRouterRepair,
   onApplyRouterRepair,
+  onResetLuaDraft,
   onPreviewError,
   onSaveLuaSyntaxLine,
   onOpenExport,
+  onConfirmNamespace,
   onSaveAliases,
   onPreviewRegexCoverage,
   onAnalyzeRegexRule,
@@ -166,14 +163,16 @@ export function LuaManagementView({
   onScan: () => void;
   onPreviewRouterRepair: () => Promise<PortraitRouterRepairPreview>;
   onApplyRouterRepair: (changes?: PortraitRouterRepairChange[]) => Promise<void> | void;
+  onResetLuaDraft: () => Promise<void> | void;
   onPreviewError: (error: unknown) => void;
   onSaveLuaSyntaxLine: (pathJson: string, line: number, replacement: string, expectedLine?: string) => Promise<{ syntaxOk: boolean; remainingSyntaxIssues?: unknown[] }>;
   onOpenExport: () => void;
+  onConfirmNamespace: (targetNamespace: string) => Promise<void>;
   onSaveAliases: (ownerId: string, aliases: string[]) => Promise<void>;
   onPreviewRegexCoverage: () => Promise<RegexCoveragePreview>;
   onAnalyzeRegexRule: (pathLabel: string, signal?: AbortSignal, pattern?: string) => Promise<RegexCoverageRuleResult>;
   onTestRegexRule: (pathLabel: string, pattern: string) => Promise<RegexRuleTestResult>;
-  onSaveRegexRule: (pathLabel: string, pattern: string, expectedPattern: string, forcePass: boolean) => Promise<RegexRuleSaveResult>;
+  onSaveRegexRule: (pathLabel: string, pattern: string, expectedPattern: string, forcePass: boolean, output?: string, expectedOutput?: string) => Promise<RegexRuleSaveResult>;
   regexConcurrency: number;
   reviewFocus: ReviewFocus | null;
   onClearReviewFocus: () => void;
@@ -200,13 +199,10 @@ export function LuaManagementView({
   const [syntaxLineDrafts, setSyntaxLineDrafts] = useState<Record<string, string>>({});
   const [savingSyntaxKey, setSavingSyntaxKey] = useState<string | null>(null);
   const [syntaxSaveMessage, setSyntaxSaveMessage] = useState<string | null>(null);
-  const [selectedReferenceKey, setSelectedReferenceKey] = useState<string | null>(null);
-  const [referenceQuery, setReferenceQuery] = useState('');
-  const [onlyProblemReferences, setOnlyProblemReferences] = useState(true);
-  const [referencePage, setReferencePage] = useState(1);
-  const [expandedIssueKey, setExpandedIssueKey] = useState<string | null>(null);
   const [syntaxContextExpanded, setSyntaxContextExpanded] = useState<Record<string, boolean>>({});
-  const [luaEditorOpen, setLuaEditorOpen] = useState(true);
+  const [namespaceDialogOpen, setNamespaceDialogOpen] = useState(false);
+  const [namespaceDraft, setNamespaceDraft] = useState('');
+  const [namespaceSaving, setNamespaceSaving] = useState(false);
   const [regexEditor, setRegexEditor] = useState<{
     pathLabel: string;
     originalPattern: string;
@@ -216,8 +212,11 @@ export function LuaManagementView({
     sourceSamples: string[];
     draftSamples: string[];
     forcePassed: boolean;
+    runtimePostprocess: boolean;
+    currentOutput: string;
   } | null>(null);
   const [regexEditorPattern, setRegexEditorPattern] = useState('');
+  const [regexEditorOutput, setRegexEditorOutput] = useState('');
   const [regexEditorForcePass, setRegexEditorForcePass] = useState(false);
   const [regexEditorTest, setRegexEditorTest] = useState<RegexRuleTestResult | null>(null);
   const [regexEditorCandidateNotice, setRegexEditorCandidateNotice] = useState<string | null>(null);
@@ -225,9 +224,29 @@ export function LuaManagementView({
   const [regexEditorSaving, setRegexEditorSaving] = useState(false);
   const [regexEditorAnalyzing, setRegexEditorAnalyzing] = useState(false);
   const regexEditorAbortRef = useRef<AbortController | null>(null);
-  const regexConcurrencyLimit = Math.min(8, Math.max(1, Math.floor(Number(regexConcurrency) || 1)));
+  const regexConcurrencyLimit = Math.max(1, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(Number(regexConcurrency) || 1)));
   const regexRunning = regexCurrentPaths.length > 0 || regexQueuedPaths.length > 0;
-  const regexReferenceCount = useMemo(() => report?.controlReferences.filter((reference) => reference.kind === 'regex').length ?? 0, [report]);
+  const regexReferenceCount = report?.regexCount ?? 0;
+
+  const namespaceSegment = useMemo(
+    () => report?.segments.find((segment) => segment.pathLabel === '$module.namespace') ?? null,
+    [report],
+  );
+  const postprocessReferences = useMemo(
+    () => report?.regexRules.filter((reference) => reference.runtimePostprocess === true) ?? [],
+    [report],
+  );
+  const runtimeDisplayReferences = useMemo(
+    () => report?.regexRules.filter((reference) => reference.dynamicDisplay === true && reference.runtimePostprocess !== true) ?? [],
+    [report],
+  );
+  const staticRegexReferences = useMemo(
+    () => report?.regexRules.filter((reference) => !reference.dynamicDisplay && reference.runtimePostprocess !== true) ?? [],
+    [report],
+  );
+  const staticRegexProblemCount = useMemo(() => staticRegexReferences.filter((reference) => (
+    !reference.dynamicDisplay && reference.originalMatches !== reference.draftMatches && reference.forcePassed !== true
+  )).length, [staticRegexReferences]);
 
   const filteredCandidates = useMemo(() => {
     if (!report) return [];
@@ -239,34 +258,36 @@ export function LuaManagementView({
   }, [query, report]);
 
   const syntaxIssues = useMemo(() => report?.issues.filter((issue) => issue.kind === 'syntax') ?? [], [report]);
-  const allMatchingReferences = useMemo(() => {
-    const query = referenceQuery.trim().toLocaleLowerCase();
-    const filtered = report?.controlReferences.filter((reference) => !query || `${reference.pathLabel}\n${reference.literal}\n${reference.fullPattern || ''}`.toLocaleLowerCase().includes(query)) ?? [];
-    const prioritized = [...filtered].sort((left, right) => {
-      const leftMismatch = left.kind === 'regex' && !left.dynamicDisplay && left.originalMatches !== left.draftMatches ? 1 : 0;
-      const rightMismatch = right.kind === 'regex' && !right.dynamicDisplay && right.originalMatches !== right.draftMatches ? 1 : 0;
-      if (leftMismatch !== rightMismatch) return rightMismatch - leftMismatch;
-      const leftRegex = left.kind === 'regex' ? 1 : 0;
-      const rightRegex = right.kind === 'regex' ? 1 : 0;
-      return rightRegex - leftRegex || left.pathLabel.localeCompare(right.pathLabel);
-    });
-    return prioritized;
-  }, [referenceQuery, report]);
-  const blockingReferencePaths = useMemo(() => new Set(
-    report?.issues.filter((issue) => issue.blocking && issue.kind === 'control').map((issue) => issue.pathLabel) ?? [],
-  ), [report]);
-  const matchingReferences = useMemo(() => (
-    onlyProblemReferences
-      ? allMatchingReferences.filter((reference) => blockingReferencePaths.has(reference.pathLabel))
-      : allMatchingReferences
-  ), [allMatchingReferences, blockingReferencePaths, onlyProblemReferences]);
-  const referencePageSize = 30;
-  const referencePageCount = Math.max(1, Math.ceil(matchingReferences.length / referencePageSize));
-  const visibleReferences = useMemo(
-    () => matchingReferences.slice((referencePage - 1) * referencePageSize, referencePage * referencePageSize),
-    [matchingReferences, referencePage],
+  const namespaceIssues = useMemo(() => report?.issues.filter((issue) => issue.kind === 'namespace') ?? [], [report]);
+  const namespaceBlocked = namespaceIssues.some((issue) => issue.blocking);
+  const namespaceTarget = (namespaceSegment?.finalText || namespaceSegment?.translatedText || '').trim();
+  const namespaceConfirmed = namespaceSegment?.reviewStatus === 'approved' && Boolean(namespaceTarget);
+
+  function openNamespaceConfirmation(): void {
+    setNamespaceDraft(namespaceTarget || namespaceSegment?.sourceText || '');
+    setNamespaceDialogOpen(true);
+  }
+
+  async function confirmNamespace(): Promise<void> {
+    const target = namespaceDraft.trim();
+    if (!target) {
+      onPreviewError(new Error('请填写确认后的模块命名空间。'));
+      return;
+    }
+    setNamespaceSaving(true);
+    try {
+      await onConfirmNamespace(target);
+      setNamespaceDialogOpen(false);
+    } catch (error) {
+      onPreviewError(error);
+    } finally {
+      setNamespaceSaving(false);
+    }
+  }
+  const luaControlReferences = useMemo(
+    () => report?.controlReferences.filter((reference) => reference.kind === 'lua') ?? [],
+    [report],
   );
-  useEffect(() => { setReferencePage(1); }, [referenceQuery, onlyProblemReferences, report?.generatedAt]);
   useEffect(() => {
     if (!report) return;
     const drafts: Record<string, string> = {};
@@ -277,34 +298,17 @@ export function LuaManagementView({
     setSyntaxSaveMessage(null);
     setSyntaxContextExpanded({});
   }, [report?.generatedAt]);
-  useEffect(() => { if (referencePage > referencePageCount) setReferencePage(referencePageCount); }, [referencePage, referencePageCount]);
-  useEffect(() => { setLuaEditorOpen(syntaxIssues.length > 0); }, [report?.generatedAt, syntaxIssues.length]);
-  useEffect(() => {
-    const firstBlocking = report?.issues.find((issue) => issue.kind === 'syntax' && issue.blocking)
-      ?? report?.issues.find((issue) => issue.blocking);
-    if (!firstBlocking || !report) { setExpandedIssueKey(null); return; }
-    const index = report.issues.indexOf(firstBlocking);
-    setExpandedIssueKey(`${firstBlocking.kind}:${firstBlocking.pathLabel}:${index}`);
-  }, [report?.generatedAt]);
-
-  function focusSyntaxEditor(targetIssue?: LuaManagementReport['issues'][number], targetIssueIndex?: number): void {
+  function focusSyntaxEditor(): void {
     if (!report) return;
-    const focusPath = targetIssue?.pathLabel ?? reviewFocus?.pathLabel;
-    const focusLine = targetIssue?.line ?? reviewFocus?.line;
+    const focusPath = reviewFocus?.pathLabel;
+    const focusLine = reviewFocus?.line;
     if (!focusPath) return;
-    const issueIndex = targetIssueIndex ?? report.issues.findIndex((issue) => issue.kind === 'syntax'
-      && issue.pathLabel === focusPath
-      && (!focusLine || issue.line === focusLine));
     const syntaxIndex = syntaxIssues.findIndex((issue) => issue.kind === 'syntax'
       && issue.pathLabel === focusPath
       && (!focusLine || issue.line === focusLine));
-    if (issueIndex < 0 || syntaxIndex < 0) {
-      setLuaEditorOpen(true);
+    if (syntaxIndex < 0) {
       return;
     }
-    const issueKey = `syntax:${focusPath}:${issueIndex}`;
-    setLuaEditorOpen(true);
-    setExpandedIssueKey(issueKey);
     window.setTimeout(() => {
       const element = document.getElementById(`lua-syntax-snippet-${syntaxIndex}`);
       element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -314,15 +318,10 @@ export function LuaManagementView({
 
   useEffect(() => {
     if (!reviewFocus || !report) return;
-    const index = report.issues.findIndex((issue) => issue.kind === 'syntax'
-      && issue.pathLabel === reviewFocus.pathLabel
-      && (!reviewFocus.line || issue.line === reviewFocus.line));
     const syntaxIndex = syntaxIssues.findIndex((issue) => issue.kind === 'syntax'
       && issue.pathLabel === reviewFocus.pathLabel
       && (!reviewFocus.line || issue.line === reviewFocus.line));
-    if (index < 0 || syntaxIndex < 0) return;
-    setLuaEditorOpen(true);
-    setExpandedIssueKey(`syntax:${reviewFocus.pathLabel}:${index}`);
+    if (syntaxIndex < 0) return;
     window.setTimeout(() => document.getElementById(`lua-syntax-snippet-${syntaxIndex}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
   }, [reviewFocus, report?.generatedAt, syntaxIssues]);
 
@@ -339,8 +338,8 @@ export function LuaManagementView({
     try {
       const result = await onSaveLuaSyntaxLine(pathJson, line, replacement, issue.draftLine);
       setSyntaxSaveMessage(result.syntaxOk
-        ? '已保存人工修改，当前 Lua 语法校验通过。'
-        : `已保存人工修改，但仍有 ${result.remainingSyntaxIssues?.length ?? 1} 条 Lua 语法错误，请继续检查。`);
+        ? '已保存人工修改，当前 脚本 语法校验通过。'
+        : `已保存人工修改，但仍有 ${result.remainingSyntaxIssues?.length ?? 1} 条 脚本 语法错误，请继续检查。`);
     } catch (error) {
       onPreviewError(error);
     } finally {
@@ -541,6 +540,8 @@ export function LuaManagementView({
     originalSamples?: string[];
     draftSamples?: string[];
     forcePassed?: boolean;
+    runtimePostprocess?: boolean;
+    out?: string;
   }) {
     const currentPattern = reference.fullPattern || '';
     if (!currentPattern) {
@@ -556,8 +557,11 @@ export function LuaManagementView({
       sourceSamples: reference.originalSamples ?? [],
       draftSamples: reference.draftSamples ?? [],
       forcePassed: reference.forcePassed === true,
+      runtimePostprocess: reference.runtimePostprocess === true,
+      currentOutput: reference.out ?? '',
     });
     setRegexEditorPattern(currentPattern);
+    setRegexEditorOutput(reference.out ?? '');
     setRegexEditorForcePass(reference.forcePassed === true);
     setRegexEditorTest(null);
     setRegexEditorCandidateNotice(null);
@@ -579,17 +583,27 @@ export function LuaManagementView({
     if (!regexEditor || regexEditorSaving || regexEditorTesting || regexEditorAnalyzing) return;
     setRegexEditorSaving(true);
     try {
-      const result = await onSaveRegexRule(regexEditor.pathLabel, regexEditorPattern, regexEditor.currentPattern, regexEditorForcePass);
+      const output = regexEditor.runtimePostprocess ? regexEditorOutput : undefined;
+      const result = await onSaveRegexRule(
+        regexEditor.pathLabel,
+        regexEditorPattern,
+        regexEditor.currentPattern,
+        regexEditor.runtimePostprocess ? false : regexEditorForcePass,
+        output,
+        regexEditor.runtimePostprocess ? regexEditor.currentOutput : undefined,
+      );
       setRegexEditor((current) => current ? {
         ...current,
         currentPattern: result.pattern,
-        sourceMatchCount: result.sourceMatchCount,
-        draftMatchCount: result.draftMatchCount,
+        sourceMatchCount: result.validationSourceMatchCount ?? result.sourceMatchCount,
+        draftMatchCount: result.validationDraftMatchCount ?? result.draftMatchCount,
         sourceSamples: result.sourceSamples,
         draftSamples: result.draftSamples,
         forcePassed: result.forcePassed,
+        currentOutput: result.out ?? current.currentOutput,
       } : current);
       setRegexEditorPattern(result.pattern);
+      if (result.out !== undefined) setRegexEditorOutput(result.out);
       setRegexEditorForcePass(result.forcePassed);
       setRegexEditorTest(result);
     } catch (error) {
@@ -648,7 +662,7 @@ export function LuaManagementView({
     setRegexCoverageSavingPath(rule.pathLabel);
     try {
       const result = await onSaveRegexRule(rule.pathLabel, pattern, rule.pattern, false);
-      const passed = result.compiled && (result.dynamicDisplay || result.sourceMatchCount === result.draftMatchCount);
+      const passed = result.compiled && (result.dynamicDisplay || result.runtimePostprocess || result.sourceMatchCount === result.draftMatchCount);
       updateRegexRule(rule.pathLabel, {
         pattern: result.pattern,
         candidatePattern: result.pattern,
@@ -662,8 +676,11 @@ export function LuaManagementView({
           sourceMatchCount: result.sourceMatchCount,
           draftMatchCount: result.draftMatchCount,
           dynamicDisplay: result.dynamicDisplay,
+          runtimePostprocess: result.runtimePostprocess,
           message: passed && result.dynamicDisplay
             ? '动态展示规则已通过编译；静态卡片命中仅作样本参考。'
+            : passed && result.runtimePostprocess
+            ? '聊天后处理规则已通过编译；静态卡片命中仅作样本参考。'
             : passed ? undefined : `已保存，但命中 ${result.draftMatchCount} 与原文 ${result.sourceMatchCount} 仍不一致。`,
         },
       });
@@ -677,10 +694,10 @@ export function LuaManagementView({
   }
 
   if (!report && loading) {
-    return <section className="lua-management-section"><div className="table-empty">正在读取立绘匹配诊断…</div></section>;
+    return <section className="lua-management-section"><div className="table-empty">正在读取脚本诊断信息…</div></section>;
   }
   if (!report) {
-    return <section className="lua-management-section"><div className="table-empty">暂时无法读取立绘匹配诊断，请重试。</div></section>;
+    return <section className="lua-management-section"><div className="table-empty">暂时无法读取脚本诊断信息，请重试。</div></section>;
   }
 
   return (
@@ -688,30 +705,22 @@ export function LuaManagementView({
       <header className="lua-management-header">
         <div>
           <span className="section-kicker">RisuAI / Lua</span>
-          <h1>Lua 脚本管理</h1>
-          <p>在这里检查 Lua 语法、模板结构、控制引用和名称别名，并直接修正可见文本。审核页只接收本页保存后的结果。</p>
+          <h1>脚本与聊天后处理</h1>
+          <p>命名空间、聊天输出后处理和静态正则分开管理。</p>
         </div>
         <div className="lua-management-actions">
-          <button className="primary-button" onClick={() => void openRegexPreview()} disabled={loading || regexPreviewLoading || regexRunning}>
-            {regexPreviewLoading ? <RefreshCw className="spin" size={16} /> : <ShieldCheck size={16} />}全量分析正则
-          </button>
           <button className="secondary-button" onClick={onRefresh} disabled={loading}>
             <RefreshCw className={loading ? 'spin' : ''} size={16} />刷新诊断
           </button>
-          <button className="secondary-button" onClick={onScan}><Search size={16} />重新扫描 Lua</button>
+          <button className="secondary-button" onClick={onScan}><Search size={16} />重新扫描 脚本</button>
         </div>
       </header>
 
-      <div className={`lua-feature-check ${report.portraitFeatureDetected ? 'detected' : 'not-detected'}`}>
-        <div className="lua-onboarding-title"><SlidersHorizontal size={17} /><strong>{report.portraitFeatureDetected ? '已检测到立绘匹配功能' : '未检测到立绘匹配功能'}</strong></div>
-        <p>{report.portraitFeatureDetected
-          ? '已检测到立绘匹配功能。名称别名、正则并列项和脚本可见文本都在本页处理，保存后由公共写入层同步到审核文本。'
-          : '当前模块没有同时出现图片输出和角色名称目录信号，因此不会自动翻译或匹配普通 Lua 文本。'}
-        </p>
-        {report.portraitFeatureSignals.length > 0 && <div className="lua-feature-signals">{report.portraitFeatureSignals.map((signal) => <span key={signal}>{signal}</span>)}</div>}
-        <div className="lua-onboarding-actions">
-          <button className="link-button" onClick={onScan}>重新检测 <ArrowRight size={13} /></button>
-        </div>
+      <div className="lua-work-summary" aria-label="脚本处理概览">
+        <div className={report.blockerCount ? 'blocking' : ''}><span>导出阻断</span><strong>{report.blockerCount}</strong><small>{report.warningCount} 条提醒</small></div>
+        <div className={namespaceBlocked ? 'blocking' : namespaceIssues.length ? 'attention' : namespaceSegment ? 'ready' : ''}><span>命名空间</span><strong>{namespaceSegment ? 1 : 0}</strong><small>{namespaceConfirmed ? (report?.namespaceHandling === 'preserved' ? '已确认保留原文' : '已人工修改并同步') : namespaceBlocked ? '待人工检查' : namespaceIssues.length ? '待回验' : namespaceSegment ? '已同步' : '未检测到'}</small></div>
+        <div className={postprocessReferences.length ? 'attention' : ''}><span>聊天后处理</span><strong>{postprocessReferences.length}</strong><small>生成回复后执行</small></div>
+        <div className={staticRegexProblemCount ? 'blocking' : ''}><span>静态正则</span><strong>{staticRegexReferences.length}</strong><small>{staticRegexProblemCount ? `${staticRegexProblemCount} 条待处理` : '命中已校验'}</small></div>
       </div>
 
       {reviewFocus && <div className="lua-focus-alert" role="status">
@@ -723,13 +732,14 @@ export function LuaManagementView({
         <div className="modal-backdrop regex-editor-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !regexEditorSaving && !regexEditorAnalyzing) setRegexEditor(null); }}>
           <section className="regex-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="regex-editor-title">
             <header className="dialog-header">
-              <div><h2 id="regex-editor-title">人工编辑正则</h2><span>{regexEditor.pathLabel} · 仅保存到 Lua 草稿，导出前仍会执行完整校验。</span></div>
+              <div><h2 id="regex-editor-title">{regexEditor.runtimePostprocess ? '人工编辑 Lua 聊天后处理' : '人工编辑正则'}</h2><span>{regexEditor.pathLabel} · 仅保存到 Lua 草稿，导出前仍会执行完整校验。</span></div>
               <button className="icon-button" title="关闭" aria-label="关闭正则编辑" disabled={regexEditorSaving || regexEditorAnalyzing} onClick={() => setRegexEditor(null)}><X size={16} /></button>
             </header>
             <div className="regex-editor-body">
               <div className="regex-editor-baseline">
                 <div><span>原始规则</span><code>{regexEditor.originalPattern}</code></div>
                 <div><span>已保存草稿</span><code>{regexEditor.currentPattern}</code></div>
+                {regexEditor.runtimePostprocess && <div><span>已保存替换输出</span><code>{regexEditor.currentOutput || '（空字符串：删除全部匹配内容）'}</code></div>}
                 <div><span>基线命中</span><strong>原文 {regexEditor.sourceMatchCount} · 当前稿 {regexEditor.draftMatchCount}</strong></div>
               </div>
               <div className="regex-coverage-rule-samples regex-editor-examples">
@@ -737,14 +747,21 @@ export function LuaManagementView({
                 <div><span>当前稿命中示例</span><MatchExampleList samples={regexEditor.draftSamples} /></div>
               </div>
               <label className="regex-editor-input">
-                <span>待测试规则</span>
+                <span>{regexEditor.runtimePostprocess ? '匹配式（in）' : '待测试规则'}</span>
                 <textarea value={regexEditorPattern} disabled={regexEditorAnalyzing} onChange={(event) => { setRegexEditorPattern(event.target.value); setRegexEditorTest(null); setRegexEditorCandidateNotice(null); }} rows={6} spellCheck={false} aria-label={`编辑 ${regexEditor.pathLabel} 正则`} />
               </label>
+              {regexEditor.runtimePostprocess && <>
+                <label className="regex-editor-input">
+                  <span>聊天后处理输出（out）</span>
+                  <textarea value={regexEditorOutput} disabled={regexEditorAnalyzing} onChange={(event) => { setRegexEditorOutput(event.target.value); setRegexEditorTest(null); }} rows={6} spellCheck={false} aria-label={`编辑 ${regexEditor.pathLabel} 后处理输出`} />
+                </label>
+                <div className="regex-editor-postprocess-note">此模板决定匹配后的内容是否保留。空字符串会删除全部匹配内容；保存时会保留 editoutput 类型并检查匹配式可编译。</div>
+              </>}
               {regexEditorCandidateNotice && <div className="regex-editor-candidate-notice" role="status"><Check size={14} />{regexEditorCandidateNotice}</div>}
-              <label className="regex-editor-force-pass">
+              {!regexEditor.runtimePostprocess && <label className="regex-editor-force-pass">
                 <input type="checkbox" checked={regexEditorForcePass} disabled={regexEditorAnalyzing} onChange={(event) => setRegexEditorForcePass(event.target.checked)} />
                 <span><strong>强制通过本条命中校验</strong><small>放弃这条规则的原文/当前稿命中数一致性检测；只对当前规则文本和当前命中数生效，其他结构校验仍保留。</small></span>
-              </label>
+              </label>}
               {regexEditorAnalyzing && <div className="regex-editor-analysis-lock" role="status"><RefreshCw className="spin" size={14} />大模型正在修正当前规则，输入框和保存操作已锁定。</div>}
               {regexEditorTest && <div className={`regex-editor-test-result ${regexEditorTest.compiled ? 'compiled' : 'invalid'}`}>
                 <div><strong>{regexEditorTest.compiled ? '测试完成' : '编译失败'}</strong><span>{regexEditorTest.message}</span></div>
@@ -757,32 +774,11 @@ export function LuaManagementView({
             </div>
             <footer className="dialog-actions regex-editor-actions">
               {regexEditorAnalyzing ? <button className="secondary-button" onClick={cancelManualRegexAnalysis}><X size={16} />取消分析</button> : <button className="secondary-button" disabled={regexEditorSaving} onClick={() => setRegexEditor(null)}><X size={16} />关闭</button>}
-              <button className="secondary-button" disabled={regexEditorAnalyzing || regexEditorTesting || regexEditorSaving || !regexEditorPattern.trim()} onClick={() => void analyzeManualRegex()}>{regexEditorAnalyzing ? <RefreshCw className="spin" size={16} /> : <Search size={16} />}大模型修正</button>
+              <button className="secondary-button" disabled={regexEditorAnalyzing || regexEditorTesting || regexEditorSaving || !regexEditorPattern.trim()} onClick={() => void analyzeManualRegex()}>{regexEditorAnalyzing ? <RefreshCw className="spin" size={16} /> : <Search size={16} />}{regexEditor.runtimePostprocess ? '大模型修正匹配式' : '大模型修正'}</button>
               <button className="secondary-button" disabled={regexEditorAnalyzing || regexEditorTesting || regexEditorSaving || !regexEditorPattern.trim()} onClick={() => void testManualRegex()}>{regexEditorTesting ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}测试匹配</button>
-              <button className={`primary-button${regexEditorForcePass ? ' danger-button' : ''}`} disabled={regexEditorAnalyzing || regexEditorTesting || regexEditorSaving || !regexEditorPattern.trim()} onClick={() => void saveManualRegex()}>{regexEditorSaving ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}{regexEditorForcePass ? '强制通过并保存' : '保存规则'}</button>
+              <button className={`primary-button${regexEditorForcePass ? ' danger-button' : ''}`} disabled={regexEditorAnalyzing || regexEditorTesting || regexEditorSaving || !regexEditorPattern.trim()} onClick={() => void saveManualRegex()}>{regexEditorSaving ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}{regexEditorForcePass ? '强制通过并保存' : regexEditor.runtimePostprocess ? '保存后处理' : '保存规则'}</button>
             </footer>
           </section>
-        </div>
-      )}
-
-      {report.routerRepair.detected && (
-        <div className="lua-router-repair">
-          <div>
-            <div className="lua-onboarding-title"><Wrench size={17} /><strong>路由修复已就绪</strong></div>
-            <p>只会处理已精确识别的阻断模式，不会改动资源索引、按钮、世界书或普通 Lua。</p>
-            <ul>
-              {report.routerRepair.findings.map((finding) => <li key={`${finding.id}:${finding.pathLabel}`}><strong>{finding.title}</strong><span>{finding.message}</span></li>)}
-            </ul>
-          </div>
-          <button className="primary-button" onClick={() => void openRouterPreview()} disabled={!report.routerRepair.canApply || loading || routerPreviewLoading}>
-            {routerPreviewLoading ? <RefreshCw className="spin" size={16} /> : <Wrench size={16} />}查看修改对比
-          </button>
-        </div>
-      )}
-      {!report.routerRepair.detected && report.hasModule && (
-        <div className="lua-router-status">
-          <div className="lua-onboarding-title"><ShieldCheck size={17} /><strong>路由修复检查完成</strong></div>
-          <p>已检查模块中的 Lua 输出处理器、完成标记门控和 Main 路由提交逻辑，当前没有匹配到已知阻断模式。</p>
         </div>
       )}
 
@@ -790,8 +786,8 @@ export function LuaManagementView({
         <div className="modal-backdrop regex-coverage-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !regexRunning) setRegexPreview(null); }}>
           <section className="regex-coverage-dialog" role="dialog" aria-modal="true" aria-labelledby="regex-coverage-title">
             <header className="dialog-header">
-            <div><h2 id="regex-coverage-title">正则全量修复确认</h2><span>{regexRunning ? `正在修正 ${regexCurrentPaths.length} 行，排队 ${regexQueuedPaths.length} 行（并发上限 ${regexConcurrencyLimit}）；其他行仍可编辑。` : '每行都可以先人工编辑，再单独点击“大模型修正”；模型处理期间只锁定当前行。'}</span></div>
-              <button className="icon-button" title="关闭" aria-label="关闭正则全量修复" disabled={regexRunning} onClick={() => setRegexPreview(null)}><X size={16} /></button>
+            <div><h2 id="regex-coverage-title">正则规则逐条分析</h2><span>{regexRunning ? `正在修正 ${regexCurrentPaths.length} 行，排队 ${regexQueuedPaths.length} 行（共享模型通道 ${regexConcurrencyLimit} 路）；其他行仍可编辑。` : '每行都可以先人工编辑，再单独点击“大模型修正”；模型处理期间只锁定当前行。'}</span></div>
+              <button className="icon-button" title="关闭" aria-label="关闭正则规则逐条分析" disabled={regexRunning} onClick={() => setRegexPreview(null)}><X size={16} /></button>
             </header>
             <div className="regex-coverage-body">
               <div className="regex-coverage-summary">
@@ -802,10 +798,10 @@ export function LuaManagementView({
               <div className="regex-coverage-list">
                 {regexPreview.rules.map((rule, index) => (
                   <article className={`regex-coverage-rule status-${rule.status ?? 'pending'}`} key={rule.pathLabel}>
-                    <div className="regex-coverage-rule-head"><div><strong>{index + 1}. {rule.pathLabel}</strong><span className={`regex-coverage-rule-status status-${rule.status ?? 'pending'}`}>{regexStatusLabel(rule.status)}</span></div><span>{rule.dynamicDisplay ? '运行时回复规则' : `命中 ${rule.sourceMatchCount} → ${rule.draftMatchCount}`}</span></div>
+                    <div className="regex-coverage-rule-head"><div><strong>{index + 1}. {rule.pathLabel}</strong><span className={`regex-coverage-rule-status status-${rule.status ?? 'pending'}`}>{regexStatusLabel(rule.status)}</span></div><span>{rule.runtimePostprocess ? 'Lua 聊天后处理规则' : rule.dynamicDisplay ? '运行时回复规则' : `命中 ${rule.sourceMatchCount} → ${rule.draftMatchCount}`}</span></div>
                     <div className="regex-coverage-rule-compare"><div><span>原始规则</span><code>{rule.originalPattern || rule.pattern}</code></div><div><span>{rule.candidatePattern ? '模型候选（可人工修改）' : '当前规则（可人工修改）'}</span><textarea value={regexCoverageDrafts[rule.pathLabel] ?? rule.pattern} disabled={rule.status === 'queued' || rule.status === 'processing'} onChange={(event) => { const value = event.target.value; setRegexCoverageDrafts((drafts) => ({ ...drafts, [rule.pathLabel]: value })); setRegexCoverageTests((tests) => { const next = { ...tests }; delete next[rule.pathLabel]; return next; }); updateRegexRule(rule.pathLabel, { candidatePattern: value, status: rule.status === 'pending' ? 'pending' : 'returned', validation: undefined, error: undefined }); }} rows={3} spellCheck={false} aria-label={`编辑 ${rule.pathLabel} 候选正则`} /></div></div>
-                    {rule.dynamicDisplay ? <div className="regex-coverage-context">此规则用于运行时模型回复展示，不读取或发送卡片素材命中片段。大模型仅依据当前正则、替换模板和目标语言处理中文无空格、引号与标点边界。</div> : <div className="regex-coverage-rule-samples"><div><span>原文命中片段</span><p>{summarizeMatchSamples(rule.sourceSamples?.length ? rule.sourceSamples : rule.sourceMatches)}</p></div><div><span>当前稿命中片段</span><p>{summarizeMatchSamples(rule.draftSamples?.length ? rule.draftSamples : rule.draftMatches)}</p></div></div>}
-                    {rule.modelContext && !rule.dynamicDisplay && <div className="regex-coverage-context">发送上下文：扫描记录 {rule.modelContext.totalRecords}（去重 {rule.modelContext.totalUniqueRecords}）→ 采样 {rule.modelContext.selectedRecords} 条；分组命中差异 {rule.modelContext.strata.coverageDifference}、文本变化 {rule.modelContext.strata.textDifference}、稳定 {rule.modelContext.strata.stable}。命中样本 {rule.modelContext.selectedSourceMatches} / {rule.modelContext.selectedDraftMatches}，载荷 {rule.modelContext.contextChars} / {rule.modelContext.budgetChars} 字符{rule.modelContext.truncated ? '，已按预算裁剪' : ''}{rule.modelContext.formatProbe ? `；空白探针 ${rule.modelContext.formatProbe.sourceMatchCount} → ${rule.modelContext.formatProbe.draftMatchCount}（严格基线 ${rule.modelContext.formatProbe.baselineSourceMatchCount} → ${rule.modelContext.formatProbe.baselineDraftMatchCount}），采样 ${rule.modelContext.formatProbe.selectedRecords} / ${rule.modelContext.formatProbe.totalRecords} 条` : ''}。</div>}
+                    {rule.dynamicDisplay || rule.runtimePostprocess ? <div className="regex-coverage-context">{rule.runtimePostprocess ? '此规则会在生成回复后执行（editoutput），不读取或发送卡片素材命中片段。此处可修正匹配式；完整的 in / out 人工编辑在上方“聊天后处理”检测项中完成，保存会校验正则编译、规则类型和替换输出。' : '此规则用于运行时模型回复展示，不读取或发送卡片素材命中片段。大模型仅依据当前正则、替换模板和目标语言处理中文无空格、引号与标点边界。'}</div> : <div className="regex-coverage-rule-samples"><div><span>原文命中片段</span><p>{summarizeMatchSamples(rule.sourceSamples?.length ? rule.sourceSamples : rule.sourceMatches)}</p></div><div><span>当前稿命中片段</span><p>{summarizeMatchSamples(rule.draftSamples?.length ? rule.draftSamples : rule.draftMatches)}</p></div></div>}
+                    {rule.modelContext && !rule.dynamicDisplay && !rule.runtimePostprocess && <div className="regex-coverage-context">发送上下文：扫描记录 {rule.modelContext.totalRecords}（去重 {rule.modelContext.totalUniqueRecords}）→ 采样 {rule.modelContext.selectedRecords} 条；分组命中差异 {rule.modelContext.strata.coverageDifference}、文本变化 {rule.modelContext.strata.textDifference}、稳定 {rule.modelContext.strata.stable}。命中样本 {rule.modelContext.selectedSourceMatches} / {rule.modelContext.selectedDraftMatches}，载荷 {rule.modelContext.contextChars} / {rule.modelContext.budgetChars} 字符{rule.modelContext.truncated ? '，已按预算裁剪' : ''}{rule.modelContext.formatProbe ? `；空白探针 ${rule.modelContext.formatProbe.sourceMatchCount} → ${rule.modelContext.formatProbe.draftMatchCount}（严格基线 ${rule.modelContext.formatProbe.baselineSourceMatchCount} → ${rule.modelContext.formatProbe.baselineDraftMatchCount}），采样 ${rule.modelContext.formatProbe.selectedRecords} / ${rule.modelContext.formatProbe.totalRecords} 条` : ''}。</div>}
                     {rule.status && !['pending', 'queued', 'processing'].includes(rule.status) && <div className="regex-coverage-model-result">模型返回：{regexProposalSummary(rule.proposals)}</div>}
                     {rule.validation && <div className={`regex-coverage-validation ${rule.validation.passed ? 'passed' : 'failed'}`}>{rule.validation.message || (rule.validation.passed ? `校验通过：候选命中 ${rule.validation.draftMatchCount}，满足原文 ${rule.validation.sourceMatchCount}` : '本地校验未通过，未写入。')}</div>}
                     {rule.error && <div className="regex-coverage-validation failed">{rule.error}</div>}
@@ -813,11 +809,32 @@ export function LuaManagementView({
                     {regexCoverageTests[rule.pathLabel] && <div className={`regex-coverage-validation ${regexCoverageTests[rule.pathLabel].compiled ? 'passed' : 'failed'}`}>当前输入测试：命中 {regexCoverageTests[rule.pathLabel].sourceMatchCount} → {regexCoverageTests[rule.pathLabel].draftMatchCount}；{regexCoverageTests[rule.pathLabel].message || '规则可编译。'}</div>}
                   </article>
                 ))}
-                {!regexPreview.rules.length && <div className="table-empty">当前没有命中数变化的规则，无需全量修复。</div>}
+                {!regexPreview.rules.length && <div className="table-empty">当前没有静态命中变化或聊天后处理规则，无需全量修复。</div>}
               </div>
             </div>
             <footer className="dialog-actions regex-coverage-actions">
               {regexRunning ? <button className="secondary-button" onClick={cancelAllRegexCoverageAnalysis}><X size={16} />取消全部分析</button> : <button className="secondary-button" onClick={() => setRegexPreview(null)}><X size={16} />关闭</button>}
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {namespaceDialogOpen && namespaceSegment && (
+        <div className="modal-backdrop namespace-confirmation-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !namespaceSaving) setNamespaceDialogOpen(false); }}>
+          <section className="namespace-confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="namespace-confirmation-title">
+            <header className="dialog-header">
+              <div><h2 id="namespace-confirmation-title">人工核对模块命名空间</h2><span>不会自动判断用途或生成译名。请确认保留原文，或直接填写你要使用的名称。</span></div>
+              <button type="button" className="icon-button" title="关闭" aria-label="关闭" disabled={namespaceSaving} onClick={() => setNamespaceDialogOpen(false)}><X size={16} /></button>
+            </header>
+            <div className="namespace-confirmation-body">
+              <label><span>原始 namespace</span><code>{namespaceSegment.sourceText}</code></label>
+              <label><span>当前已保存值</span><code>{namespaceTarget || namespaceSegment.sourceText}</code></label>
+              <label className="namespace-confirmation-input"><span>确认后使用的名称</span><input value={namespaceDraft} onChange={(event) => setNamespaceDraft(event.target.value)} placeholder="保留原文或手动填写名称" autoFocus /></label>
+              <p>{namespaceDraft.trim() === namespaceSegment.sourceText ? '确认原文后，会保留现有资源引用。' : '确认修改后，会同步已识别的 module_assetlist / module_enabled 内部引用。'}</p>
+            </div>
+            <footer className="dialog-actions">
+              <button type="button" className="secondary-button" disabled={namespaceSaving} onClick={() => setNamespaceDialogOpen(false)}><X size={16} />取消</button>
+              <button type="button" className="primary-button" disabled={namespaceSaving || !namespaceDraft.trim()} onClick={() => void confirmNamespace()}>{namespaceSaving ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}人工确认并同步</button>
             </footer>
           </section>
         </div>
@@ -866,25 +883,116 @@ export function LuaManagementView({
         </div>
       )}
 
-      <div className="lua-kpi-grid">
-        <div><span>匹配候选</span><strong>{report.portraitCandidateCount}</strong><small>人名 / 地名 / 称号</small></div>
-        <div><span>已有别名</span><strong>{report.portraitCoveredCount}</strong><small>可直接参与匹配</small></div>
-        <div className={report.portraitMissingCount ? 'warning' : ''}><span>待补别名</span><strong>{report.portraitMissingCount}</strong><small>导出时自动尝试补齐</small></div>
-        <div className={report.blockerCount ? 'danger' : ''}><span>导出阻断</span><strong>{report.blockerCount}</strong><small>{report.warningCount} 条提醒</small></div>
-      </div>
-
-      <div className="lua-stepper" aria-label="立绘匹配处理流程">
-        {report.steps.map((step, index) => (
-          <div className={`lua-step lua-step-${step.status}`} key={step.id}>
-            <div className="lua-step-mark">{step.status === 'complete' ? <Check size={14} /> : index + 1}</div>
-            <div><strong>{step.title}</strong><span>{STATUS_LABELS[step.status]}</span><p>{step.message}</p></div>
-            {index < report.steps.length - 1 && <div className="lua-step-line" aria-hidden="true" />}
+      <div className="lua-primary-grid">
+        <section className="lua-panel lua-namespace-panel" id="lua-namespace-detection-detail">
+          <div className="lua-panel-header">
+            <div><h2>模块命名空间检查</h2><span>由你直接核对和修改；系统不会推断用途或自动生成译名</span></div>
+            <ShieldCheck size={17} />
           </div>
-        ))}
+          {namespaceSegment ? (
+            <div className="lua-namespace-body">
+              <div><span>原始名称</span><code>{namespaceSegment.sourceText}</code></div>
+              <div><span>处理方式</span><strong>{namespaceConfirmed ? '人工确认' : '尚未人工检查'}</strong></div>
+              <div><span>当前值</span><strong>{namespaceTarget || namespaceSegment.sourceText}</strong></div>
+              <div><span>确认状态</span><em className={`lua-namespace-status ${namespaceSegment.reviewStatus}`}>{namespaceConfirmed ? (report?.namespaceHandling === 'preserved' ? '已确认保留' : '已确认修改') : '待检查'}</em></div>
+              <div><span>检测结果</span><strong className={namespaceBlocked ? 'lua-namespace-problem' : namespaceIssues.length ? 'lua-namespace-warning' : 'lua-namespace-ok'}>{namespaceIssues[0]?.message || '当前名称与已识别的模块内部引用均已同步。'}</strong></div>
+              <div className="lua-namespace-actions">
+                <span>{namespaceConfirmed
+                  ? '已由人工确认。需要改回原文或改成其他名称时，重新打开核对窗口即可。'
+                  : '打开人工核对窗口后，保留原文或手动修改确认值。系统不判断这个字段是否可见，也不会跳转审核页。'}</span>
+                <div className="lua-namespace-decision-buttons">
+                  <button type="button" className="primary-button" disabled={loading || namespaceSaving} onClick={openNamespaceConfirmation}><Check size={14} />{namespaceConfirmed ? '重新人工核对' : '人工核对并确认'}</button>
+                </div>
+              </div>
+            </div>
+          ) : <div className="lua-simple-empty">当前模块未定义命名空间。</div>}
+        </section>
+
+        <section className="lua-panel lua-postprocess-panel">
+          <div className="lua-panel-header">
+            <div><h2>聊天后处理</h2><span>{postprocessReferences.length} 条 editoutput 规则</span></div>
+            <Code2 size={17} />
+          </div>
+          <div className="lua-postprocess-list">
+            {postprocessReferences.map((reference) => (
+              <button type="button" className="lua-postprocess-row" key={reference.pathLabel} onClick={() => openRegexEditor(reference)}>
+                <div className="lua-postprocess-rule"><code>{reference.pathLabel}</code><span>in</span><strong>{reference.fullPattern || reference.pattern}</strong></div>
+                <div className="lua-postprocess-output"><span>out</span><code>{reference.out === '' ? '（空字符串：删除匹配内容）' : reference.out || '（未设置）'}</code></div>
+                <Code2 size={15} />
+              </button>
+            ))}
+            {!postprocessReferences.length && <div className="lua-simple-empty">没有聊天后处理规则。</div>}
+          </div>
+        </section>
       </div>
 
-      <div className="lua-management-grid">
-        <div className="lua-panel lua-segment-panel">
+      <section className="lua-panel lua-static-regex-panel">
+        <div className="lua-panel-header">
+          <div><h2>静态正则校验</h2><span>仅显示可以在卡片文本中验证命中数的规则</span></div>
+          <div className="lua-panel-header-actions">
+            <button className="secondary-button" onClick={() => void openRegexPreview()} disabled={loading || regexPreviewLoading || regexRunning || !regexReferenceCount}>
+              {regexPreviewLoading ? <RefreshCw className="spin" size={14} /> : <ShieldCheck size={14} />}逐条分析
+            </button>
+          </div>
+        </div>
+        <div className="lua-static-regex-list">
+          {staticRegexReferences.map((reference) => {
+            const mismatch = !reference.dynamicDisplay && reference.originalMatches !== reference.draftMatches && reference.forcePassed !== true;
+            return <button type="button" className={`lua-static-regex-row${mismatch ? ' problem' : ''}`} key={reference.pathLabel} onClick={() => openRegexEditor(reference)}>
+              <code>{reference.pathLabel}</code><span>{reference.fullPattern || reference.pattern}</span><em>{mismatch ? `命中异常：${reference.originalMatches} → ${reference.draftMatches}` : reference.dynamicDisplay ? '动态展示规则' : '命中已保持'}</em><ArrowRight size={14} />
+            </button>;
+          })}
+          {!staticRegexReferences.length && <div className="lua-simple-empty">本模块的正则均在回复生成后执行，因此不显示静态命中校验。</div>}
+        </div>
+      </section>
+
+      <div className="lua-detection-grid">
+        <section className="lua-panel lua-detection-card lua-script-detection">
+          <div className="lua-panel-header"><div><h2>脚本结构检测</h2><span>Lua 代码块、控制引用和语法状态</span></div><Code2 size={17} /></div>
+          <div className="lua-detection-result"><strong>{report.hasModule ? '已完成扫描' : '不适用'}</strong><span>{report.hasModule ? `发现 ${report.sourceCount} 个 Lua 代码块、${report.controlReferenceCount} 个控制引用。` : '当前卡片没有 Risu 模块。'}</span></div>
+          {syntaxIssues.length > 0 && <div className="lua-detection-alert">发现 {syntaxIssues.length} 条 Lua 语法问题，见下方语法检测。</div>}
+          <button type="button" className="secondary-button lua-detection-action" onClick={onScan}><Search size={14} />重新扫描脚本</button>
+        </section>
+
+        <section className="lua-panel lua-detection-card lua-syntax-detection">
+          <div className="lua-panel-header"><div><h2>Lua 语法检测</h2><span>逐条定位到真实错误代码行</span></div><ShieldCheck size={17} /></div>
+          <div className={`lua-detection-result ${syntaxIssues.length ? 'problem' : 'success'}`}><strong>{syntaxIssues.length ? `发现 ${syntaxIssues.length} 条问题` : '语法通过'}</strong><span>{syntaxIssues.length ? '可在下方直接编辑错误行并重新校验。' : '当前没有待修复的 Lua 语法片段。'}</span></div>
+          {syntaxIssues.length > 0 && <button type="button" className="secondary-button lua-detection-action" onClick={() => document.getElementById('lua-syntax-detection-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><ArrowRight size={14} />查看语法问题</button>}
+        </section>
+
+        <section className="lua-panel lua-detection-card lua-control-detection">
+          <div className="lua-panel-header"><div><h2>Lua 控制引用检测</h2><span>控制标记、模板和运行时引用</span></div><SlidersHorizontal size={17} /></div>
+          <div className={`lua-detection-result ${report.blockerCount ? 'problem' : 'success'}`}><strong>{luaControlReferences.length} 个控制引用</strong><span>{report.blockerCount ? `${report.blockerCount} 个阻断项需要处理。` : '当前没有控制引用阻断。'}</span></div>
+          {luaControlReferences.length > 0 && <div className="lua-detection-list">{luaControlReferences.slice(0, 4).map((reference) => <code key={reference.pathLabel}>{reference.pathLabel}</code>)}{luaControlReferences.length > 4 && <span>另有 {luaControlReferences.length - 4} 个</span>}</div>}
+        </section>
+
+        <section className="lua-panel lua-detection-card lua-runtime-regex-detection">
+          <div className="lua-panel-header"><div><h2>运行时展示正则</h2><span>消息展示阶段执行，独立于静态命中校验</span></div><Code2 size={17} /></div>
+          <div className="lua-detection-result success"><strong>{runtimeDisplayReferences.length} 条运行时规则</strong><span>{runtimeDisplayReferences.length ? '只验证规则编译、捕获组和替换模板。' : '当前没有消息展示阶段的正则规则。'}</span></div>
+          {runtimeDisplayReferences.length > 0 && <button type="button" className="secondary-button lua-detection-action" onClick={() => document.getElementById('lua-runtime-regex-detection-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><ArrowRight size={14} />查看运行时规则</button>}
+        </section>
+
+        <section className="lua-panel lua-detection-card lua-portrait-detection">
+          <div className="lua-panel-header"><div><h2>专有名词检测</h2><span>立绘匹配名称与目标语言别名</span></div><Search size={17} /></div>
+          <div className={`lua-detection-result ${report.portraitMissingCount ? 'problem' : 'success'}`}><strong>{report.portraitCandidateCount} 个候选</strong><span>{report.portraitFeatureDetected ? `${report.portraitCoveredCount} 个已有别名，${report.portraitMissingCount} 个待补。` : '未检测到立绘匹配功能。'}</span></div>
+          {report.portraitFeatureDetected && <button type="button" className="secondary-button lua-detection-action" onClick={() => document.getElementById('lua-portrait-detection-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}><ArrowRight size={14} />查看名称候选</button>}
+        </section>
+
+        <section className="lua-panel lua-detection-card lua-router-detection">
+          <div className="lua-panel-header"><div><h2>图片路由检测</h2><span>只检查已识别的路由阻断模式</span></div><Wrench size={17} /></div>
+          <div className={`lua-detection-result ${report.routerRepair.canApply ? 'problem' : 'success'}`}><strong>{report.routerRepair.canApply ? `发现 ${report.routerRepair.findings.length} 个问题` : '路由检查通过'}</strong><span>{report.routerRepair.canApply ? '仅显示可精确预览的局部修改。' : '当前没有匹配到已知路由阻断模式。'}</span></div>
+          {report.routerRepair.canApply && <button type="button" className="secondary-button lua-detection-action" onClick={() => void openRouterPreview()} disabled={loading || routerPreviewLoading}><Wrench size={14} />查看修改对比</button>}
+        </section>
+
+        <section className="lua-panel lua-detection-card lua-export-detection">
+          <div className="lua-panel-header"><div><h2>导出完整性检测</h2><span>导出前执行最终保护校验</span></div><FileCheck2 size={17} /></div>
+          <div className={`lua-detection-result ${report.blockerCount ? 'problem' : 'success'}`}><strong>{report.blockerCount ? `${report.blockerCount} 个阻断` : '可以导出'}</strong><span>{report.warningCount ? `${report.warningCount} 条提醒会随导出回验。` : '没有待处理提醒。'}</span></div>
+          <button type="button" className="primary-button lua-detection-action" onClick={onOpenExport}><FileCheck2 size={14} />{report.blockerCount ? '保存并重新校验' : '保存并导出'}</button>
+        </section>
+      </div>
+
+      <div className="lua-detail-grid">
+        <section className="lua-panel lua-segment-panel" id="lua-portrait-detection-detail">
           <div className="lua-panel-header">
             <div><h2>专有名词匹配候选</h2><span>点击候选只展开详情，不会离开本页</span></div>
           </div>
@@ -921,89 +1029,44 @@ export function LuaManagementView({
             })}
             {!filteredCandidates.length && <div className="table-empty">{report.portraitFeatureDetected ? '未发现可安全判定的专有名词候选' : '未检测到立绘匹配功能，不处理普通 Lua 文本'}</div>}
           </div>
-        </div>
+        </section>
 
-        <aside className="lua-side-column">
-          <div className="lua-panel">
-            <div className="lua-panel-header"><div><h2>控制规则校验</h2><span>与导出使用同一份已保存草稿；只列出当前导出阻断引用</span></div><div className="lua-panel-header-actions"><button type="button" className="secondary-button" disabled={!regexReferenceCount} onClick={() => { setOnlyProblemReferences(false); const first = report.controlReferences.find((reference) => reference.kind === 'regex' && reference.originalMatches !== reference.draftMatches && reference.forcePassed !== true) ?? report.controlReferences.find((reference) => reference.kind === 'regex'); if (first) openRegexEditor(first); }}><Code2 size={14} />人工编辑正则</button><ShieldCheck size={17} /></div></div>
-            <div className="lua-reference-list">
-              <div className="lua-reference-search search-input"><Search size={14} /><input aria-label="搜索控制引用" value={referenceQuery} onChange={(event) => setReferenceQuery(event.target.value)} placeholder="搜索规则或路径，例如 regex.41" /></div>
-              <label className="lua-reference-filter"><input type="checkbox" checked={onlyProblemReferences} onChange={(event) => setOnlyProblemReferences(event.target.checked)} />仅看导出阻断 <span>{matchingReferences.length} / {allMatchingReferences.length}</span></label>
-              {visibleReferences.map((reference) => {
-                const key = `${reference.pathLabel}:${reference.literal}`;
-                const selected = selectedReferenceKey === key;
-                const forcePassed = reference.kind === 'regex' && reference.forcePassed === true;
-                const mismatch = reference.kind === 'regex' && !reference.dynamicDisplay && reference.originalMatches !== reference.draftMatches && !forcePassed;
-                return <div className={`lua-reference-wrap${selected ? ' selected' : ''}`} key={key}>
-                  <button type="button" className="lua-reference" onClick={() => setSelectedReferenceKey(selected ? null : key)}><code>{reference.literal}</code><span>{reference.kind === 'regex' ? '正则' : 'Lua'} · {reference.pathLabel}</span>{forcePassed ? <span className="lua-reference-status forced">已人工强制通过：{reference.originalMatches} → {reference.draftMatches}</span> : mismatch ? <span className="lua-reference-status problem">命中异常：{reference.originalMatches} → {reference.draftMatches}</span> : reference.dynamicDisplay ? <span className="lua-reference-status ok">动态展示：样本参考</span> : reference.kind === 'regex' ? <span className="lua-reference-status ok">命中已保持</span> : null}{reference.kind === 'regex' && reference.addedAlternatives?.length ? <span className="lua-reference-target">阶段 2 已合并：{reference.addedAlternatives.join('、')}</span> : null}<ArrowRight size={13} /></button>
-                  {selected && reference.kind === 'regex' && <div className="lua-reference-detail"><div><strong>目标语言并列项</strong><span>{reference.addedAlternatives?.length ? reference.addedAlternatives.join('、') : '暂无新增'}</span></div><div><strong>当前规则</strong><code>{reference.fullPattern || reference.pattern}</code></div><div><strong>命中数量</strong><span>原文 {reference.originalMatches ?? 0} · 当前稿 {reference.draftMatches ?? 0}{reference.dynamicDisplay ? '（动态展示规则，样本参考）' : ''}</span></div>{reference.dynamicDisplay && <div className="lua-reference-force-note"><strong>运行时校验</strong><span>此规则在消息展示时执行，已改为检查正则编译、捕获组和换行替换模板，不再要求静态卡片命中数量一致。</span></div>}{forcePassed && <div className="lua-reference-force-note"><strong>人工确认</strong><span>已放弃本条规则的命中数量一致性检测；规则文本或当前命中数变化后会重新阻断。</span></div>}<div><strong>原文命中</strong><span>{summarizeMatchSamples(reference.originalSamples)}</span></div><div><strong>当前稿命中</strong><span>{summarizeMatchSamples(reference.draftSamples)}</span></div><div className="lua-reference-editor-action"><span>可先测试未保存规则；保存后会写入 Lua 草稿并立即重新校验。</span><button type="button" className="secondary-button" onClick={() => openRegexEditor(reference)}><Code2 size={14} />人工编辑并测试</button></div></div>}
-                </div>;
-              })}
-              {!report.controlReferences.length && <p className="lua-empty-copy">未发现登记的控制引用。</p>}
-              {!!report.controlReferences.length && !matchingReferences.length && <p className="lua-empty-copy">当前没有导出阻断引用；取消“仅看导出阻断”可查看全部引用。</p>}
-              {matchingReferences.length > 0 && <div className="lua-pagination"><button className="secondary-button" disabled={referencePage <= 1} onClick={() => setReferencePage((page) => Math.max(1, page - 1))}>上一页</button><span>第 {referencePage} / {referencePageCount} 页 · 共 {matchingReferences.length} 条</span><button className="secondary-button" disabled={referencePage >= referencePageCount} onClick={() => setReferencePage((page) => Math.min(referencePageCount, page + 1))}>下一页</button></div>}
-            </div>
+        <section className="lua-panel lua-runtime-regex-panel" id="lua-runtime-regex-detection-detail">
+          <div className="lua-panel-header"><div><h2>运行时展示正则详情</h2><span>消息展示时执行；不以静态卡片命中数作为通过条件</span></div><Code2 size={17} /></div>
+          <div className="lua-runtime-regex-list">
+            {runtimeDisplayReferences.map((reference) => (
+              <button type="button" className="lua-runtime-regex-row" key={reference.pathLabel} onClick={() => openRegexEditor(reference)}>
+                <code>{reference.pathLabel}</code><span>{reference.fullPattern || reference.pattern}</span><em>运行时编译校验</em><ArrowRight size={14} />
+              </button>
+            ))}
+            {!runtimeDisplayReferences.length && <div className="lua-simple-empty">没有消息展示阶段的正则规则。</div>}
           </div>
+        </section>
 
-          <div className="lua-panel">
-            <div className="lua-panel-header"><div><h2>问题与提醒</h2><span>阻断项必须在导出前处理</span></div><AlertTriangle size={17} /></div>
-            <div className="lua-issue-list">
-               {report.issues.map((issue, index) => {
-                 const issueKey = `${issue.kind}:${issue.pathLabel}:${index}`;
-                 const reference = issue.kind === 'control'
-                   ? report.controlReferences.find((item) => item.pathLabel === issue.pathLabel)
-                   : null;
-                 const expanded = expandedIssueKey === issueKey;
-                 return (
-                   <div className={`lua-issue ${issue.blocking ? 'blocking' : ''}`} key={issueKey}>
-                     <CircleAlert size={14} />
-                     <div className="lua-issue-content">
-                       <button type="button" className="lua-issue-toggle" onClick={() => setExpandedIssueKey(expanded ? null : issueKey)}>
-                         <strong>{ISSUE_LABELS[issue.kind]} · {issue.pathLabel}</strong>
-                         <span>{issue.message}</span>
-                         <em>{expanded ? '收起详情' : reference ? '查看规则与命中文本' : '展开说明'}</em>
-                       </button>
-                       <small>{issue.kind === 'syntax'
-                         ? '已按解析器位置定位到原始 Lua 代码与当前稿错误行。'
-                         : issue.segmentIds.length
-                           ? `已关联 ${issue.segmentIds.length} 条原始 Lua 代码定位。`
-                           : '无法精确定位原始 Lua 代码行。'}</small>
-                       {expanded && (
-                         <div className="lua-issue-detail">
-                           {issue.kind === 'syntax' && <>
-                             <div><strong>错误位置</strong><span>{issue.line ? `第 ${issue.line} 行，第 ${issue.column ?? '?'} 列` : '解析器未返回行列'}</span></div>
-                             <div className="lua-issue-compare">
-                               <div><strong>原始代码</strong><code>{issue.sourceLine || '（未提供）'}</code></div>
-                               <div><strong>当前代码</strong><code>{issue.draftLine || '（未提供）'}</code></div>
-                             </div>
-                             <div className="lua-issue-actions">
-                               <button type="button" className="secondary-button" onClick={() => focusSyntaxEditor(issue, index)}><Code2 size={14} />在片段编辑器中查看</button>
-                             </div>
-                           </>}
-                           {reference?.kind === 'regex' && <>
-                             <div><strong>目标语言并列项</strong><span>{reference.addedAlternatives?.length ? reference.addedAlternatives.join('、') : '暂无新增'}</span></div>
-                             <div><strong>当前规则</strong><code>{reference.fullPattern || reference.pattern}</code></div>
-                             <div><strong>命中数量</strong><span>原文 {reference.originalMatches ?? 0} · 当前稿 {reference.draftMatches ?? 0}</span></div>
-                             <div><strong>原文命中片段</strong><span>{summarizeMatchSamples(reference.originalSamples)}</span></div>
-                             <div><strong>当前稿命中片段</strong><span>{summarizeMatchSamples(reference.draftSamples)}</span></div>
-                           </>}
-                         </div>
-                       )}
-                     </div>
-                   </div>
-                 );
-               })}
-              {!report.issues.length && <p className="lua-empty-copy">当前没有发现问题，可以继续导出。</p>}
-            </div>
-            <button className="primary-button lua-export-button" onClick={onOpenExport}><FileCheck2 size={16} />{report.blockerCount ? '保存并重新校验' : '保存并导出'}</button>
+        <section className="lua-panel lua-export-issues-panel">
+          <div className="lua-panel-header"><div><h2>导出校验问题</h2><span>按检测类型归类；阻断项必须在导出前处理</span></div><AlertTriangle size={17} /></div>
+          <div className="lua-issue-list">
+            {report.issues.filter((issue) => issue.kind !== 'syntax').map((issue, index) => {
+              const reference = issue.kind === 'control'
+                ? report.controlReferences.find((item) => item.pathLabel === issue.pathLabel)
+                : null;
+              return <div className={`lua-issue ${issue.blocking ? 'blocking' : ''}`} key={`${issue.kind}:${issue.pathLabel}:${index}`}>
+                <CircleAlert size={14} />
+                <div className="lua-issue-content">
+                  <strong>{ISSUE_LABELS[issue.kind]} · {issue.pathLabel}</strong>
+                  <span>{issue.message}</span>
+                  {reference?.kind === 'regex' && <button type="button" className="secondary-button lua-issue-open-rule" onClick={() => openRegexEditor(reference)}><Code2 size={14} />打开规则</button>}
+                </div>
+              </div>;
+            })}
+            {!report.issues.some((issue) => issue.kind !== 'syntax') && <p className="lua-empty-copy">当前没有其他导出校验问题。</p>}
           </div>
-        </aside>
+        </section>
       </div>
 
-      <details className="lua-editor-panel lua-fallback-editor" open={luaEditorOpen} onToggle={(event) => setLuaEditorOpen(event.currentTarget.open)}>
-        <summary>Lua 片段编辑器</summary>
-        <div className="lua-panel-header"><div><h2>Lua 片段编辑器</h2><span>每个语法错误都显示真实 Lua 片段；前后 2 行用于判断上下文，红色行是可编辑的错误行。</span></div><Code2 size={17} /></div>
-        <div className="lua-snippet-list">
+      <section className="lua-panel lua-syntax-detail" id="lua-syntax-detection-detail">
+        <div className="lua-panel-header"><div><h2>Lua 语法问题</h2><span>每个错误显示真实 Lua 片段；前后 2 行用于判断上下文，红色行可直接编辑。</span></div><Code2 size={17} /></div>
+        {syntaxIssues.length > 0 ? <div className="lua-snippet-list">
           {syntaxIssues.map((issue, index) => {
             const reportIssueIndex = report.issues.findIndex((item) => item.kind === 'syntax' && item.pathLabel === issue.pathLabel && item.line === issue.line);
             const issueKey = `${issue.kind}:${issue.pathLabel}:${reportIssueIndex >= 0 ? reportIssueIndex : index}`;
@@ -1053,11 +1116,14 @@ export function LuaManagementView({
               </div>
             </article>;
           })}
-          {!syntaxIssues.length && <div className="table-empty">当前没有待修复的 Lua 语法片段。</div>}
-        </div>
-      </details>
+        </div> : <div className="lua-simple-empty">当前没有待修复的 Lua 语法片段。</div>}
+      </section>
 
-      <div className="lua-footnote"><Code2 size={15} /><span>Lua 管理页只处理脚本、正则和别名；可翻译文本统一在审核页修改，语法错误只在上方按真实代码行修复。</span></div>
+      <div className="lua-maintenance-row">
+        <button className="danger-button" onClick={() => void onResetLuaDraft()} disabled={loading || !report.hasModule} title="仅恢复 Lua 模块草稿，不影响卡片正文和翻译结果"><RotateCcw size={16} />恢复原始 Lua 草稿</button>
+      </div>
+
+      <div className="lua-footnote"><Code2 size={15} /><span>脚本管理页只处理脚本、正则和别名；可翻译文本统一在审核页修改，语法错误只在上方按真实代码行修复。</span></div>
     </section>
   );
 }

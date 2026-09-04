@@ -18,6 +18,7 @@ export const WORKBENCH_DEFAULTS = {
   webDirectory: 'dist',
   translation: {
     apiBaseUrl: 'https://api.openai.com/v1',
+    streamingEnabled: true,
     sourceLanguage: 'auto',
     fallbackLanguage: 'en',
     targetLanguage: 'zh-CN',

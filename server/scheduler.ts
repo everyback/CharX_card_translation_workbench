@@ -6,6 +6,7 @@ import {
   applyRisuRegexCoverageProposals,
   countRegexMatchesInStrings,
   isRisuDisplayFormattingRegexRule,
+  isRisuOutputPostprocessRegexRule,
   isZeroWidthCardinalityTrigger,
   applyRisuRegexAlternativeProposals,
   localTranslationControlFragments,
@@ -31,6 +32,7 @@ export interface RuntimeSettings {
   apiBaseUrl: string;
   apiKey: string;
   model: string;
+  streamingEnabled: boolean;
   sourceLanguage: string;
   fallbackLanguage: string;
   targetLanguage: string;
@@ -101,6 +103,8 @@ export interface RisuRegexLanguageEntry {
   out: string;
   /** Risu editdisplay executes against runtime messages, not card source text. */
   dynamicDisplay?: boolean;
+  /** Risu editoutput post-processes generated chat replies at runtime. */
+  runtimePostprocess?: boolean;
   sourceSamples: string[];
   draftSamples: string[];
   sourceMatches?: string[];
@@ -144,6 +148,7 @@ export interface RegexLanguagePayloadSummary {
   budgetChars: number;
   contextChars: number;
   dynamicDisplay?: boolean;
+  runtimePostprocess?: boolean;
   strata: { coverageDifference: number; textDifference: number; stable: number };
   formatProbe?: {
     kind: string;
@@ -162,12 +167,105 @@ interface RuntimeAliasFollowUpResult {
   failed: number;
 }
 
+function chatContentText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(chatContentText).join('');
+  if (value && typeof value === 'object') {
+    const text = (value as Record<string, unknown>).text;
+    return typeof text === 'string' ? text : '';
+  }
+  return '';
+}
+
+/** Consume an OpenAI-compatible SSE body without exposing partial translations. */
+export async function readStreamingMessageContent(body: ReadableStream<Uint8Array> | null): Promise<string> {
+  if (!body) throw new Error('模型接口没有返回可读取的文本。');
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+
+  const processEvent = (event: string) => {
+    const data = event.split(/\r?\n/u)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).replace(/^ /u, ''))
+      .join('\n')
+      .trim();
+    if (!data || data === '[DONE]') return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      throw new Error('模型接口流式响应格式无效。');
+    }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const error = (parsed as Record<string, unknown>).error;
+      if (error) throw new Error(`模型接口流式错误：${JSON.stringify(error).slice(0, 800)}`);
+      const choices = (parsed as Record<string, unknown>).choices;
+      if (Array.isArray(choices)) {
+        for (const choice of choices) {
+          if (!choice || typeof choice !== 'object') continue;
+          const row = choice as Record<string, unknown>;
+          const delta = row.delta && typeof row.delta === 'object' ? row.delta as Record<string, unknown> : undefined;
+          const message = row.message && typeof row.message === 'object'
+            ? row.message as Record<string, unknown>
+            : undefined;
+          content += chatContentText(delta?.content ?? message?.content);
+        }
+      }
+    }
+  };
+
+  const consumeEvents = () => {
+    while (true) {
+      const boundary = /\r?\n\r?\n/u.exec(buffer);
+      if (!boundary || boundary.index == null) return;
+      processEvent(buffer.slice(0, boundary.index));
+      buffer = buffer.slice(boundary.index + boundary[0].length);
+    }
+  };
+
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      consumeEvents();
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) processEvent(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+  if (!content) throw new Error('模型接口没有返回可读取的文本。');
+  return content;
+}
+
+async function readModelResponseContent(response: Response, streamingEnabled: boolean): Promise<string> {
+  const contentType = response.headers.get('content-type') || '';
+  if (streamingEnabled && /text\/event-stream/i.test(contentType)) return readStreamingMessageContent(response.body);
+  const raw = await response.text();
+  if (streamingEnabled && /^data:\s*/m.test(raw)) {
+    const encoder = new TextEncoder();
+    return readStreamingMessageContent(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(raw));
+        controller.close();
+      },
+    }));
+  }
+  let result: Record<string, unknown>;
+  try {
+    result = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new Error('模型接口响应格式无效。');
+  }
+  return extractMessageContent(result);
+}
+
 const runningJobs = new Map<string, AbortController>();
 export const DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS = 120;
 export const MAX_MODEL_REQUEST_TIMEOUT_SECONDS = 86_400;
-export const MAX_TRANSLATION_CONCURRENCY = 8;
-export const MAX_TRANSLATION_BATCH_ITEMS = 8;
-export const MAX_TRANSLATION_BATCH_CHARS = 40_000;
 const MAX_REGEX_ANALYSIS_SAMPLE_COUNT = 3;
 const MAX_REGEX_ANALYSIS_SAMPLE_CHARS = 600;
 const MAX_REGEX_COVERAGE_RECORDS = 240;
@@ -205,6 +303,7 @@ export function publicSettings() {
     apiBaseUrl: settings.apiBaseUrl,
     apiKeyConfigured: Boolean(settings.apiKey),
     model: settings.model,
+    streamingEnabled: settings.streamingEnabled,
     sourceLanguage: settings.sourceLanguage,
     fallbackLanguage: settings.fallbackLanguage,
     targetLanguage: settings.targetLanguage,
@@ -222,6 +321,7 @@ export function publicSettings() {
 export async function updateSettings(input: Record<string, unknown>) {
   if (typeof input.apiBaseUrl === 'string') await saveSetting('api_base_url', normalizeBaseUrl(input.apiBaseUrl));
   if (typeof input.model === 'string') await saveSetting('model', input.model.trim());
+  if (input.streamingEnabled != null) await saveSetting('streaming_enabled', input.streamingEnabled === true || input.streamingEnabled === 'true' || input.streamingEnabled === 1 ? '1' : '0');
   if (typeof input.sourceLanguage === 'string') await saveSetting('source_language', normalizeLanguage(input.sourceLanguage, 'auto'));
   if (typeof input.fallbackLanguage === 'string') await saveSetting('fallback_language', normalizeLanguage(input.fallbackLanguage, 'en'));
   if (typeof input.targetLanguage === 'string') await saveSetting('target_language', normalizeLanguage(input.targetLanguage, 'zh-CN'));
@@ -230,9 +330,9 @@ export async function updateSettings(input: Record<string, unknown>) {
   }
   if (typeof input.apiKey === 'string' && input.apiKey.trim()) await saveSetting('api_key', input.apiKey.trim());
   if (input.clearApiKey === true) await saveSetting('api_key', '');
-  if (input.concurrency != null) await saveSetting('concurrency', String(normalizeBoundedInteger(input.concurrency, WORKBENCH_DEFAULTS.translation.concurrency, 1, MAX_TRANSLATION_CONCURRENCY)));
-  if (input.batchItems != null) await saveSetting('batch_items', String(normalizeBoundedInteger(input.batchItems, WORKBENCH_DEFAULTS.translation.batchItems, 1, MAX_TRANSLATION_BATCH_ITEMS)));
-  if (input.batchChars != null) await saveSetting('batch_chars', String(normalizeBoundedInteger(input.batchChars, WORKBENCH_DEFAULTS.translation.batchChars, 1000, MAX_TRANSLATION_BATCH_CHARS)));
+  if (input.concurrency != null) await saveSetting('concurrency', String(positiveInteger(input.concurrency, WORKBENCH_DEFAULTS.translation.concurrency)));
+  if (input.batchItems != null) await saveSetting('batch_items', String(positiveInteger(input.batchItems, WORKBENCH_DEFAULTS.translation.batchItems)));
+  if (input.batchChars != null) await saveSetting('batch_chars', String(minimumInteger(input.batchChars, 1000, WORKBENCH_DEFAULTS.translation.batchChars)));
   if (input.requestTimeoutSeconds != null) await saveSetting('request_timeout_seconds', String(normalizeModelRequestTimeoutSeconds(input.requestTimeoutSeconds, WORKBENCH_DEFAULTS.translation.requestTimeoutSeconds)));
   if (typeof input.imageApiUrl === 'string') await saveSetting('image_api_url', input.imageApiUrl.trim());
   if (typeof input.imageModel === 'string') await saveSetting('image_model', input.imageModel.trim());
@@ -254,7 +354,7 @@ export async function analyzeProtocolSemantics(input: ProtocolAnalysisInput): Pr
       body: JSON.stringify({
         model: settings.model,
         temperature: 0.1,
-        stream: false,
+        stream: settings.streamingEnabled,
         messages: [
           {
             role: 'system',
@@ -286,8 +386,7 @@ export async function analyzeProtocolSemantics(input: ProtocolAnalysisInput): Pr
       const body = (await response.text()).slice(0, 800);
       throw new Error(`模型接口 ${response.status}：${body || response.statusText}`);
     }
-    const result = await response.json() as Record<string, unknown>;
-    return normalizeProtocolAnalysis(extractMessageContent(result), input);
+    return normalizeProtocolAnalysis(await readModelResponseContent(response, settings.streamingEnabled), input);
   });
 }
 
@@ -308,8 +407,8 @@ export function risuRegexLanguageSystemPrompt(mode: RisuRegexLanguageAnalysisInp
 
   return [
     ...shared,
-    '当前任务模式：coverage。除非 entry.dynamicDisplay=true，否则 fullCoverage.sourceCount/draftCount 是整卡片扫描的权威命中总数；fullCoverage.records 只是按差异优先、稳定哈希分层抽样后的证据，不是完整集合，不能因为 selectedRecords 不全就否定规则。样本文本优先围绕真实命中位置截取，不是字段开头摘要；【...】标出实际命中，〔...〕标出译文中同类但未命中的边界见证。优先处理导致命中数变化的语言结构。',
-    '当 entry.dynamicDisplay=true 时，规则用于 Risu 运行时消息展示，而不是卡片静态文案匹配。此类 payload 不会附带卡片素材、静态命中数量或空白探针；不要臆测这些数据。只需让规则能处理目标语言回复文本的分词、中文无空格、引号与标点边界；必须保留 type、out、捕获组数量和顺序，out 只能保留既有捕获组引用与换行。',
+    '当前任务模式：coverage。除非 entry.dynamicDisplay=true 或 entry.runtimePostprocess=true，否则 fullCoverage.sourceCount/draftCount 是整卡片扫描的权威命中总数；fullCoverage.records 只是按差异优先、稳定哈希分层抽样后的证据，不是完整集合，不能因为 selectedRecords 不全就否定规则。样本文本优先围绕真实命中位置截取，不是字段开头摘要；【...】标出实际命中，〔...〕标出译文中同类但未命中的边界见证。优先处理导致命中数变化的语言结构。',
+    '当 entry.dynamicDisplay=true 或 entry.runtimePostprocess=true 时，规则分别用于 Risu 运行时消息展示或聊天回复后处理，而不是卡片静态文案匹配。此类 payload 不会附带卡片素材、静态命中数量或空白探针；不要臆测这些数据。只需让规则能处理目标语言回复文本的分词、中文无空格、引号与标点边界；必须保留 type、out、捕获组数量和顺序。editdisplay 的 out 只能保留既有捕获组引用与换行；editoutput 的 out 必须原样保留。',
     '本模式可返回完整 pattern 候选，修复目标语言间的分词与边界语法差异，包括但不限于：空格或制表符的必需性/可选性、中文等连续书写语言通常无词间空格、英语/韩语等依赖空格分词的结构、日语边界、引号边界、连接词、Unicode 字符范围，以及为此必要的零宽断言、分组和量词。不要只靠 additions 掩盖此类语法差异：若命中变化源于分词或边界规则，必须在 pattern 中准确修改对应正则语法。',
     '如果 payload 中存在 formatProbe，它是诊断用的水平空白放宽探针，不是推荐规则：probe.pattern 只把当前规则中的水平空白要求临时放宽，probe.sourceMatchCount/probe.draftMatchCount 是同一探针在原文/当前稿上的计数，因此可能出现 1000+ 命中；baselineSourceMatchCount/baselineDraftMatchCount 才是严格规则的行级基线。探针计数可能因 HTML 属性、代码或英文文本而过度命中，必须结合 probe.records 区分中文连续书写的合法无空格边界与这些误匹配；不得直接把 + 全局改成 *，必要时使用目标语言条件分支、零宽边界或更窄的字符范围。',
     '完整 pattern 候选必须保留原规则对原文的覆盖范围、所有已有并列项，以及捕获组的数量和顺序。候选不可靠时返回空 proposals。仅需增加词语并列项时，才使用 anchorAlternatives 和 additions；additions 只能是普通文字字面量，不得含正则语法（\\、|、括号、方括号、量词、锚点或换行）。',
@@ -325,7 +424,7 @@ export async function analyzeRisuRegexLanguageAlternatives(
   const settings = runtimeSettings();
   if (!settings.apiKey || !settings.model || !input.entries.length) return [];
   assertProviderReady(settings);
-  const entries = input.entries.slice(0, MAX_TRANSLATION_BATCH_ITEMS).map(regexLanguagePayloadEntry);
+  const entries = input.entries.map(regexLanguagePayloadEntry);
   const timeoutSignal = AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds));
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   return withProviderSlot(settings.concurrency, 'risu-regex-language-analysis', async () => {
@@ -338,7 +437,7 @@ export async function analyzeRisuRegexLanguageAlternatives(
       body: JSON.stringify({
         model: settings.model,
         temperature: 0,
-        stream: false,
+        stream: settings.streamingEnabled,
         messages: [
           {
             role: 'system',
@@ -356,8 +455,7 @@ export async function analyzeRisuRegexLanguageAlternatives(
       const body = (await response.text()).slice(0, 800);
       throw new Error(`正则语言适配模型接口 ${response.status}：${body || response.statusText}`);
     }
-    const result = await response.json() as Record<string, unknown>;
-    return normalizeRisuRegexLanguageAlternatives(extractMessageContent(result), input);
+    return normalizeRisuRegexLanguageAlternatives(await readModelResponseContent(response, settings.streamingEnabled), input);
   }, requestSignal);
 }
 
@@ -424,7 +522,7 @@ export async function segmentRuntimeNames(input: RuntimeNameCandidate[]): Promis
       body: JSON.stringify({
         model: settings.model,
         temperature: 0,
-        stream: false,
+        stream: settings.streamingEnabled,
         messages: [
           {
             role: 'system',
@@ -445,8 +543,7 @@ export async function segmentRuntimeNames(input: RuntimeNameCandidate[]): Promis
       const body = (await response.text()).slice(0, 800);
       throw new Error(`名称分词模型接口 ${response.status}：${body || response.statusText}`);
     }
-    const result = await response.json() as Record<string, unknown>;
-    return normalizeRuntimeNameSegments(extractMessageContent(result), candidates);
+    return normalizeRuntimeNameSegments(await readModelResponseContent(response, settings.streamingEnabled), candidates);
   });
 }
 
@@ -478,7 +575,7 @@ export async function translateRuntimeAliases(
       body: JSON.stringify({
         model: settings.model,
         temperature: 0,
-        stream: false,
+        stream: settings.streamingEnabled,
         messages: [
           {
             role: 'system',
@@ -499,8 +596,7 @@ export async function translateRuntimeAliases(
       const body = (await response.text()).slice(0, 800);
       throw new Error(`运行时名称本地化接口 ${response.status}：${body || response.statusText}`);
     }
-    const result = await response.json() as Record<string, unknown>;
-    return normalizeRuntimeAliasTranslations(extractMessageContent(result), candidates, targetLanguage);
+    return normalizeRuntimeAliasTranslations(await readModelResponseContent(response, settings.streamingEnabled), candidates, targetLanguage);
   });
 }
 
@@ -572,6 +668,44 @@ export function scheduleJob(jobId: string): void {
   });
 }
 
+/**
+ * Requeue jobs left behind by a process restart or crash. The scheduler keeps
+ * its in-memory running map only for the lifetime of the process, so persisted
+ * queued/running jobs must be explicitly attached again when the server starts.
+ */
+export async function recoverInterruptedJobs(): Promise<number> {
+  const jobs = await db.prepare(`
+    SELECT id, project_id AS projectId
+    FROM jobs
+    WHERE status IN ('queued', 'running')
+    ORDER BY created_at
+  `).all() as Array<{ id: string; projectId: string }>;
+  if (!jobs.length) return 0;
+
+  const timestamp = now();
+  await db.transaction(async () => {
+    for (const job of jobs) {
+      // A process can die after claiming a batch. Return those items to the
+      // pending queue so the resumed job can account for every item.
+      await db.prepare(`
+        UPDATE job_items
+        SET status = 'pending', updated_at = ?
+        WHERE job_id = ? AND status = 'running'
+      `).run(timestamp, job.id);
+      await db.prepare(`
+        UPDATE jobs
+        SET status = 'queued', last_error = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running')
+      `).run(timestamp, job.id);
+      await db.prepare("UPDATE projects SET status = 'translating', updated_at = ? WHERE id = ?")
+        .run(timestamp, job.projectId);
+    }
+  });
+
+  for (const job of jobs) scheduleJob(job.id);
+  return jobs.length;
+}
+
 export function abortJob(jobId: string): void {
   runningJobs.get(jobId)?.abort();
 }
@@ -592,7 +726,7 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
     const runtimeAliasCandidates = jobProject?.projectId
       ? await prepareRuntimeAliasFollowUp(jobId, jobProject.projectId, initialSettings.targetLanguage)
       : [];
-    await log(jobId, 'info', `任务已进入调度队列，模型请求并发上限 ${initialSettings.concurrency}。`);
+    await log(jobId, 'info', `任务已进入调度队列，模型请求并发 ${initialSettings.concurrency} 路（正文翻译与阶段 2 共用同一模型通道）。`);
     if (controlLiterals.length) await log(jobId, 'info', `已保护 ${controlLiterals.length} 个脚本引用。`);
 
     while (!signal.aborted) {
@@ -752,8 +886,8 @@ async function translateProjectRegexLanguageAlternatives(
   );
   if (!entries.length) return { total: 0, added: 0, adapted: 0, failed: 0 };
 
-  const batches = splitRegexLanguageEntries(entries);
-  await log(jobId, 'info', `阶段 2 正在并发请求模型：${entries.length} 条 Lua 正则拆为 ${batches.length} 批，最多 ${Math.min(settings.concurrency, batches.length)} 路并发。`);
+  const batches = splitRegexLanguageEntries(entries, settings.batchItems, settings.batchChars);
+  await log(jobId, 'info', `阶段 2 正在并发请求模型：${entries.length} 条 Lua 正则拆为 ${batches.length} 批，按当前 ${settings.concurrency} 路共享模型通道调度。`);
   const results = await mapWithConcurrency(batches, Math.min(settings.concurrency, batches.length), async (batch, index) => {
     try {
       await log(jobId, 'info', `阶段 2 请求 ${index + 1}/${batches.length}：分析 ${batch.length} 条 Lua 正则。`);
@@ -795,13 +929,17 @@ async function translateProjectRegexLanguageAlternatives(
   return { total: entries.length, added, adapted, failed: failedEntries };
 }
 
-export function splitRegexLanguageEntries(entries: RisuRegexLanguageEntry[]): RisuRegexLanguageEntry[][] {
+export function splitRegexLanguageEntries(
+  entries: RisuRegexLanguageEntry[],
+  maxItems: number = WORKBENCH_DEFAULTS.translation.batchItems,
+  maxChars: number = WORKBENCH_DEFAULTS.translation.batchChars,
+): RisuRegexLanguageEntry[][] {
   const batches: RisuRegexLanguageEntry[][] = [];
   let batch: RisuRegexLanguageEntry[] = [];
   let chars = 0;
   for (const entry of entries) {
     const entryChars = JSON.stringify(regexLanguagePayloadEntry(entry)).length;
-    if (batch.length && (batch.length >= MAX_TRANSLATION_BATCH_ITEMS || chars + entryChars > MAX_TRANSLATION_BATCH_CHARS)) {
+    if (batch.length && (batch.length >= maxItems || chars + entryChars > maxChars)) {
       batches.push(batch);
       batch = [];
       chars = 0;
@@ -991,6 +1129,7 @@ function buildRegexModelPayload(
     type: entry.type.slice(0, 120),
     out: entry.out.slice(0, 1_500),
     dynamicDisplay: isRisuDisplayFormattingRegexRule({ type: entry.type, in: entry.pattern, out: entry.out }),
+    runtimePostprocess: isRisuOutputPostprocessRegexRule({ type: entry.type, in: entry.pattern, out: entry.out }),
     samples: samples.length ? samples : entry.sourceSamples.slice(0, MAX_REGEX_ANALYSIS_SAMPLE_COUNT).map((source, index) => ({ source: source.slice(0, MAX_REGEX_MODEL_TEXT_CHARS), draft: (entry.draftSamples[index] ?? '').slice(0, MAX_REGEX_MODEL_TEXT_CHARS) })),
     ...(sourceCount || draftCount || records.length ? { fullCoverage } : {}),
     ...(formatProbe ? { formatProbe } : {}),
@@ -1004,15 +1143,18 @@ function buildRegexModelPayload(
 export function regexLanguagePayloadEntry(entry: RisuRegexLanguageEntry): Record<string, unknown> {
   const dynamicDisplay = entry.dynamicDisplay === true
     || isRisuDisplayFormattingRegexRule({ type: entry.type, in: entry.pattern, out: entry.out });
-  if (dynamicDisplay) {
+  const runtimePostprocess = entry.runtimePostprocess === true
+    || isRisuOutputPostprocessRegexRule({ type: entry.type, in: entry.pattern, out: entry.out });
+  if (dynamicDisplay || runtimePostprocess) {
     return {
       pathLabel: entry.pathLabel,
       ...(entry.originalPattern ? { originalPattern: entry.originalPattern.slice(0, 1_500) } : {}),
       pattern: entry.pattern.slice(0, 1_500),
       type: entry.type.slice(0, 120),
       out: entry.out.slice(0, 1_500),
-      dynamicDisplay: true,
-      runtimeScope: 'Risu 运行时消息展示；不要从卡片静态素材推断行为。',
+      ...(dynamicDisplay ? { dynamicDisplay: true } : {}),
+      ...(runtimePostprocess ? { runtimePostprocess: true } : {}),
+      runtimeScope: dynamicDisplay ? 'Risu 运行时消息展示；不要从卡片静态素材推断行为。' : 'Risu 聊天回复后处理；不要从卡片静态素材命中数推断行为。',
       runtimeRequirement: '请适配目标语言回复文本的标点、引号、分词与中文无空格边界，同时保留 type、out、捕获组数量和捕获组顺序。',
     };
   }
@@ -1119,6 +1261,7 @@ export function regexLanguagePayloadSummary(entry: RisuRegexLanguageEntry): Rege
     budgetChars: Number(coverage?.budgetChars ?? MAX_REGEX_MODEL_CONTEXT_CHARS),
     contextChars: Number(coverage?.contextChars ?? JSON.stringify(payload).length),
     dynamicDisplay: payload.dynamicDisplay === true,
+    runtimePostprocess: payload.runtimePostprocess === true,
     strata: (coverage?.strata && typeof coverage.strata === 'object' ? coverage.strata : { coverageDifference: 0, textDifference: 0, stable: 0 }) as RegexLanguagePayloadSummary['strata'],
     ...(formatProbe ? {
       formatProbe: {
@@ -1270,13 +1413,14 @@ function runtimeSettings(): RuntimeSettings {
     apiBaseUrl: normalizeBaseUrl(setting('api_base_url') || defaults.apiBaseUrl),
     apiKey: setting('api_key') || '',
     model: setting('model') || '',
+    streamingEnabled: parseBooleanSetting(setting('streaming_enabled'), defaults.streamingEnabled),
     sourceLanguage: normalizeLanguage(setting('source_language'), defaults.sourceLanguage),
     fallbackLanguage: normalizeLanguage(setting('fallback_language'), defaults.fallbackLanguage),
     targetLanguage: normalizeLanguage(setting('target_language'), defaults.targetLanguage),
     languageBehaviorMode: (setting('language_behavior_mode') || defaults.languageBehaviorMode) === 'preserve' ? 'preserve' : 'target',
-    concurrency: normalizeBoundedInteger(setting('concurrency'), defaults.concurrency, 1, MAX_TRANSLATION_CONCURRENCY),
-    batchItems: normalizeBoundedInteger(setting('batch_items'), defaults.batchItems, 1, MAX_TRANSLATION_BATCH_ITEMS),
-    batchChars: normalizeBoundedInteger(setting('batch_chars'), defaults.batchChars, 1000, MAX_TRANSLATION_BATCH_CHARS),
+    concurrency: positiveInteger(setting('concurrency'), defaults.concurrency),
+    batchItems: positiveInteger(setting('batch_items'), defaults.batchItems),
+    batchChars: minimumInteger(setting('batch_chars'), 1000, defaults.batchChars),
     requestTimeoutSeconds: normalizeModelRequestTimeoutSeconds(setting('request_timeout_seconds'), defaults.requestTimeoutSeconds),
     imageApiUrl: (setting('image_api_url') || '').trim(),
     imageApiKey: setting('image_api_key') || '',
@@ -1305,10 +1449,12 @@ export function collectRegexLanguageEntries(
       : {};
     const currentPattern = typeof draftRule.in === 'string' && draftRule.in ? draftRule.in : rule.in;
     const dynamicDisplay = isRisuDisplayFormattingRegexRule(rule);
-    const samples = dynamicDisplay ? [] : collectRegexSamplePairsWithPatterns(originalCard, draftCard, rule.in, currentPattern)
+    const runtimePostprocess = isRisuOutputPostprocessRegexRule(rule);
+    const runtimeRule = dynamicDisplay || runtimePostprocess;
+    const samples = runtimeRule ? [] : collectRegexSamplePairsWithPatterns(originalCard, draftCard, rule.in, currentPattern)
       .filter((sample, item, all) => all.findIndex((candidate) => candidate.source === sample.source && candidate.draft === sample.draft) === item)
       .slice(0, 8);
-    const coverageRecords = dynamicDisplay ? [] : collectRegexCoveragePairsWithPatterns(originalCard, draftCard, rule.in, currentPattern)
+    const coverageRecords = runtimeRule ? [] : collectRegexCoveragePairsWithPatterns(originalCard, draftCard, rule.in, currentPattern)
       .filter((record, item, all) => all.findIndex((candidate) => candidate.pathLabel === record.pathLabel
       && candidate.sourceText === record.sourceText && candidate.draftText === record.draftText) === item)
       .slice(0, MAX_REGEX_COVERAGE_RECORDS);
@@ -1321,20 +1467,21 @@ export function collectRegexLanguageEntries(
       type: typeof rule.type === 'string' ? rule.type : '',
       out: typeof rule.out === 'string' ? rule.out : typeof draftRule.out === 'string' ? draftRule.out : '',
       dynamicDisplay,
+      runtimePostprocess,
       sourceSamples: coverageRecords.length ? coverageRecords.slice(0, 8).map((record) => record.sourceText) : samples.map((sample) => sample.source),
       draftSamples: coverageRecords.length ? coverageRecords.slice(0, 8).map((record) => record.draftText) : samples.map((sample) => sample.draft),
       sourceMatches,
       draftMatches,
       coveragePaths: coverageRecords.map((record) => record.pathLabel),
       coverageRecords,
-      formatProbe: dynamicDisplay ? undefined : buildRegexWhitespaceProbe(originalCard, draftCard, rule.in, currentPattern),
+      formatProbe: runtimeRule ? undefined : buildRegexWhitespaceProbe(originalCard, draftCard, rule.in, currentPattern),
       // Context is intentionally bounded, but the decision sent to the model
       // must use the same complete cardinality check as export validation.
       sourceMatchCount: countRegexMatchesInStrings(originalCard, rule.in),
       draftMatchCount: countRegexMatchesInStrings(draftCard, currentPattern),
     });
   });
-  return entries.slice(0, 80);
+  return entries;
 }
 
 export interface RegexCoveragePair {
@@ -1703,7 +1850,7 @@ async function requestTranslations(
     body: JSON.stringify({
       model: settings.model,
       temperature: 0.2,
-      stream: false,
+      stream: settings.streamingEnabled,
       messages: [
         {
           role: 'system',
@@ -1735,8 +1882,7 @@ async function requestTranslations(
     const body = (await response.text()).slice(0, 800);
     throw new Error(`模型接口 ${response.status}：${body || response.statusText}`);
   }
-  const result = await response.json() as Record<string, unknown>;
-  const content = extractMessageContent(result);
+  const content = await readModelResponseContent(response, settings.streamingEnabled);
   const translations = new Map<string, { text: string; qaFlags: string[] }>();
   for (const item of prepared) {
     const match = content.match(new RegExp(`<<<ID:${item.marker}>>>\\s*([\\s\\S]*?)\\s*<<<END>>>`));
@@ -1952,8 +2098,10 @@ function extractMessageContent(result: Record<string, unknown>): string {
   const choices = Array.isArray(result.choices) ? result.choices : [];
   const first = choices[0] as Record<string, unknown> | undefined;
   const message = first?.message as Record<string, unknown> | undefined;
-  if (typeof message?.content === 'string') return message.content;
-  if (typeof result.content === 'string') return result.content;
+  const messageContent = chatContentText(message?.content);
+  if (messageContent) return messageContent;
+  const resultContent = chatContentText(result.content);
+  if (resultContent) return resultContent;
   throw new Error('模型接口没有返回可读取的文本。');
 }
 
@@ -2037,16 +2185,15 @@ function normalizeLanguage(value: unknown, fallback: string): string {
   return normalized || fallback;
 }
 
+function parseBooleanSetting(value: string | undefined, fallback: boolean): boolean {
+  if (value == null) return fallback;
+  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+}
+
 function minimumInteger(value: unknown, min: number, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Number.MAX_SAFE_INTEGER, Math.max(min, Math.round(parsed)));
-}
-
-function normalizeBoundedInteger(value: unknown, fallback: number, min: number, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(parsed)));
 }
 
 function positiveInteger(value: unknown, fallback: number): number {
