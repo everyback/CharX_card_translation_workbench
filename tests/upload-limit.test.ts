@@ -5,7 +5,7 @@ import {
   resolveUploadLimitMib,
   uploadLimitBytes,
   uploadTooLargeMessage,
-} from '../server/upload-limit.js';
+} from '../server/utils/uploads/upload-limit.js';
 
 test('large card upload defaults to unlimited and accepts an override', () => {
   assert.equal(resolveUploadLimitMib(undefined), null);

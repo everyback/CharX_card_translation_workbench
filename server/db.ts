@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { AsyncDatabase } from './async-db.js';
-import { workbenchConfig } from './config.js';
-import { migrateLegacyStorage } from './storage-migration.js';
+import { workbenchConfig } from '../config/workbench.js';
+import { migrateLegacyStorage } from './repositories/storage-migration.js';
 
 mkdirSync(workbenchConfig.paths.dataRoot, { recursive: true });
 
@@ -296,4 +296,4 @@ async function addColumnIfMissing(table: string, column: string, definition: str
   }
 }
 
-export { resolveDatabaseWorkerCount } from './config.js';
+export { resolveDatabaseWorkerCount } from '../config/workbench.js';

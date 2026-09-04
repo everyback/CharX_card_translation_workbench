@@ -25,7 +25,7 @@ import {
   scanCard,
   scanRisuModule,
   validateRisuControlReferences,
-} from '../server/domain/card.js';
+} from '../server/domain/card/card.js';
 import {
   applyRisuModuleSegments,
   collectRuntimeAliasCandidates,
@@ -34,7 +34,7 @@ import {
   inspectTouhouRuntimeAliasCoverage,
   replaceRisuLuaLine,
   validateRisuLuaChanges,
-} from '../server/domain/risu-lua.js';
+} from '../server/domain/lua/risu-lua.js';
 import { normalizeRuntimeNameSegments, normalizeRisuRegexLanguageAlternatives } from '../server/scheduler.js';
 
 const card = {
@@ -58,6 +58,20 @@ test('scope presets keep script text opt-in', () => {
   assert.ok(standard.some((item) => item.category === 'greeting'));
   assert.equal(standard.some((item) => item.category === 'script-ui'), false);
   assert.ok(scripted.some((item) => item.category === 'script-ui'));
+});
+
+test('Risu view screen enum fields stay protected in all scope', () => {
+  const risuCard = {
+    viewScreen: 'none',
+    data: {
+      view_screen: 'emotion',
+      extensions: { viewScreen: 'imggen' },
+    },
+  };
+
+  const segments = scanCard(risuCard, 'all');
+
+  assert.deepEqual(segments, []);
 });
 
 test('regex diagnostics use bounded hit snippets', () => {

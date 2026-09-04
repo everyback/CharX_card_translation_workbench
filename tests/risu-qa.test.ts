@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { detectRisuRuntimeRisks, validateRisuTemplateChanges } from '../server/domain/risu-qa.js';
+import { detectRisuRuntimeRisks, validateRisuTemplateChanges } from '../server/domain/lua/risu-qa.js';
 
 test('Risu template QA catches newly malformed CSS values', () => {
   const original = {

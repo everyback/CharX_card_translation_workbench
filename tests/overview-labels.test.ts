@@ -5,7 +5,7 @@ import {
   cardSpecificationLabel,
   containerFormatLabel,
   platformExtensionLabels,
-} from '../src/features/card-inspection/overview-labels.js';
+} from '../src/pages/workbench/tabs/overview/model/overview-labels.js';
 
 test('overview separates character specifications from file containers', () => {
   assert.equal(cardSpecificationLabel('legacy_tavern_card'), 'Tavern Card V1');

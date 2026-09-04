@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyPortraitRouterChangeOverrides, applyPortraitRouterRepairs, applyPortraitRouterReviewDelta, inspectPortraitRouterRepairs } from '../server/domain/portrait-router-repair.js';
+import { applyPortraitRouterChangeOverrides, applyPortraitRouterRepairs, applyPortraitRouterReviewDelta, inspectPortraitRouterRepairs } from '../server/domain/lua/portrait-router-repair.js';
 
 const vulnerableRouter = `
 onOutput = async(function(id)

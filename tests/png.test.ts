@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { parseCardPng, writeCardPng } from '../server/domain/png.js';
+import { parseCardPng, writeCardPng } from '../server/domain/card/png.js';
 
 const transparentPixel = readFileSync(new URL('../node_modules/png-chunks-extract/test.png', import.meta.url));
 

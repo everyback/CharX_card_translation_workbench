@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRisuModule, parseRisuModule, readRisuModuleAsset, readRisuModuleAssetFromReader, readRisuModuleAssets, replaceRisuModuleAssets, writeRisuModule } from '../server/domain/risum.js';
+import { createRisuModule, parseRisuModule, readRisuModuleAsset, readRisuModuleAssetFromReader, readRisuModuleAssets, replaceRisuModuleAssets, writeRisuModule } from '../server/domain/card/risum.js';
 
 const originalModule = {
   name: 'Test module',

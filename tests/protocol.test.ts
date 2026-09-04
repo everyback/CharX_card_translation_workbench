@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyApprovedSegments, risuControlReferences, scanCard } from '../server/domain/card.js';
+import { applyApprovedSegments, risuControlReferences, scanCard } from '../server/domain/card/card.js';
 import {
   discoverProtocols,
   parseProtocols,
   protocolFieldReplacementIssue,
   type ProtocolSchemaRule,
-} from '../server/domain/protocol.js';
-import { discoverRisuRegexProtocols, mergeRegexProtocolEvidence } from '../server/domain/risu-regex-protocol.js';
-import { discoverRisuLuaProtocols, mergeLuaProtocolEvidence } from '../server/domain/risu-lua-protocol.js';
+} from '../server/domain/protocol/protocol.js';
+import { discoverRisuRegexProtocols, mergeRegexProtocolEvidence } from '../server/domain/protocol/risu-regex-protocol.js';
+import { discoverRisuLuaProtocols, mergeLuaProtocolEvidence } from '../server/domain/protocol/risu-lua-protocol.js';
 
 test('custom angle protocols are parsed into stable field ranges', () => {
   const source = '<news|Village Signboard Smashed Again|Clear / busy|1|Fourth incident this month.>';

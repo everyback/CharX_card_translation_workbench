@@ -5,7 +5,7 @@ import {
   languageDisplayName,
   normalizeLanguageBehaviorDirectives,
   reviewLanguageBehaviorDirectives,
-} from '../server/domain/language-directives.js';
+} from '../server/domain/translation/language-directives.js';
 
 test('language behavior directives follow the selected Chinese target', () => {
   const source = '人物内心使用韩语思考。人物书写韩文，人物使用한국어交流。';

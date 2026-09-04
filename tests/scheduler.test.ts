@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldSplitTranslationBatch } from '../server/domain/translation-errors.js';
-import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments } from '../server/domain/card.js';
+import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldSplitTranslationBatch } from '../server/domain/translation/translation-errors.js';
+import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments } from '../server/domain/card/card.js';
 import {
   chatCompletionsEndpoint,
   readStreamingMessageContent,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { inspectProjectOverview, inspectTavernCard } from '../server/domain/tavern-card.js';
+import { inspectProjectOverview, inspectTavernCard } from '../server/domain/card/tavern-card.js';
 
 test('Tavern card inspection summarizes V3 fields without returning the full payload', () => {
   const card = {

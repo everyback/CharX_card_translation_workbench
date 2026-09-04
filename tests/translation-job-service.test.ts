@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { AsyncDatabase } from '../server/async-db.js';
-import { createTranslationJobService } from '../server/application/translation-job-service.js';
+import { createTranslationJobService } from '../server/application/translation/translation-job-service.js';
 
 async function createJobDatabase(): Promise<{ database: AsyncDatabase; directory: string }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ctw-job-service-'));

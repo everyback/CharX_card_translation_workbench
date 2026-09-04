@@ -4,8 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { AsyncDatabase } from '../server/async-db.js';
-import { createExportService, ProjectWorkflowError } from '../server/application/export-service.js';
-import { createNamespaceReviewService } from '../server/application/namespace-review-service.js';
+import { createExportService, ProjectWorkflowError } from '../server/application/export/export-service.js';
+import { createNamespaceReviewService } from '../server/application/export/namespace-review-service.js';
 
 async function createNamespaceDatabase(): Promise<{ database: AsyncDatabase; directory: string }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ctw-export-namespace-'));

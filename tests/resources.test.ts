@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
-import { createRisuModule } from '../server/domain/risum.js';
-import { applyApprovedResourceJson, inspectCharxResources, inspectRisuModuleResources, inspectRisuModuleResourcesStreaming, scanCharxResourceJson } from '../server/domain/resources.js';
+import { createRisuModule } from '../server/domain/card/risum.js';
+import { applyApprovedResourceJson, inspectCharxResources, inspectRisuModuleResources, inspectRisuModuleResourcesStreaming, scanCharxResourceJson } from '../server/domain/resources/resources.js';
 
 function png(width: number, height: number): Uint8Array {
   const bytes = new Uint8Array(24);

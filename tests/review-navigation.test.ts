@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { integrityIssueDestination } from '../src/app/review-navigation.js';
+import { integrityIssueDestination } from '../src/features/review/lib/review-navigation.js';
 
 test('routes Risu structural failures to Lua management', () => {
   for (const code of ['RISU_LUA_SYNTAX_INVALID', 'RISU_SCRIPT_INTEGRITY_INVALID', 'RISU_TEMPLATE_INVALID']) {

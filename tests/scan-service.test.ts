@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { reconcileScannedSegments } from '../server/application/scan-service.js';
-import type { ScannedSegment } from '../server/domain/card.js';
+import { reconcileScannedSegments } from '../server/application/scanning/scan-service.js';
+import type { ScannedSegment } from '../server/domain/card/card.js';
 
 function scanned(path: string[], sourceText: string, start: number | null, end: number | null): ScannedSegment {
   return {

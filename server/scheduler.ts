@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { db, now, saveSetting, setting } from './db.js';
-import { WORKBENCH_DEFAULTS, workbenchConfig } from './config.js';
+import { WORKBENCH_DEFAULTS, workbenchConfig } from '../config/workbench.js';
 import {
   applyApprovedSegments,
   applyRisuRegexCoverageProposals,
@@ -18,15 +18,15 @@ import {
   unchangedFilePathFragments,
   type ApplicableSegment,
   type RisuRegexAlternativeProposal,
-} from './domain/card.js';
-import { protocolFieldReplacementIssue, type ProtocolFieldRule } from './domain/protocol.js';
-import { lorebookAliasIssue, residualLanguageIssue, shouldSplitTranslationBatch } from './domain/translation-errors.js';
-import { languageBehaviorDirectiveIssue, languageDisplayName, normalizeLanguageBehaviorDirectives } from './domain/language-directives.js';
+} from './domain/card/card.js';
+import { protocolFieldReplacementIssue, type ProtocolFieldRule } from './domain/protocol/protocol.js';
+import { lorebookAliasIssue, residualLanguageIssue, shouldSplitTranslationBatch } from './domain/translation/translation-errors.js';
+import { languageBehaviorDirectiveIssue, languageDisplayName, normalizeLanguageBehaviorDirectives } from './domain/translation/language-directives.js';
 import {
   applyRisuModuleSegments,
   collectRuntimeAliasTranslationCandidates,
   detectRisuPortraitRouting,
-} from './domain/risu-lua.js';
+} from './domain/lua/risu-lua.js';
 
 export interface RuntimeSettings {
   apiBaseUrl: string;

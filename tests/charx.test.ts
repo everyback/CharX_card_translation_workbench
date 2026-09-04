@@ -10,8 +10,8 @@ import {
   readCharxEntry,
   synchronizeRisuModuleLorebook,
   writeCardCharx,
-} from '../server/domain/charx.js';
-import { createRisuModule, parseRisuModule } from '../server/domain/risum.js';
+} from '../server/domain/card/charx.js';
+import { createRisuModule, parseRisuModule } from '../server/domain/card/risum.js';
 
 const originalCard = {
   spec: 'chara_card_v3',

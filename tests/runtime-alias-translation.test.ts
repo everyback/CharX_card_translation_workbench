@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeRuntimeAliasTranslations } from '../server/scheduler.js';
-import { collectRuntimeAliasTranslationCandidates } from '../server/domain/risu-lua.js';
+import { collectRuntimeAliasTranslationCandidates } from '../server/domain/lua/risu-lua.js';
 
 test('runtime alias translation accepts only target-language proper-name aliases', () => {
   const candidates = [{ ownerId: 'madoka', aliases: ['Madoka Kaname', '鹿目まどか'] }];

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { matchesSegmentSearch } from '../src/app/hooks/segments/useSegmentFilters.js';
-import type { Segment } from '../src/types.js';
+import { matchesSegmentSearch } from '../src/features/segment-filter/model/useSegmentFilters.js';
+import type { Segment } from '../src/shared/types.js';
 
 const segment: Segment = {
   id: 'segment-1',

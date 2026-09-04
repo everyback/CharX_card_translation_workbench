@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { AsyncDatabase } from '../server/async-db.js';
-import { createReviewService } from '../server/application/review-service.js';
+import { createReviewService } from '../server/application/review/review-service.js';
 
 async function createReviewDatabase(): Promise<{ database: AsyncDatabase; directory: string }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ctw-review-service-'));

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildLuaManagementReport } from '../server/domain/lua-management.js';
-import { applyPortraitRouterRepairs } from '../server/domain/portrait-router-repair.js';
+import { buildLuaManagementReport } from '../server/domain/lua/lua-management.js';
+import { applyPortraitRouterRepairs } from '../server/domain/lua/portrait-router-repair.js';
 
 test('Lua management report observes visible text, controls, and blockers', () => {
   const sourceCode = 'if mode == "场景" then alertError(triggerId, "请选择角色") end';

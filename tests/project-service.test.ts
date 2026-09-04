@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { AsyncDatabase } from '../server/async-db.js';
-import { createProjectService } from '../server/application/project-service.js';
+import { createProjectService } from '../server/application/projects/project-service.js';
 
 async function createProjectDatabase(): Promise<{ database: AsyncDatabase; directory: string }> {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'ctw-project-service-'));
