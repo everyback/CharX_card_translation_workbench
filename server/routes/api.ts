@@ -1684,9 +1684,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/jobs', async (request, reply) => {
   const project = await projectById(request.params.projectId);
   if (!project) return reply.code(404).send({ error: '项目不存在。' });
-  if (await translationJobs.hasActiveTranslationJob(request.params.projectId)) {
-    return reply.code(409).send({ error: '该项目已有活动任务。' });
-  }
   const settings = publicSettings();
   if (!settings.apiKeyConfigured || !settings.model) {
     return reply.code(400).send({ error: '请先在模型设置中配置 API Key 和模型名称。' });
@@ -1699,23 +1696,20 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/jobs', asy
   `).all(request.params.projectId) as Array<{ id: string }>;
   if (!segmentRows.length) return reply.code(400).send({ error: '没有待翻译的已选段落。' });
 
-  const jobId = await translationJobs.createTranslationJob(
+  const creation = await translationJobs.createTranslationJob(
     request.params.projectId,
     String(project.scope),
     settings.model,
     segmentRows.map((segment) => segment.id),
     false,
   );
-  scheduleJob(jobId);
-  return reply.code(201).send(await translationJobs.jobById(jobId));
+  if (creation.created) scheduleJob(creation.jobId);
+  return reply.code(creation.created ? 201 : 200).send(await translationJobs.jobById(creation.jobId));
 });
 
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/retranslate', async (request, reply) => {
   const project = await projectById(request.params.projectId);
   if (!project) return reply.code(404).send({ error: '项目不存在。' });
-  if (await translationJobs.hasActiveTranslationJob(request.params.projectId)) {
-    return reply.code(409).send({ error: '该项目已有活动任务，请等待完成或先取消任务。' });
-  }
   const settings = publicSettings();
   if (!settings.apiKeyConfigured || !settings.model) {
     return reply.code(400).send({ error: '请先在模型设置中配置 API Key 和模型名称。' });
@@ -1726,15 +1720,15 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/retranslat
   const segmentIds = await translationJobs.existingProjectSegmentIds(request.params.projectId, requestedIds);
   if (!segmentIds.length) return reply.code(400).send({ error: '所选段落不属于当前项目。' });
 
-  const jobId = await translationJobs.createTranslationJob(
+  const creation = await translationJobs.createTranslationJob(
     request.params.projectId,
     String(project.scope),
     settings.model,
     segmentIds,
     true,
   );
-  scheduleJob(jobId);
-  return reply.code(201).send(await translationJobs.jobById(jobId));
+  if (creation.created) scheduleJob(creation.jobId);
+  return reply.code(creation.created ? 201 : 200).send(await translationJobs.jobById(creation.jobId));
 });
 
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/clear-results', async (request, reply) => {

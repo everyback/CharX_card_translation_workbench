@@ -87,7 +87,7 @@ export function JobsPage({
           )}
           <div className="job-actions">
             {['queued', 'running'].includes(job.status) && <button onClick={() => onAction(job.id, 'pause')}><Pause size={16} />暂停</button>}
-            {['paused', 'failed', 'cancelled'].includes(job.status) && <button onClick={() => onAction(job.id, 'resume')}><Play size={16} />继续翻译</button>}
+            {['paused', 'failed', 'cancelled'].includes(job.status) && job.totalItems > 0 && <button onClick={() => onAction(job.id, 'resume')}><Play size={16} />继续翻译</button>}
             {(job.failedItems > 0 || hasFollowUpFailure || job.status === 'review_with_errors') && <button onClick={() => onAction(job.id, 'retry-failed')}><RefreshCw size={16} />{job.failedItems > 0 && (hasFollowUpFailure || job.status === 'review_with_errors') ? '重试失败项与阶段 2' : hasFollowUpFailure || job.status === 'review_with_errors' ? '重试阶段 2' : '重试失败项'}</button>}
             {job.status === 'review' && followUpNeedsRetry && <button onClick={() => onAction(job.id, 'rerun-postprocessing')}><RefreshCw size={16} />重试阶段 2</button>}
             {['queued', 'running', 'paused'].includes(job.status) && <button onClick={() => onAction(job.id, 'cancel')}><Square size={15} />取消</button>}

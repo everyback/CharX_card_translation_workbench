@@ -25,7 +25,8 @@ import { GlobalNoticeBanners } from '@/layouts/workbench/components/GlobalNotice
 import { ProjectLoadingMask } from '@/layouts/workbench/components/ProjectLoadingMask';
 import { ProjectWorkspace } from './components/ProjectWorkspace';
 import { useGlossaryActions } from '@/features/glossary/model/useGlossaryActions';
-import { useCardImport } from '@/features/card-import/model/useCardImport';
+import { useCardImport, type CardImportResult } from '@/features/card-import/model/useCardImport';
+import { ImportSummary } from '@/features/card-import/ui/ImportSummary';
 import { useProjectActions } from '@/features/project/model/useProjectActions';
 import { useProjectWorkspace } from './model/useProjectWorkspace';
 import { useProtocolActions } from '@/features/protocol/model/useProtocolActions';
@@ -34,6 +35,7 @@ import { useSegmentFilters } from '@/features/segment-filter/model/useSegmentFil
 import { useWorkbenchSettings } from '@/features/settings/model/useWorkbenchSettings';
 import { useWorkbenchFeedback } from './model/useWorkbenchFeedback';
 import { useTranslationTasks } from '@/features/translation/model/useTranslationTasks';
+import type { ReviewProblemFilter, ReviewStatusFilter } from './tabs/review/ReviewPage';
 
 export function WorkbenchPage() {
   const initialRouteRef = useRef(readWorkbenchRoute());
@@ -42,7 +44,17 @@ export function WorkbenchPage() {
   const historyApplyingRef = useRef(false);
   const historyKeyRef = useRef('');
   const [pendingAutoScanId, setPendingAutoScanId] = useState('');
+  const [importResults, setImportResults] = useState<CardImportResult[] | null>(null);
   const [reviewFocus, setReviewFocus] = useState<ReviewFocus | null>(null);
+  const [reviewStatusFilter, setReviewStatusFilter] = useState<ReviewStatusFilter>('all');
+  const [reviewProblemFilter, setReviewProblemFilter] = useState<ReviewProblemFilter>('all');
+  const [reviewCategoryFilter, setReviewCategoryFilter] = useState('all');
+  const [reviewKindFilter, setReviewKindFilter] = useState('all');
+  const [reviewQaFlagFilter, setReviewQaFlagFilter] = useState('all');
+  const [reviewQuery, setReviewQuery] = useState('');
+  const [reviewSelectedIds, setReviewSelectedIds] = useState<Set<string>>(new Set());
+  const [reviewFiltersCollapsed, setReviewFiltersCollapsed] = useState(false);
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const {
     busy,
     error,
@@ -102,16 +114,6 @@ export function WorkbenchPage() {
 
   const showOverview = useCallback(() => setTab('overview'), []);
   const showJobs = useCallback(() => setTab('jobs'), []);
-  const { draggingFiles, fileInputRef, importCards } = useCardImport({
-    busy,
-    runAction,
-    refreshProjects,
-    selectProject: selectWorkspaceProject,
-    onError: showError,
-    onNotice: setNotice,
-    onShowOverview: showOverview,
-    onImportedProject: setPendingAutoScanId,
-  });
   const {
     jobDetail,
     clearJobDetail,
@@ -163,6 +165,40 @@ export function WorkbenchPage() {
     onClearReviewFocus: () => setReviewFocus(null),
   });
 
+  useEffect(() => {
+    if (!selectedSegment) return;
+    setReviewDrafts((current) => current[selectedSegment.id] === undefined
+      ? { ...current, [selectedSegment.id]: selectedSegment.finalText ?? selectedSegment.translatedText ?? '' }
+      : current);
+  }, [selectedSegment?.id, selectedSegment?.finalText, selectedSegment?.translatedText]);
+
+  const clearReviewDrafts = useCallback((segmentIds: string[]) => {
+    if (!segmentIds.length) return;
+    setReviewDrafts((current) => {
+      const next = { ...current };
+      for (const segmentId of segmentIds) delete next[segmentId];
+      return next;
+    });
+  }, []);
+
+  const updateReviewSegment = useCallback(async (changes: Parameters<typeof updateSegment>[1]) => {
+    if (!selectedSegment) return;
+    if (changes.finalText !== undefined) {
+      setReviewDrafts((current) => ({ ...current, [selectedSegment.id]: changes.finalText ?? '' }));
+    }
+    await updateSegment(selectedSegment.id, changes);
+  }, [selectedSegment, updateSegment]);
+
+  const retranslateReviewSegments = useCallback((segmentIds: string[]) => {
+    clearReviewDrafts(segmentIds);
+    void retranslateSegments(segmentIds);
+  }, [clearReviewDrafts, retranslateSegments]);
+
+  const bulkReviewSegments = useCallback((action: 'copy-machine' | 'clear-manual', segmentIds: string[]) => {
+    clearReviewDrafts(segmentIds);
+    void reviewBulk(action, segmentIds);
+  }, [clearReviewDrafts, reviewBulk]);
+
   const saveLuaAndExport = useCallback(async () => {
     if (!project?.id) return;
     // The Lua page can still hold the report from before a syntax-line save.
@@ -179,6 +215,8 @@ export function WorkbenchPage() {
   const selectProject = useCallback((projectId: string) => {
     clearJobDetail();
     setReviewFocus(null);
+    setReviewSelectedIds(new Set());
+    setReviewDrafts({});
     selectWorkspaceProject(projectId);
   }, [clearJobDetail, selectWorkspaceProject]);
 
@@ -219,7 +257,7 @@ export function WorkbenchPage() {
     writeWorkbenchRoute({ tab, projectId: routeProjectId, segmentId: routeSegmentId });
   }, [selectedProjectId, selectedSegmentId, tab]);
 
-  const { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject } = useProjectActions({
+  const { scan, scanProject, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject } = useProjectActions({
     project,
     scope,
     setProject,
@@ -237,6 +275,27 @@ export function WorkbenchPage() {
     setPendingAutoScanId('');
     void scan();
   }, [busy, pendingAutoScanId, project, projectLoading, scan]);
+
+  const scanImportedProject = useCallback((projectId: string) => {
+    void scanProject(projectId, 'all');
+  }, [scanProject]);
+
+  const scanAllImportedProjects = useCallback(async () => {
+    const ids = (importResults ?? []).flatMap((item) => item.status === 'imported' && item.projectId ? [item.projectId] : []);
+    for (const projectId of ids) await scanProject(projectId, 'all');
+  }, [importResults, scanProject]);
+
+  const { draggingFiles, fileInputRef, importCards } = useCardImport({
+    busy,
+    runAction,
+    refreshProjects,
+    selectProject: selectWorkspaceProject,
+    onError: showError,
+    onNotice: setNotice,
+    onShowOverview: showOverview,
+    onImportedProject: setPendingAutoScanId,
+    onImportResults: setImportResults,
+  });
   const { addGlossaryTerm, deleteGlossaryTerm } = useGlossaryActions({
     project,
     setGlossary,
@@ -304,6 +363,16 @@ export function WorkbenchPage() {
           onClearError={() => setError('')}
           onClearNotice={() => setNotice('')}
         />
+        {importResults && (
+          <ImportSummary
+            results={importResults}
+            busy={busy}
+            onSelectProject={selectProject}
+            onScanProject={scanImportedProject}
+            onScanAll={scanAllImportedProjects}
+            onClose={() => setImportResults(null)}
+          />
+        )}
         <ProjectLoadingMask loading={projectLoading} progress={projectLoadProgress} />
 
         {tab === 'about' ? (
@@ -386,12 +455,32 @@ export function WorkbenchPage() {
                 segments: project.segments,
                 selected: selectedSegment,
                 onSelect: setSelectedSegmentId,
-                onUpdate: (changes) => selectedSegment ? updateSegment(selectedSegment.id, changes) : undefined,
+                onUpdate: updateReviewSegment,
                 onApproveSafe: () => void approveSafe(),
                 onApproveAll: () => void approveAll(),
-                onRetranslate: (segmentIds) => void retranslateSegments(segmentIds),
-                onReviewBulk: (action, segmentIds) => void reviewBulk(action, segmentIds),
+                onRetranslate: retranslateReviewSegments,
+                onReviewBulk: bulkReviewSegments,
                 onClearAllResults: () => void clearAllTranslationResults(),
+                reviewStatusFilter,
+                onReviewStatusFilterChange: setReviewStatusFilter,
+                reviewProblemFilter,
+                onReviewProblemFilterChange: setReviewProblemFilter,
+                categoryFilter: reviewCategoryFilter,
+                onCategoryFilterChange: setReviewCategoryFilter,
+                reviewKindFilter,
+                onReviewKindFilterChange: setReviewKindFilter,
+                qaFlagFilter: reviewQaFlagFilter,
+                onQaFlagFilterChange: setReviewQaFlagFilter,
+                reviewQuery,
+                onReviewQueryChange: setReviewQuery,
+                selectedIds: reviewSelectedIds,
+                onSelectedIdsChange: setReviewSelectedIds,
+                reviewFiltersCollapsed,
+                onReviewFiltersCollapsedChange: setReviewFiltersCollapsed,
+                draft: selectedSegment ? reviewDrafts[selectedSegment.id] ?? '' : '',
+                onDraftChange: (value) => {
+                  if (selectedSegment) setReviewDrafts((current) => ({ ...current, [selectedSegment.id]: value }));
+                },
                 reviewFocus,
                 onClearReviewFocus: () => setReviewFocus(null),
                 approving: busy.startsWith('approve-'),

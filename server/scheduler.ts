@@ -1,5 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { db, now, saveSetting, setting } from './db.js';
+import { chatCompletionsEndpoint, modelsEndpoint } from './domain/provider/openai-compatible.js';
+export { chatCompletionsEndpoint, modelsEndpoint } from './domain/provider/openai-compatible.js';
 import { WORKBENCH_DEFAULTS, workbenchConfig } from '../config/workbench.js';
 import {
   applyApprovedSegments,
@@ -718,9 +720,8 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
   const inFlight = new Set<Promise<void>>();
 
   try {
-    const initialSettings = runtimeSettings();
     const jobProject = await db.prepare('SELECT project_id AS projectId FROM jobs WHERE id = ?').get(jobId) as { projectId?: string } | undefined;
-    initialSettings.languageBehaviorMode = await projectLanguageBehaviorMode(jobProject?.projectId || '', initialSettings.languageBehaviorMode);
+    const initialSettings = await runtimeSettingsSnapshot(jobProject?.projectId);
     assertProviderReady(initialSettings);
     const controlLiterals = await controlLiteralsForJob(jobId);
     const runtimeAliasCandidates = jobProject?.projectId
@@ -733,8 +734,9 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
       const current = await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId) as { status: string } | undefined;
       if (!current || current.status === 'paused' || current.status === 'cancelled') return;
 
-      const settings = runtimeSettings();
-      settings.languageBehaviorMode = await projectLanguageBehaviorMode(jobProject?.projectId || '', settings.languageBehaviorMode);
+      // A batch receives one immutable-in-practice snapshot. Global settings
+      // changes are picked up before the next batch, never halfway through it.
+      const settings = await runtimeSettingsSnapshot(jobProject?.projectId);
       assertProviderReady(settings);
       // Each in-flight item below is one provider HTTP request. The fair
       // provider queue, rather than project order, decides which request gets
@@ -742,11 +744,12 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
       while (!signal.aborted && inFlight.size < settings.concurrency) {
         const batch = await nextBatch(jobId, settings.batchItems, settings.batchChars);
         if (!batch.length) break;
-        await markBatch(batch, 'running');
-        await log(jobId, 'info', `开始翻译 ${batch.length} 个段落。`);
+        const claimedBatch = await markBatch(jobId, batch, 'running');
+        if (!claimedBatch.length) continue;
+        await log(jobId, 'info', `开始翻译 ${claimedBatch.length} 个段落。`);
 
         let task!: Promise<void>;
-        task = processBatch(jobId, batch, settings, signal, controlLiterals)
+        task = processBatch(jobId, claimedBatch, settings, signal, controlLiterals)
           .finally(() => inFlight.delete(task));
         inFlight.add(task);
       }
@@ -766,17 +769,32 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
       FROM job_items WHERE job_id = ?
     `).get(jobId) as { completed: number; failed: number; remaining: number };
     if (Number(counts.remaining) === 0) {
+      const stage2Current = await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId) as { status?: string } | undefined;
+      if (!stage2Current || !['queued', 'running'].includes(stage2Current.status ?? '')) return;
       await log(jobId, 'info', '阶段 2 开始：处理 Lua 正则语言并列项与关键词适配。');
+      const followUpSettings = await runtimeSettingsSnapshot(jobProject?.projectId);
       const regexLanguageFollowUp = jobProject?.projectId
-        ? await translateProjectRegexLanguageAlternatives(jobId, jobProject.projectId, initialSettings)
+        ? await translateProjectRegexLanguageAlternatives(jobId, jobProject.projectId, followUpSettings)
         : { total: 0, added: 0, adapted: 0, failed: 0 };
       const followUp = jobProject?.projectId
-        ? await translateProjectRuntimeAliases(jobId, jobProject.projectId, initialSettings, runtimeAliasCandidates)
+        ? await translateProjectRuntimeAliases(jobId, jobProject.projectId, followUpSettings, runtimeAliasCandidates)
         : { total: 0, failed: 0 };
       const status = Number(counts.failed) > 0 || followUp.failed > 0 || regexLanguageFollowUp.failed > 0 ? 'review_with_errors' : 'review';
-      await db.prepare('UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), jobId);
-      await db.prepare("UPDATE projects SET status = 'review', updated_at = ? WHERE id = (SELECT project_id FROM jobs WHERE id = ?)")
-        .run(now(), jobId);
+      await db.prepare("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued', 'running')")
+        .run(status, now(), jobId);
+      await db.prepare(`
+        UPDATE projects
+        SET status = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM jobs active
+            WHERE active.project_id = projects.id
+              AND active.status IN ('queued', 'running', 'paused')
+          ) THEN 'translating'
+          ELSE 'review'
+        END,
+        updated_at = ?
+        WHERE id = (SELECT project_id FROM jobs WHERE id = ?)
+      `).run(now(), jobId);
       const followUpMessage = followUp.total
         ? `后续处理 ${followUp.total - followUp.failed}/${followUp.total}`
         : '无后续处理';
@@ -1699,6 +1717,38 @@ export function privateImageSettings() {
   return { apiUrl: settings.imageApiUrl, apiKey: settings.imageApiKey, model: settings.imageModel };
 }
 
+async function runtimeSettingsSnapshot(projectId?: string): Promise<RuntimeSettings> {
+  const snapshot = runtimeSettings();
+  snapshot.languageBehaviorMode = await projectLanguageBehaviorMode(projectId || '', snapshot.languageBehaviorMode);
+  return snapshot;
+}
+
+export async function listAvailableModels(): Promise<{ models: string[] }> {
+  const settings = runtimeSettings();
+  if (!settings.apiKey) throw new Error('尚未配置模型 API Key。');
+  if (!/^https?:\/\//i.test(settings.apiBaseUrl)) throw new Error('模型接口地址无效。');
+  const response = await fetch(modelsEndpoint(settings.apiBaseUrl), {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${settings.apiKey}` },
+    signal: AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds)),
+  });
+  if (!response.ok) throw new Error(`模型列表请求失败（HTTP ${response.status}）。`);
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error('模型列表响应格式无效。');
+  }
+  const rows = Array.isArray(body) ? body : body && typeof body === 'object' && Array.isArray((body as { data?: unknown }).data)
+    ? (body as { data: unknown[] }).data
+    : [];
+  const models = rows
+    .map((row) => typeof row === 'string' ? row : row && typeof row === 'object' && typeof (row as { id?: unknown }).id === 'string' ? (row as { id: string }).id : '')
+    .map((model) => model.trim())
+    .filter((model, index, all) => Boolean(model) && all.indexOf(model) === index);
+  return { models };
+}
+
 export async function projectLanguageBehaviorMode(projectId: string, fallback: RuntimeSettings['languageBehaviorMode']): Promise<RuntimeSettings['languageBehaviorMode']> {
   const row = await db.prepare('SELECT language_behavior_mode AS mode FROM projects WHERE id = ?').get(projectId) as { mode?: string } | undefined;
   return row?.mode === 'preserve' ? 'preserve' : row?.mode === 'target' ? 'target' : fallback;
@@ -1748,7 +1798,7 @@ async function processBatchAdaptive(
       ]);
       return;
     }
-    await failBatch(batch, message);
+    await failBatch(jobId, batch, message);
     await refreshJobCounts(jobId);
     await log(jobId, 'error', `批次失败：${message}`);
   }
@@ -2033,27 +2083,43 @@ async function completeBatch(
     UPDATE segments
     SET translated_text = ?, final_text = NULL, review_status = 'pending', qa_flags = ?, updated_at = ?
     WHERE id = ?
+      AND EXISTS (
+        SELECT 1 FROM job_items
+        WHERE id = ? AND job_id = ? AND status = 'running'
+      )
   `);
-  const updateItem = db.prepare("UPDATE job_items SET status = 'completed', last_error = NULL, updated_at = ? WHERE id = ?");
+  const updateItem = db.prepare("UPDATE job_items SET status = 'completed', last_error = NULL, updated_at = ? WHERE id = ? AND job_id = ? AND status = 'running'");
   await db.transaction(async () => {
     for (const item of batch) {
       const translated = translations.get(item.segmentId);
       if (!translated) throw new Error(`缺少段落结果 ${item.segmentId}`);
-      await updateSegment.run(translated.text, JSON.stringify(translated.qaFlags), now(), item.segmentId);
-      await updateItem.run(now(), item.jobItemId);
+      const result = await updateSegment.run(
+        translated.text,
+        JSON.stringify(translated.qaFlags),
+        now(),
+        item.segmentId,
+        item.jobItemId,
+        jobId,
+      );
+      if (result.changes > 0) await updateItem.run(now(), item.jobItemId, jobId);
     }
   });
   await log(jobId, 'info', `已保存 ${batch.length} 个段落，等待人工审核。`);
 }
 
-async function markBatch(batch: PendingItem[], status: string): Promise<void> {
-  const statement = db.prepare('UPDATE job_items SET status = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ?');
-  for (const item of batch) await statement.run(status, now(), item.jobItemId);
+async function markBatch(jobId: string, batch: PendingItem[], status: string): Promise<PendingItem[]> {
+  const statement = db.prepare('UPDATE job_items SET status = ?, attempt_count = attempt_count + 1, updated_at = ? WHERE id = ? AND job_id = ? AND status = \'pending\'');
+  const claimed: PendingItem[] = [];
+  for (const item of batch) {
+    const result = await statement.run(status, now(), item.jobItemId, jobId);
+    if (result.changes > 0) claimed.push(item);
+  }
+  return claimed;
 }
 
-async function failBatch(batch: PendingItem[], message: string): Promise<void> {
-  const statement = db.prepare("UPDATE job_items SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?");
-  for (const item of batch) await statement.run(message, now(), item.jobItemId);
+async function failBatch(jobId: string, batch: PendingItem[], message: string): Promise<void> {
+  const statement = db.prepare("UPDATE job_items SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ? AND job_id = ? AND status = 'running'");
+  for (const item of batch) await statement.run(message, now(), item.jobItemId, jobId);
 }
 
 async function refreshJobCounts(jobId: string): Promise<void> {
@@ -2161,13 +2227,6 @@ function assertProviderReady(settings: RuntimeSettings): void {
 
 function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '');
-}
-
-export function chatCompletionsEndpoint(value: string): string {
-  const normalized = normalizeBaseUrl(value);
-  return /\/chat\/completions$/i.test(normalized)
-    ? normalized
-    : `${normalized}/chat/completions`;
 }
 
 export function normalizeModelRequestTimeoutSeconds(value: unknown, fallback = DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS): number {

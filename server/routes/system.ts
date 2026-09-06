@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { db } from '../db.js';
 import { PROJECT_TITLE_COLUMNS } from '../repositories/project-queries.js';
-import { publicSettings, updateSettings } from '../scheduler.js';
+import { listAvailableModels, publicSettings, updateSettings } from '../scheduler.js';
 
 let dashboardCache: { expiresAt: number; value: {
   projects: number;
@@ -30,6 +30,8 @@ export function registerSystemRoutes(app: FastifyInstance): void {
   });
 
   app.get('/api/settings', async () => publicSettings());
+
+  app.get('/api/models', async () => listAvailableModels());
 
   app.put('/api/settings', async (request) => updateSettings(asRecord(request.body)));
 

@@ -114,7 +114,12 @@ export function GuidedWorkflow({
   const [selectedPreset, setSelectedPreset] = useState<PresetId>(() => presetForScope(scope));
   const flowStep = currentFlowStep(project);
   const modelReady = Boolean(settings?.apiKeyConfigured && settings.model);
-  const selected = PRESETS.find((preset) => preset.id === selectedPreset) ?? PRESETS[1];
+  const risuFormat = ['charx', 'risum'].includes(project.sourceFormat.toLowerCase())
+    || Boolean(project.scanSummary?.luaSegments || project.scanSummary?.protocolSegments || project.controlReferences.length);
+  const presets = PRESETS.map((preset) => preset.id === 'risu' && !risuFormat
+    ? { ...preset, title: '完整可见内容', description: '覆盖普通卡片中的所有可见文字和世界书内容。', hint: '适合 JSON / PNG 卡片' }
+    : preset);
+  const selected = presets.find((preset) => preset.id === selectedPreset) ?? presets[1];
   const hasFailedJob = project.jobs.some((job) => job.status === 'failed' || job.status === 'review_with_errors');
   const latestJob = project.jobs[0];
   const hasCancelledLatestJob = latestJob?.status === 'cancelled';
@@ -307,7 +312,7 @@ export function GuidedWorkflow({
         <div className="guided-next-main">{renderNextStep()}</div>
         {showPresets && (
           <div className="guided-presets" aria-label="翻译预设">
-            {PRESETS.map((preset) => (
+            {presets.map((preset) => (
               <button
                 type="button"
                 className={`guided-preset ${selectedPreset === preset.id ? 'selected' : ''}`}

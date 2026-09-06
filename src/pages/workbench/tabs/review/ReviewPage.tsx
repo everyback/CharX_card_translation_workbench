@@ -1,10 +1,13 @@
-import { Check, CheckCheck, CircleAlert, Copy, FilterX, Link2, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, CheckCheck, ChevronDown, ChevronUp, CircleAlert, Copy, FilterX, Link2, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useRef } from 'react';
 import { RiskBadge } from '@/entities/segment/ui/RiskBadge';
 import { CATEGORY_LABELS, KIND_LABELS } from '@/entities/segment/model/labels';
 import { STATUS_LABELS } from '@/entities/project/model/status-labels';
 import type { ReviewFocus, Segment } from '@/shared/types';
 import { findRegexRepairExamples, segmentSummary } from './lib/review-utils';
+
+export type ReviewStatusFilter = 'all' | 'untranslated' | 'unapproved' | 'failed' | 'approved';
+export type ReviewProblemFilter = 'all' | 'issues' | 'clear';
 
 export function ReviewPage({
   segments,
@@ -16,6 +19,24 @@ export function ReviewPage({
   onRetranslate,
   onReviewBulk,
   onClearAllResults,
+  reviewStatusFilter,
+  onReviewStatusFilterChange,
+  reviewProblemFilter,
+  onReviewProblemFilterChange,
+  categoryFilter,
+  onCategoryFilterChange,
+  reviewKindFilter,
+  onReviewKindFilterChange,
+  qaFlagFilter,
+  onQaFlagFilterChange,
+  reviewQuery,
+  onReviewQueryChange,
+  selectedIds,
+  onSelectedIdsChange,
+  reviewFiltersCollapsed,
+  onReviewFiltersCollapsedChange,
+  draft,
+  onDraftChange,
   reviewFocus,
   onClearReviewFocus,
   approving,
@@ -30,24 +51,42 @@ export function ReviewPage({
   onRetranslate: (segmentIds: string[]) => void;
   onReviewBulk: (action: 'copy-machine' | 'clear-manual', segmentIds: string[]) => void;
   onClearAllResults: () => void;
+  reviewStatusFilter: ReviewStatusFilter;
+  onReviewStatusFilterChange: (value: ReviewStatusFilter) => void;
+  reviewProblemFilter: ReviewProblemFilter;
+  onReviewProblemFilterChange: (value: ReviewProblemFilter) => void;
+  categoryFilter: string;
+  onCategoryFilterChange: (value: string) => void;
+  reviewKindFilter: string;
+  onReviewKindFilterChange: (value: string) => void;
+  qaFlagFilter: string;
+  onQaFlagFilterChange: (value: string) => void;
+  reviewQuery: string;
+  onReviewQueryChange: (value: string) => void;
+  selectedIds: Set<string>;
+  onSelectedIdsChange: (value: Set<string>) => void;
+  reviewFiltersCollapsed: boolean;
+  onReviewFiltersCollapsedChange: (value: boolean) => void;
+  draft: string;
+  onDraftChange: (value: string) => void;
   reviewFocus: ReviewFocus | null;
   onClearReviewFocus: () => void;
   approving: boolean;
   resetting: boolean;
 }) {
-  const [reviewStatusFilter, setReviewStatusFilter] = useState<'all' | 'unapproved' | 'failed' | 'approved'>('all');
-  const [reviewProblemFilter, setReviewProblemFilter] = useState<'all' | 'issues' | 'clear'>('all');
-  const [categoryFilter, setCategoryFilter] = useState('all');
-  const [reviewKindFilter, setReviewKindFilter] = useState('all');
-  const [qaFlagFilter, setQaFlagFilter] = useState('all');
-  const [reviewQuery, setReviewQuery] = useState('');
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const reviewFocusIds = useMemo(() => new Set(reviewFocus?.segmentIds ?? []), [reviewFocus]);
-  const reviewable = useMemo(() => segments.filter((segment) => (
+  const resultSegments = useMemo(() => segments.filter((segment) => (
     segment.reviewStatus !== 'untranslated'
     || Boolean(segment.translationError)
     || Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
   )), [segments]);
+  const reviewFocusIds = useMemo(() => new Set(reviewFocus?.segmentIds ?? []), [reviewFocus]);
+  // The review queue stays result-oriented by default. Untranslated fields are
+  // deliberately exposed only through their explicit status filter.
+  const reviewable = useMemo(() => (
+    reviewStatusFilter === 'untranslated'
+      ? segments.filter((segment) => segment.reviewStatus === 'untranslated')
+      : resultSegments
+  ), [reviewStatusFilter, resultSegments, segments]);
   const qaFlagOptions = useMemo(() => {
     const counts = new Map<string, number>();
     for (const segment of reviewable) {
@@ -62,7 +101,8 @@ export function ReviewPage({
     return reviewable.filter((segment) => {
       const matchesFocus = !reviewFocus || reviewFocusIds.has(segment.id);
       const matchesStatus = reviewStatusFilter === 'all'
-        || (reviewStatusFilter === 'unapproved' && segment.reviewStatus !== 'approved')
+        || (reviewStatusFilter === 'untranslated' && segment.reviewStatus === 'untranslated')
+        || (reviewStatusFilter === 'unapproved' && segment.reviewStatus !== 'approved' && segment.reviewStatus !== 'untranslated')
         || (reviewStatusFilter === 'failed' && Boolean(segment.translationError) && segment.reviewStatus !== 'approved')
         || (reviewStatusFilter === 'approved' && segment.reviewStatus === 'approved');
       const hasProblem = Boolean(segment.translationError) || segment.qaFlags.length > 0;
@@ -90,20 +130,18 @@ export function ReviewPage({
   useEffect(() => {
     if (qaFlagFilter !== 'all' && qaFlagFilter !== 'flagged' && qaFlagFilter !== 'protected'
       && !qaFlagOptions.some(({ flag }) => flag === qaFlagFilter)) {
-      setQaFlagFilter('all');
+      onQaFlagFilterChange('all');
     }
   }, [qaFlagFilter, qaFlagOptions]);
-  const pendingWithText = segments.filter((segment) => (
+  const pendingWithText = resultSegments.filter((segment) => (
     segment.reviewStatus === 'pending'
     && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
   ));
   const safePending = pendingWithText.filter((segment) => segment.riskLevel === 'low' && segment.qaFlags.length === 0);
-  const [draft, setDraft] = useState('');
   const selectedRowRef = useRef<HTMLButtonElement>(null);
   const regexRepairExamples = useMemo(() => selected && reviewFocus && reviewFocusIds.has(selected.id) && reviewFocus.pattern
     ? findRegexRepairExamples(selected.sourceText, draft, reviewFocus.pattern)
     : [], [selected, draft, reviewFocus, reviewFocusIds]);
-  useEffect(() => setDraft(selected?.finalText ?? selected?.translatedText ?? ''), [selected?.id, selected?.finalText, selected?.translatedText]);
   useEffect(() => {
     selectedRowRef.current?.scrollIntoView({ block: 'nearest' });
   }, [selected?.id]);
@@ -114,8 +152,9 @@ export function ReviewPage({
   }, [filteredReviewable, selected?.id, onSelect]);
   useEffect(() => {
     const visible = new Set(filteredReviewable.map((segment) => segment.id));
-    setSelectedIds((current) => new Set([...current].filter((id) => visible.has(id))));
-  }, [filteredReviewable]);
+    const next = new Set([...selectedIds].filter((id) => visible.has(id)));
+    if (next.size !== selectedIds.size) onSelectedIdsChange(next);
+  }, [filteredReviewable, onSelectedIdsChange, selectedIds]);
   const selectedVisibleIds = filteredReviewable.filter((segment) => selectedIds.has(segment.id)).map((segment) => segment.id);
   const allVisibleSelected = filteredReviewable.length > 0 && selectedVisibleIds.length === filteredReviewable.length;
   return (
@@ -148,19 +187,27 @@ export function ReviewPage({
                 <CheckCheck size={14} /><span>确认无误后通过</span><small>{pendingWithText.length}</small>
               </button>
             </div>
+            <div className="review-filter-heading">
+              <span>筛选条件</span>
+              <button type="button" className="review-filter-toggle" aria-expanded={!reviewFiltersCollapsed} onClick={() => onReviewFiltersCollapsedChange(!reviewFiltersCollapsed)}>
+                {reviewFiltersCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                <span>{reviewFiltersCollapsed ? '展开' : '折叠'}</span>
+              </button>
+            </div>
           </div>
-          <div className="review-filter-bar">
+          {!reviewFiltersCollapsed && <div className="review-filter-bar">
             <label className="review-search-filter">
               <span>文字搜索</span>
               <div className="search-input">
                 <Search size={14} />
-                <input aria-label="审核文字搜索" value={reviewQuery} onChange={(event) => setReviewQuery(event.target.value)} placeholder="原文、译文或路径" />
+                <input aria-label="审核文字搜索" value={reviewQuery} onChange={(event) => onReviewQueryChange(event.target.value)} placeholder="原文、译文或路径" />
               </div>
             </label>
             <label>
               <span>审核状态</span>
-              <select aria-label="审核状态" value={reviewStatusFilter} onChange={(event) => setReviewStatusFilter(event.target.value as 'all' | 'unapproved' | 'failed' | 'approved')}>
+              <select aria-label="审核状态" value={reviewStatusFilter} onChange={(event) => onReviewStatusFilterChange(event.target.value as ReviewStatusFilter)}>
                 <option value="all">全部</option>
+                <option value="untranslated">未翻译</option>
                 <option value="unapproved">未通过</option>
                 <option value="failed">翻译失败</option>
                 <option value="approved">已通过</option>
@@ -168,7 +215,7 @@ export function ReviewPage({
             </label>
             <label>
               <span>问题状态</span>
-              <select aria-label="问题状态" value={reviewProblemFilter} onChange={(event) => setReviewProblemFilter(event.target.value as 'all' | 'issues' | 'clear')}>
+              <select aria-label="问题状态" value={reviewProblemFilter} onChange={(event) => onReviewProblemFilterChange(event.target.value as ReviewProblemFilter)}>
                 <option value="all">全部</option>
                 <option value="issues">有问题（{reviewable.filter((segment) => Boolean(segment.translationError) || segment.qaFlags.length > 0).length}）</option>
                 <option value="clear">无问题</option>
@@ -176,21 +223,21 @@ export function ReviewPage({
             </label>
             <label>
               <span>内容分类</span>
-              <select aria-label="内容分类" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+              <select aria-label="内容分类" value={categoryFilter} onChange={(event) => onCategoryFilterChange(event.target.value)}>
                 <option value="all">全部分类</option>
                 {Object.entries(CATEGORY_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
             <label>
               <span>文字格式</span>
-              <select aria-label="文字格式" value={reviewKindFilter} onChange={(event) => setReviewKindFilter(event.target.value)}>
+              <select aria-label="文字格式" value={reviewKindFilter} onChange={(event) => onReviewKindFilterChange(event.target.value)}>
                 <option value="all">全部格式</option>
                 {Object.entries(KIND_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
             <label>
               <span>质量提示</span>
-              <select aria-label="质量提示" value={qaFlagFilter} onChange={(event) => setQaFlagFilter(event.target.value)}>
+              <select aria-label="质量提示" value={qaFlagFilter} onChange={(event) => onQaFlagFilterChange(event.target.value)}>
                 <option value="all">不限提示</option>
                 <option value="flagged">有质量提示（{reviewable.filter((segment) => segment.qaFlags.length > 0).length}）</option>
                 <option value="protected">受保护脚本引用（{reviewable.filter((segment) => segment.controlReferences.length > 0).length}）</option>
@@ -198,7 +245,7 @@ export function ReviewPage({
               </select>
             </label>
             <label className="review-select-all">
-              <span><input type="checkbox" checked={allVisibleSelected} onChange={(event) => setSelectedIds(event.target.checked ? new Set(filteredReviewable.map((segment) => segment.id)) : new Set())} />选择当前结果</span>
+              <span><input type="checkbox" checked={allVisibleSelected} onChange={(event) => onSelectedIdsChange(event.target.checked ? new Set(filteredReviewable.map((segment) => segment.id)) : new Set())} />选择当前结果</span>
               <small>{selectedVisibleIds.length} / {filteredReviewable.length}</small>
             </label>
             <div className="review-result-actions">
@@ -213,14 +260,14 @@ export function ReviewPage({
               <button
                 type="button"
                 className="danger-action"
-                disabled={resetting || reviewable.length === 0}
-                title={`删除当前项目全部 ${reviewable.length} 条翻译结果`}
+                disabled={resetting || resultSegments.length === 0}
+                title={`删除当前项目全部 ${resultSegments.length} 条翻译结果`}
                 onClick={onClearAllResults}
               >
-                <Trash2 size={14} /><span>全部删除</span><small>{reviewable.length}</small>
+                <Trash2 size={14} /><span>全部删除</span><small>{resultSegments.length}</small>
               </button>
             </div>
-          </div>
+          </div>}
         </div>
         {filteredReviewable.map((segment) => (
           <button
@@ -234,11 +281,9 @@ export function ReviewPage({
               checked={selectedIds.has(segment.id)}
               onChange={(event) => {
                 event.stopPropagation();
-                setSelectedIds((current) => {
-                  const next = new Set(current);
-                  if (event.target.checked) next.add(segment.id); else next.delete(segment.id);
-                  return next;
-                });
+                const next = new Set(selectedIds);
+                if (event.target.checked) next.add(segment.id); else next.delete(segment.id);
+                onSelectedIdsChange(next);
               }}
               onClick={(event) => event.stopPropagation()}
               aria-label={`选择第 ${segment.sortOrder + 1} 条审核项`}
@@ -313,10 +358,10 @@ export function ReviewPage({
           <div className="review-columns">
             <label><span>原文</span><textarea readOnly value={selected.sourceText} /></label>
             <label><span>机器译文</span><textarea readOnly value={selected.translatedText ?? ''} /></label>
-            <label><span>人工定稿</span><textarea value={draft} onChange={(event) => setDraft(event.target.value)} /></label>
+            <label><span>人工定稿</span><textarea value={draft} onChange={(event) => onDraftChange(event.target.value)} /></label>
           </div>
           <div className="review-actions">
-            {selected.translationError && selected.reviewStatus !== 'approved' && <button className="secondary-button" onClick={() => setDraft(selected.sourceText)}><Copy size={16} />载入原文</button>}
+            {selected.translationError && selected.reviewStatus !== 'approved' && <button className="secondary-button" onClick={() => onDraftChange(selected.sourceText)}><Copy size={16} />载入原文</button>}
             <button className="secondary-button danger-ghost" disabled={resetting} onClick={() => onRetranslate([selected.id])}><RefreshCw size={16} />删除并重译</button>
             <button className="secondary-button" onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'rejected' })}><X size={16} />退回</button>
             <button className="secondary-button" onClick={() => void onUpdate({ finalText: draft, reviewStatus: selected.reviewStatus })}><Save size={16} />保存修改</button>

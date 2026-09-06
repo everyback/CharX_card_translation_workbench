@@ -79,13 +79,20 @@ test('translation job service creates every job item and advances the project in
       createId: () => ids.shift() || 'unexpected-id',
       clock: () => '2026-08-21T00:00:00.000Z',
     });
-    const jobId = await service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1'], false);
+    const creation = await service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1'], false);
 
-    assert.equal(jobId, 'job-1');
+    assert.deepEqual(creation, {
+      jobId: 'job-1',
+      created: true,
+      transferredJobIds: [],
+      requestedSegmentCount: 1,
+      scheduledSegmentCount: 1,
+      deduplicatedSegmentCount: 0,
+    });
     assert.deepEqual(await database.prepare('SELECT status, total_items AS totalItems FROM jobs').all(), [
       { status: 'queued', totalItems: 1 },
     ]);
-    assert.deepEqual(await service.jobById(jobId), {
+    assert.deepEqual(await service.jobById(creation.jobId), {
       id: 'job-1',
       projectId: 'project-1',
       status: 'queued',
@@ -111,6 +118,102 @@ test('translation job service creates every job item and advances the project in
   }
 });
 
+test('translation job service transfers active segments while allowing same-project concurrent jobs', async () => {
+  const { database, directory } = await createJobDatabase();
+  try {
+    await database.prepare('INSERT INTO projects(id, status, updated_at) VALUES (?, ?, ?)')
+      .run('project-1', 'scanned', 'before');
+    await database.prepare(`
+      INSERT INTO segments(id, project_id, review_status, qa_flags, updated_at, sort_order)
+      VALUES (?, ?, 'untranslated', '[]', 'before', ?)
+    `).run('segment-1', 'project-1', 0);
+    await database.prepare(`
+      INSERT INTO segments(id, project_id, review_status, qa_flags, updated_at, sort_order)
+      VALUES (?, ?, 'untranslated', '[]', 'before', ?)
+    `).run('segment-2', 'project-1', 1);
+
+    const ids = ['job-1', 'item-1', 'job-2', 'item-2a', 'item-2b', 'job-3', 'item-3'];
+    const service = createTranslationJobService({
+      database,
+      createId: () => ids.shift() || 'unexpected-id',
+      clock: () => '2026-08-21T00:00:00.000Z',
+    });
+
+    const first = await service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1'], false);
+    const second = await service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1', 'segment-2'], false);
+    const duplicate = await service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1'], true);
+
+    assert.equal(first.created, true);
+    assert.deepEqual(second, {
+      jobId: 'job-2',
+      created: true,
+      transferredJobIds: ['job-1'],
+      requestedSegmentCount: 2,
+      scheduledSegmentCount: 2,
+      deduplicatedSegmentCount: 1,
+    });
+    assert.deepEqual(duplicate, {
+      jobId: 'job-3',
+      created: true,
+      transferredJobIds: ['job-2'],
+      requestedSegmentCount: 1,
+      scheduledSegmentCount: 1,
+      deduplicatedSegmentCount: 1,
+    });
+    assert.deepEqual(await database.prepare('SELECT job_id AS jobId, segment_id AS segmentId, status FROM job_items ORDER BY job_id, segment_id').all(), [
+      { jobId: 'job-1', segmentId: 'segment-1', status: 'cancelled' },
+      { jobId: 'job-2', segmentId: 'segment-1', status: 'cancelled' },
+      { jobId: 'job-2', segmentId: 'segment-2', status: 'pending' },
+      { jobId: 'job-3', segmentId: 'segment-1', status: 'pending' },
+    ]);
+    assert.deepEqual(await database.prepare('SELECT id, status, total_items AS totalItems FROM jobs ORDER BY id').all(), [
+      { id: 'job-1', status: 'cancelled', totalItems: 0 },
+      { id: 'job-2', status: 'queued', totalItems: 1 },
+      { id: 'job-3', status: 'queued', totalItems: 1 },
+    ]);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('translation job service serializes concurrent overlap transfers inside the writer transaction', async () => {
+  const { database, directory } = await createJobDatabase();
+  try {
+    await database.prepare('INSERT INTO projects(id, status, updated_at) VALUES (?, ?, ?)')
+      .run('project-1', 'scanned', 'before');
+    await database.prepare(`
+      INSERT INTO segments(id, project_id, review_status, qa_flags, updated_at, sort_order)
+      VALUES (?, ?, 'untranslated', '[]', 'before', ?)
+    `).run('segment-1', 'project-1', 0);
+
+    const ids = ['job-a', 'job-b', 'item-a', 'item-b'];
+    const service = createTranslationJobService({
+      database,
+      createId: () => ids.shift() || 'unexpected-id',
+      clock: () => '2026-08-21T00:00:00.000Z',
+    });
+
+    const [first, second] = await Promise.all([
+      service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1'], false),
+      service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1'], false),
+    ]);
+
+    assert.equal(first.created, true);
+    assert.equal(second.created, true);
+    assert.equal(first.deduplicatedSegmentCount + second.deduplicatedSegmentCount, 1);
+    assert.deepEqual(await database.prepare(`
+      SELECT job_id AS jobId, status FROM job_items ORDER BY job_id
+    `).all(), [
+      { jobId: 'job-a', status: 'cancelled' },
+      { jobId: 'job-b', status: 'pending' },
+    ]);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('translation job service rolls back result clearing when an item insert fails', async () => {
   const { database, directory } = await createJobDatabase();
   try {
@@ -121,8 +224,12 @@ test('translation job service rolls back result clearing when an item insert fai
         id, project_id, translated_text, final_text, review_status, qa_flags, updated_at, sort_order
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run('segment-1', 'project-1', '机器译文', '人工译文', 'approved', '["人工确认"]', 'before', 0);
+    await database.prepare(`
+      INSERT INTO segments(id, project_id, review_status, qa_flags, updated_at, sort_order)
+      VALUES (?, ?, 'untranslated', '[]', 'before', ?)
+    `).run('segment-2', 'project-1', 1);
 
-    const ids = ['job-rollback', 'item-1', 'item-2'];
+    const ids = ['job-rollback', 'item-1', 'item-1'];
     const service = createTranslationJobService({
       database,
       createId: () => ids.shift() || 'unexpected-id',
@@ -130,7 +237,7 @@ test('translation job service rolls back result clearing when an item insert fai
     });
 
     await assert.rejects(
-      service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1', 'segment-1'], true),
+      service.createTranslationJob('project-1', 'all-visible', 'test-model', ['segment-1', 'segment-2'], true),
       /UNIQUE constraint failed/u,
     );
 

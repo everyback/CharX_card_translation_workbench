@@ -30,7 +30,11 @@ export function useProjectActions({
 }: UseProjectActionsOptions) {
   async function scan(scopeOverride?: ScopePreset) {
     if (!project) return;
-    await runAction('scan', async () => {
+    await scanProject(project.id, scopeOverride, 'scan');
+  }
+
+  async function scanProject(projectId: string, scopeOverride?: ScopePreset, actionLabel = `scan-${projectId}`) {
+    await runAction(actionLabel, async () => {
       const result = await api<{
         preservedCount: number;
         newCount: number;
@@ -38,13 +42,13 @@ export function useProjectActions({
         pendingProtocolCount: number;
         runtimeRiskCount?: number;
         runtimeRiskPaths?: string[];
-      }>(`/api/projects/${project.id}/scan`, { method: 'POST', ...jsonBody({ scope: scopeOverride ?? scope }) });
+      }>(`/api/projects/${projectId}/scan`, { method: 'POST', ...jsonBody({ scope: scopeOverride ?? scope }) });
       const runtimeNotice = result.runtimeRiskCount
         ? `；发现 ${result.runtimeRiskCount} 个运行时状态风险（${(result.runtimeRiskPaths ?? []).slice(0, 2).join('；')}）`
         : '';
       onNotice(`扫描完成：保留 ${result.preservedCount} 条，新增 ${result.newCount} 条；发现 ${result.protocolCount} 种协议，${result.pendingProtocolCount} 种待确认${runtimeNotice}。`);
       invalidateProjectOverview();
-      await Promise.all([refreshProject(project.id), refreshProjects()]);
+      await Promise.all([refreshProject(projectId), refreshProjects()]);
     });
   }
 
@@ -107,5 +111,5 @@ export function useProjectActions({
     });
   }
 
-  return { scan, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject };
+  return { scan, scanProject, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject };
 }

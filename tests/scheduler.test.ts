@@ -4,6 +4,7 @@ import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldS
 import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments } from '../server/domain/card/card.js';
 import {
   chatCompletionsEndpoint,
+  modelsEndpoint,
   readStreamingMessageContent,
   buildRegexWhitespaceProbe,
   collectRegexSamplePairs,
@@ -29,6 +30,12 @@ test('chat completions endpoint accepts either a base URL or a full endpoint', (
     chatCompletionsEndpoint('https://api.example.com/v1/chat/completions/'),
     'https://api.example.com/v1/chat/completions',
   );
+});
+
+test('models endpoint derives from a base or chat completions URL', () => {
+  assert.equal(modelsEndpoint('https://api.example.com/v1'), 'https://api.example.com/v1/models');
+  assert.equal(modelsEndpoint('https://api.example.com/v1/chat/completions/'), 'https://api.example.com/v1/models');
+  assert.equal(modelsEndpoint('https://api.example.com/v1/models/'), 'https://api.example.com/v1/models');
 });
 
 test('model request timeout accepts seconds and stays within safe bounds', () => {

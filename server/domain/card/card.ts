@@ -1865,7 +1865,6 @@ function extractLuaCodeText(
   includePromptStrings: boolean,
 ): ScannedSegment[] {
   const runtime = extractRuntimeMessages(source, path, category);
-  if (!includePromptStrings) return runtime;
   const literals: ScannedSegment[] = [];
 
   try {
@@ -1878,57 +1877,148 @@ function extractLuaCodeText(
         const raw = source.slice(ranged.range[0], ranged.range[1]);
         const literal = parseLuaLiteral(raw, ranged.range);
         if (!literal) return;
-        const { decoded } = literal;
-        const languageDefault = isStoryLanguageDefault(source, ranged.range[0], decoded);
-        if (languageDefault) {
-          literals.push(luaLiteralSegment(path, category, decoded, literal.contentStart, literal.contentEnd, 'lua-language'));
-          return;
-        }
-
-        const formatted = extractLuaFormattedSegment(literal, path, category);
-        if (formatted) {
-          literals.push(formatted);
-          return;
-        }
-
-        // Risu modules commonly build one HTML template from several Lua long
-        // strings around dynamic values (`[[label: ]] .. value .. [[...]]`).
-        // Long strings are still source containers, not opaque code: extract
-        // their visible nodes/attributes before rejecting Lua patterns. This
-        // also covers string.format HTML containing %s and escaped %% tokens.
-        if (literal.encoded === decoded && looksLikeEmbeddedVisibleText(decoded)) {
-          const visible = extractVisibleText(decoded, path, category).map((segment) => ({
-            ...segment,
-            start: literal.contentStart + (segment.start ?? 0),
-            end: literal.contentStart + (segment.end ?? 0),
-            kind: luaVisibleKind(segment.kind),
-          }));
-          if (visible.length) {
-            literals.push(...visible);
-            return;
-          }
-        }
-
-        if (looksLikeLuaCodeLiteral(decoded)) return;
-
-        if (!likelyLuaNaturalText(decoded, literal.long ? 12_000 : 2000)) return;
-        literals.push({
-          path,
-          pathLabel: pathLabel(path),
-          category,
-          sourceText: decoded,
-          start: literal.long ? ranged.range[0] : literal.contentStart,
-          end: literal.long ? ranged.range[1] : literal.contentEnd,
-          risk: 'high',
-          kind: literal.long ? 'lua-long-string' : 'lua-string',
-        });
+        literals.push(...extractLuaLiteralText(source, literal, ranged.range[0], path, category, includePromptStrings));
       },
     });
   } catch {
-    return runtime;
+    // Risu cards can contain Lua dialect extensions or a pre-existing syntax
+    // error outside the UI template. Do not abandon every visible label in
+    // that code block: recover only complete quoted/long literals, then apply
+    // the same HTML and natural-text filters used by the AST path.
+    return removeOverlaps([
+      ...runtime,
+      ...recoverLuaLiteralText(source, path, category, includePromptStrings),
+    ]);
   }
 
   return removeOverlaps([...runtime, ...literals]);
+}
+
+function extractLuaLiteralText(
+  source: string,
+  literal: ParsedLuaLiteral,
+  literalStart: number,
+  path: Array<string | number>,
+  category: 'script-ui' | 'background-ui',
+  includePromptStrings: boolean,
+): ScannedSegment[] {
+  const { decoded } = literal;
+  if (isStoryLanguageDefault(source, literalStart, decoded)) {
+    return [luaLiteralSegment(path, category, decoded, literal.contentStart, literal.contentEnd, 'lua-language')];
+  }
+
+  const formatted = extractLuaFormattedSegment(literal, path, category);
+  if (formatted) return [formatted];
+
+  // Risu modules commonly build one HTML template from several Lua long
+  // strings around dynamic values (`[[label: ]] .. value .. [[...]]`).
+  // Long strings are still source containers, not opaque code: extract their
+  // visible nodes/attributes before considering natural-language prompts.
+  if (literal.encoded === decoded && looksLikeEmbeddedVisibleText(decoded)) {
+    const visible = extractVisibleText(decoded, path, category).map((segment) => ({
+      ...segment,
+      start: literal.contentStart + (segment.start ?? 0),
+      end: literal.contentStart + (segment.end ?? 0),
+      kind: luaVisibleKind(segment.kind),
+    }));
+    if (visible.length) return visible;
+  }
+
+  if (!includePromptStrings || looksLikeLuaCodeLiteral(decoded)) return [];
+  if (!likelyLuaNaturalText(decoded, literal.long ? 12_000 : 2000)) return [];
+  return [{
+    path,
+    pathLabel: pathLabel(path),
+    category,
+    sourceText: decoded,
+    start: literal.long ? literalStart : literal.contentStart,
+    end: literal.long ? literalStart + literal.rawLength : literal.contentEnd,
+    risk: 'high',
+    kind: literal.long ? 'lua-long-string' : 'lua-string',
+  }];
+}
+
+/**
+ * A small lexical recovery path for malformed or extended Lua. It deliberately
+ * recognizes only complete quoted and long-bracket literals, skipping comments
+ * and unterminated values, so malformed code cannot turn arbitrary source spans
+ * into translation candidates.
+ */
+function recoverLuaLiteralText(
+  source: string,
+  path: Array<string | number>,
+  category: 'script-ui' | 'background-ui',
+  includePromptStrings: boolean,
+): ScannedSegment[] {
+  const segments: ScannedSegment[] = [];
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith('--', index)) {
+      const block = luaLongBracketAt(source, index + 2);
+      if (block) {
+        const close = source.indexOf(block.close, block.contentStart);
+        index = close < 0 ? source.length : close + block.close.length;
+        continue;
+      }
+      const newline = source.indexOf('\n', index + 2);
+      index = newline < 0 ? source.length : newline + 1;
+      continue;
+    }
+
+    const long = luaLongBracketAt(source, index);
+    if (long) {
+      const close = source.indexOf(long.close, long.contentStart);
+      if (close < 0) {
+        index += long.open.length;
+        continue;
+      }
+      const end = close + long.close.length;
+      const literal = parseLuaLiteral(source.slice(index, end), [index, end]);
+      if (literal) segments.push(...extractLuaLiteralText(source, literal, index, path, category, includePromptStrings));
+      index = end;
+      continue;
+    }
+
+    const quote = source[index];
+    if (quote === '"' || quote === "'") {
+      const end = luaQuotedLiteralEnd(source, index, quote);
+      if (end < 0) {
+        index += 1;
+        continue;
+      }
+      const literal = parseLuaLiteral(source.slice(index, end), [index, end]);
+      if (literal) segments.push(...extractLuaLiteralText(source, literal, index, path, category, includePromptStrings));
+      index = end;
+      continue;
+    }
+    index += 1;
+  }
+  return segments;
+}
+
+function luaLongBracketAt(source: string, start: number): { open: string; close: string; contentStart: number } | null {
+  const match = source.slice(start).match(/^\[(=*)\[/u);
+  if (!match) return null;
+  const open = match[0];
+  return { open, close: `]${match[1]}]`, contentStart: start + open.length };
+}
+
+function luaQuotedLiteralEnd(source: string, start: number, quote: string): number {
+  let escaped = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const char = source[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === quote) return index + 1;
+    if (char === '\n' || char === '\r') return -1;
+  }
+  return -1;
 }
 
 function likelyLuaNaturalText(value: string, maxLength = 2000): boolean {
@@ -1952,6 +2042,7 @@ interface ParsedLuaLiteral {
   contentStart: number;
   contentEnd: number;
   long: boolean;
+  rawLength: number;
 }
 
 function parseLuaLiteral(raw: string, range: [number, number]): ParsedLuaLiteral | null {
@@ -1964,6 +2055,7 @@ function parseLuaLiteral(raw: string, range: [number, number]): ParsedLuaLiteral
       contentStart: range[0] + 1,
       contentEnd: range[1] - 1,
       long: false,
+      rawLength: range[1] - range[0],
     };
   }
   const long = raw.match(/^\[(=*)\[([\s\S]*)\]\1\]$/);
@@ -1975,6 +2067,7 @@ function parseLuaLiteral(raw: string, range: [number, number]): ParsedLuaLiteral
     contentStart: range[0] + delimiterLength,
     contentEnd: range[1] - delimiterLength,
     long: true,
+    rawLength: range[1] - range[0],
   };
 }
 

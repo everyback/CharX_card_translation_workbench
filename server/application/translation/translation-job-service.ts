@@ -6,6 +6,15 @@ export interface TranslationJobServiceDependencies {
   clock: () => string;
 }
 
+export interface TranslationJobCreationResult {
+  jobId: string;
+  created: boolean;
+  transferredJobIds: string[];
+  requestedSegmentCount: number;
+  scheduledSegmentCount: number;
+  deduplicatedSegmentCount: number;
+}
+
 export interface TranslationJobService {
   jobById(jobId: string): Promise<Record<string, unknown> | undefined>;
   hasActiveTranslationJob(projectId: string): Promise<boolean>;
@@ -17,7 +26,7 @@ export interface TranslationJobService {
     model: string,
     segmentIds: readonly string[],
     resetResults: boolean,
-  ): Promise<string>;
+  ): Promise<TranslationJobCreationResult>;
   clearTranslationResults(segmentIds: readonly string[], timestamp?: string): Promise<void>;
   resolveFailedJobItems(segmentId: string, pathLabel: string): Promise<void>;
   refreshHistoricalJobsAfterScan(projectId: string, timestamp?: string): Promise<void>;
@@ -79,24 +88,74 @@ export function createTranslationJobService(
     model: string,
     segmentIds: readonly string[],
     resetResults: boolean,
-  ): Promise<string> {
+  ): Promise<TranslationJobCreationResult> {
+    const uniqueSegmentIds = [...new Set(segmentIds)];
+    if (!uniqueSegmentIds.length) throw new Error('至少需要一个翻译段落。');
+
+    const requestedSegmentCount = uniqueSegmentIds.length;
     const jobId = createId();
     const timestamp = clock();
     const insertItem = database.prepare(`
       INSERT INTO job_items(id, job_id, segment_id, status, attempt_count, updated_at)
       VALUES (?, ?, ?, 'pending', 0, ?)
     `);
-    await database.transaction(async () => {
-      if (resetResults) await clearTranslationResults(segmentIds, timestamp);
+    return await database.transaction(async () => {
+      const placeholders = uniqueSegmentIds.map(() => '?').join(', ');
+      const activeOwners = await database.prepare(`
+        SELECT ji.id AS itemId, ji.segment_id AS segmentId, j.id AS jobId
+        FROM job_items ji
+        JOIN jobs j ON j.id = ji.job_id
+        WHERE j.project_id = ?
+          AND j.status IN ('queued', 'running', 'paused')
+          AND ji.status <> 'cancelled'
+          AND ji.segment_id IN (${placeholders})
+        ORDER BY j.created_at, j.id
+      `).all(projectId, ...uniqueSegmentIds) as Array<{ itemId: string; segmentId: string; jobId: string }>;
+      const activeSegmentIds = new Set(activeOwners.map((row) => row.segmentId));
+      const deduplicatedSegmentCount = uniqueSegmentIds.filter((segmentId) => activeSegmentIds.has(segmentId)).length;
+      const affectedJobs = new Set(activeOwners.map((row) => row.jobId));
+
+      // Transfer overlapping work to this new job. Cancelled old items stay
+      // as an audit trail, but are no longer eligible for scheduler claims.
+      for (const owner of activeOwners) {
+        await database.prepare(`
+          UPDATE job_items
+          SET status = 'cancelled', last_error = '片段已转移到新的翻译任务', updated_at = ?
+          WHERE id = ? AND job_id = ? AND status <> 'cancelled'
+        `).run(timestamp, owner.itemId, owner.jobId);
+      }
+      for (const oldJobId of affectedJobs) {
+        await database.prepare(`
+          UPDATE jobs SET
+            total_items = (SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status <> 'cancelled'),
+            completed_items = (SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status = 'completed'),
+            failed_items = (SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status = 'failed'),
+            status = CASE
+              WHEN NOT EXISTS (SELECT 1 FROM job_items WHERE job_id = ? AND status <> 'cancelled') THEN 'cancelled'
+              ELSE status
+            END,
+            updated_at = ?
+          WHERE id = ?
+        `).run(oldJobId, oldJobId, oldJobId, oldJobId, timestamp, oldJobId);
+      }
+
+      if (resetResults) await clearTranslationResults(uniqueSegmentIds, timestamp);
       await database.prepare(`
         INSERT INTO jobs(id, project_id, status, scope, model, total_items, created_at, updated_at)
         VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)
-      `).run(jobId, projectId, scope, model, segmentIds.length, timestamp, timestamp);
-      for (const segmentId of segmentIds) await insertItem.run(createId(), jobId, segmentId, timestamp);
+      `).run(jobId, projectId, scope, model, uniqueSegmentIds.length, timestamp, timestamp);
+      for (const segmentId of uniqueSegmentIds) await insertItem.run(createId(), jobId, segmentId, timestamp);
       await database.prepare("UPDATE projects SET status = 'translating', updated_at = ? WHERE id = ?")
         .run(timestamp, projectId);
+      return {
+        jobId,
+        created: true,
+        transferredJobIds: [...affectedJobs],
+        requestedSegmentCount,
+        scheduledSegmentCount: uniqueSegmentIds.length,
+        deduplicatedSegmentCount,
+      };
     });
-    return jobId;
   }
 
   async function clearTranslationResults(segmentIds: readonly string[], timestamp = clock()): Promise<void> {
@@ -180,7 +239,19 @@ export function createTranslationJobService(
           const status = Number(counts.failed) > 0 ? 'review_with_errors' : 'review';
           await database.prepare("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ? AND status NOT IN ('cancelled', 'paused')")
             .run(status, timestamp, jobId);
-          await database.prepare("UPDATE projects SET status = 'review', updated_at = ? WHERE id = (SELECT project_id FROM jobs WHERE id = ?)")
+          await database.prepare(`
+            UPDATE projects
+            SET status = CASE
+              WHEN EXISTS (
+                SELECT 1 FROM jobs active
+                WHERE active.project_id = projects.id
+                  AND active.status IN ('queued', 'running', 'paused')
+              ) THEN 'translating'
+              ELSE 'review'
+            END,
+            updated_at = ?
+            WHERE id = (SELECT project_id FROM jobs WHERE id = ?)
+          `)
             .run(timestamp, jobId);
         }
         await database.prepare('INSERT INTO job_logs(job_id, level, message, created_at) VALUES (?, ?, ?, ?)')

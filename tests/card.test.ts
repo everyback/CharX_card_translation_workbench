@@ -848,6 +848,24 @@ test('Risu Lua scanning does not treat code around angle brackets as visible HTM
   assert.equal(segments[0].kind, 'runtime-message');
 });
 
+test('Lua recovery scans visible HTML when another statement cannot be parsed', () => {
+  const code = [
+    'local panel = [[<section><h1>이야기의 규칙</h1><p>원작을 얼마나 따를지, 숨은 진실을 언제 열지 정합니다.</p></section>]]',
+    'if true then',
+    'alertError(triggerId, "오류")',
+  ].join('\n');
+  const module = { trigger: [{ effect: [{ code }] }] };
+
+  const scriptUi = scanRisuModule(module, 'visible-scripts');
+  assert.ok(scriptUi.some((segment) => segment.kind === 'lua-text-node' && segment.sourceText === '이야기의 규칙'));
+  assert.ok(scriptUi.some((segment) => segment.kind === 'lua-text-node' && segment.sourceText.includes('원작을 얼마나')));
+  assert.ok(scriptUi.some((segment) => segment.kind === 'runtime-message' && segment.sourceText === '오류'));
+
+  const all = scanRisuModule(module, 'all');
+  assert.ok(all.some((segment) => segment.kind === 'lua-text-node' && segment.sourceText === '이야기의 규칙'));
+  assert.equal(all.some((segment) => segment.sourceText === 'true'), false);
+});
+
 test('complete scanning extracts Lua prompt strings by AST range', () => {
   const code = [
     'local parts = {',

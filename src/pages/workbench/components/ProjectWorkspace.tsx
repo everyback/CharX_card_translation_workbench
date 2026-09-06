@@ -30,12 +30,12 @@ export function ProjectWorkspace({
 }: ProjectWorkspaceProps) {
   return (
     <>
-      <GuidedWorkflow {...workflow} />
+      {tab !== 'review' && <GuidedWorkflow {...workflow} />}
       <ProjectStats project={project} />
       <ProjectWarningStrip project={project} />
-      <TranslationCommandBar {...commandBar} />
+      {tab !== 'review' && <TranslationCommandBar {...commandBar} />}
       <WorkbenchTabs tab={tab} onChange={onTabChange} />
-      <WorkspaceTabContent tab={tab} {...content} />
+      <WorkspaceTabContent key={project.id} tab={tab} {...content} />
     </>
   );
 }

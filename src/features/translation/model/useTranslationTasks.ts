@@ -51,7 +51,7 @@ export function useTranslationTasks({
     const hasPendingSegments = project.segments.some((segment) => (
       segment.included && ['untranslated', 'rejected'].includes(segment.reviewStatus)
     ));
-    if (latestJob && ['queued', 'running'].includes(latestJob.status)) {
+    if (latestJob && ['queued', 'running'].includes(latestJob.status) && !hasPendingSegments) {
       onShowJobs();
       onNotice('当前翻译任务仍在进行中，已打开任务进度。');
       return;

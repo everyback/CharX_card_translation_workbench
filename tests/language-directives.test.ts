@@ -4,6 +4,7 @@ import {
   languageBehaviorDirectiveIssue,
   languageDisplayName,
   normalizeLanguageBehaviorDirectives,
+  registerLanguageProfile,
   reviewLanguageBehaviorDirectives,
 } from '../server/domain/translation/language-directives.js';
 
@@ -44,6 +45,14 @@ test('target display labels are stable for prompts and review', () => {
   assert.equal(languageDisplayName('zh-TW'), '繁体中文');
   assert.equal(languageDisplayName('ja'), '日语');
   assert.equal(languageDisplayName('English'), '英语');
+});
+
+test('language profiles can extend behavior routing while unknown codes fall back safely', () => {
+  registerLanguageProfile({ family: 'tlh', aliases: ['Klingon'], displayName: '克林贡语' });
+  assert.equal(languageDisplayName('Klingon'), '克林贡语');
+  const result = normalizeLanguageBehaviorDirectives('Use Klingon when speaking.', 'zh-CN');
+  assert.equal(result.text, 'Use 简体中文 when speaking.');
+  assert.equal(languageDisplayName('xx-YY'), 'xx-YY');
 });
 
 test('review metadata reports automatic replacements and unresolved directives', () => {

@@ -21,12 +21,13 @@ export interface LanguageDirectiveReview {
   remaining: LanguageDirectiveMatch[];
 }
 
-type LanguageAlias = {
+export type LanguageProfile = {
   family: string;
   aliases: string[];
+  displayName?: string;
 };
 
-const LANGUAGE_ALIASES: LanguageAlias[] = [
+const LANGUAGE_ALIASES: LanguageProfile[] = [
   { family: 'zh', aliases: ['简体中文', '繁体中文', '中文', '汉语', '汉文', 'Chinese', 'Mandarin'] },
   { family: 'ko', aliases: ['韩国语', '한국어', '韩语', '韩文', 'Korean', 'ko'] },
   { family: 'ja', aliases: ['日本語', '日语', '日文', 'Japanese', 'ja'] },
@@ -37,6 +38,11 @@ const LANGUAGE_ALIASES: LanguageAlias[] = [
   { family: 'ru', aliases: ['俄语', '俄文', 'Russian', 'русский', 'ru'] },
   { family: 'ar', aliases: ['阿拉伯语', '阿拉伯文', 'Arabic', 'العربية', 'ar'] },
   { family: 'th', aliases: ['泰语', '泰文', 'Thai', 'ไทย', 'th'] },
+  { family: 'pt', aliases: ['葡萄牙语', '葡萄牙文', 'Portuguese', 'Português', 'pt'] },
+  { family: 'it', aliases: ['意大利语', '意大利文', 'Italian', 'Italiano', 'it'] },
+  { family: 'vi', aliases: ['越南语', '越南文', 'Vietnamese', 'Tiếng Việt', 'vi'] },
+  { family: 'nl', aliases: ['荷兰语', '荷兰文', 'Dutch', 'Nederlands', 'nl'] },
+  { family: 'tr', aliases: ['土耳其语', '土耳其文', 'Turkish', 'Türkçe', 'tr'] },
 ];
 
 const BEHAVIOR_VERBS = [
@@ -49,15 +55,20 @@ const BEHAVIOR_VERBS = [
   '考え', '思考', '会話', '話し', '書き', '記述', 'ナレーション', '返答', '出力',
 ];
 
-const aliasEntries = LANGUAGE_ALIASES
-  .flatMap(({ family, aliases }) => aliases.map((alias) => ({ family, alias })))
-  .sort((left, right) => right.alias.length - left.alias.length);
-
-const aliasPattern = aliasEntries
-  .map(({ alias }) => /[A-Za-z]/u.test(alias) ? `\\b${escapeRegExp(alias)}\\b` : escapeRegExp(alias))
-  .join('|');
-const aliasRegex = new RegExp(`(?:${aliasPattern})`, 'giu');
+let languageProfiles = [...LANGUAGE_ALIASES];
+let aliasEntries = buildAliasEntries(languageProfiles);
+let aliasRegex = buildAliasRegex(aliasEntries);
 const behaviorRegex = new RegExp(BEHAVIOR_VERBS.map(escapeRegExp).join('|'), 'iu');
+
+/** Add a provider/card-specific language profile without changing scanner safety rules. */
+export function registerLanguageProfile(profile: LanguageProfile): void {
+  const family = normalizeLanguage(profile.family).split('-')[0];
+  const aliases = [...new Set([family, ...profile.aliases].map((alias) => alias.trim()).filter(Boolean))];
+  if (!family || !aliases.length) return;
+  languageProfiles = [...languageProfiles.filter((item) => item.family !== family), { ...profile, family, aliases }];
+  aliasEntries = buildAliasEntries(languageProfiles);
+  aliasRegex = buildAliasRegex(aliasEntries);
+}
 
 /**
  * Rewrites language names only when they participate in a language-behavior
@@ -154,6 +165,8 @@ export function languageDisplayName(language: string): string {
   if (family === 'ru') return '俄语';
   if (family === 'ar') return '阿拉伯语';
   if (family === 'th') return '泰语';
+  const profile = languageProfiles.find((item) => item.family === family);
+  if (profile?.displayName) return profile.displayName;
   return language.trim() || '目标语言';
 }
 
@@ -222,4 +235,17 @@ function normalizeLanguage(value: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildAliasEntries(profiles: readonly LanguageProfile[]): Array<{ family: string; alias: string }> {
+  return profiles
+    .flatMap(({ family, aliases }) => aliases.map((alias) => ({ family, alias })))
+    .sort((left, right) => right.alias.length - left.alias.length);
+}
+
+function buildAliasRegex(entries: readonly { alias: string }[]): RegExp {
+  const pattern = entries
+    .map(({ alias }) => /[A-Za-z]/u.test(alias) ? `\\b${escapeRegExp(alias)}\\b` : escapeRegExp(alias))
+    .join('|');
+  return new RegExp(`(?:${pattern})`, 'giu');
 }

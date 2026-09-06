@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/shared/api/http';
-import type { ProjectDetail } from '@/shared/types';
 import { SUPPORTED_CARD_EXTENSIONS } from './card-file';
 import type { RunWorkbenchAction, ShowWorkbenchError } from '@/shared/model/workbench-actions';
+
+export interface CardImportResult {
+  fileName: string;
+  projectId?: string;
+  status: 'imported' | 'failed';
+  error?: string;
+}
 
 interface UseCardImportOptions {
   busy: string;
@@ -13,6 +19,7 @@ interface UseCardImportOptions {
   onNotice: (notice: string) => void;
   onShowOverview: () => void;
   onImportedProject?: (projectId: string) => void;
+  onImportResults?: (results: CardImportResult[]) => void;
 }
 
 export function useCardImport({
@@ -24,6 +31,7 @@ export function useCardImport({
   onNotice,
   onShowOverview,
   onImportedProject,
+  onImportResults,
 }: UseCardImportOptions) {
   const [draggingFiles, setDraggingFiles] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -37,25 +45,35 @@ export function useCardImport({
       return;
     }
     await runAction('import', async () => {
-      let created: ProjectDetail | null = null;
+      const results: CardImportResult[] = [];
       for (const file of supported) {
-        const formData = new FormData();
-        formData.append('file', file);
-        created = await api<ProjectDetail>('/api/projects/import', {
-          method: 'POST',
-          body: formData,
-        });
+        try {
+          const formData = new FormData();
+          formData.append('file', file);
+          const created = await api<{ id: string }>('/api/projects/import', {
+            method: 'POST',
+            body: formData,
+          });
+          results.push({ fileName: file.name, projectId: created.id, status: 'imported' });
+        } catch (error) {
+          results.push({ fileName: file.name, status: 'failed', error: error instanceof Error ? error.message : '导入失败' });
+        }
       }
       await refreshProjects();
-      if (created) {
-        selectProject(created.id);
-        onImportedProject?.(created.id);
+      const imported = results.filter((item): item is CardImportResult & { projectId: string } => item.status === 'imported' && Boolean(item.projectId));
+      if (supported.length === 1 && imported.length === 1) {
+        selectProject(imported[0].projectId);
+        onImportedProject?.(imported[0].projectId);
+      } else if (imported.length > 0) {
+        selectProject(imported[imported.length - 1].projectId);
       }
+      onImportResults?.(results);
       onShowOverview();
       const ignored = files.length - supported.length;
-      onNotice(`已导入 ${supported.length} 个文件${ignored ? `，忽略 ${ignored} 个不支持的文件` : ''}。`);
+      const failed = results.filter((item) => item.status === 'failed').length;
+      onNotice(`已处理 ${supported.length} 个文件${failed ? `，${failed} 个失败` : ''}${ignored ? `，忽略 ${ignored} 个不支持的文件` : ''}。`);
     });
-  }, [busy, onError, onImportedProject, onNotice, onShowOverview, refreshProjects, runAction, selectProject]);
+  }, [busy, onError, onImportResults, onImportedProject, onNotice, onShowOverview, refreshProjects, runAction, selectProject]);
 
   useEffect(() => {
     const hasFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files');
