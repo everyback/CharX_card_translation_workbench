@@ -28,6 +28,7 @@ export interface TranslationJobService {
     resetResults: boolean,
   ): Promise<TranslationJobCreationResult>;
   clearTranslationResults(segmentIds: readonly string[], timestamp?: string): Promise<void>;
+  cancelActiveJobItemsForManualReview(segmentId: string, pathLabel: string): Promise<void>;
   resolveFailedJobItems(segmentId: string, pathLabel: string): Promise<void>;
   refreshHistoricalJobsAfterScan(projectId: string, timestamp?: string): Promise<void>;
 }
@@ -207,6 +208,74 @@ export function createTranslationJobService(
     }
   }
 
+  /**
+   * A reviewer owns a segment as soon as they save a decision. Cancel every
+   * active item for that segment so an in-flight model response cannot reset
+   * the manual final text or review status afterwards.
+   */
+  async function cancelActiveJobItemsForManualReview(segmentId: string, pathLabel: string): Promise<void> {
+    const timestamp = clock();
+    await database.transaction(async () => {
+      const jobs = await database.prepare(`
+        SELECT DISTINCT ji.job_id AS jobId
+        FROM job_items ji
+        JOIN jobs j ON j.id = ji.job_id
+        WHERE ji.segment_id = ?
+          AND ji.status IN ('pending', 'running')
+          AND j.status IN ('queued', 'running', 'paused')
+      `).all(segmentId) as Array<{ jobId: string }>;
+      if (!jobs.length) return;
+
+      await database.prepare(`
+        UPDATE job_items
+        SET status = 'cancelled', last_error = ?, updated_at = ?
+        WHERE segment_id = ?
+          AND status IN ('pending', 'running')
+          AND EXISTS (
+            SELECT 1 FROM jobs j
+            WHERE j.id = job_items.job_id
+              AND j.status IN ('queued', 'running', 'paused')
+          )
+      `).run(`人工审核已接管段落：${pathLabel}`, timestamp, segmentId);
+
+      for (const { jobId } of jobs) {
+        await database.prepare(`
+          UPDATE jobs SET
+            total_items = (SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status <> 'cancelled'),
+            completed_items = (SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status = 'completed'),
+            failed_items = (SELECT COUNT(*) FROM job_items WHERE job_id = ? AND status = 'failed'),
+            status = CASE
+              WHEN NOT EXISTS (SELECT 1 FROM job_items WHERE job_id = ? AND status <> 'cancelled') THEN 'cancelled'
+              WHEN NOT EXISTS (SELECT 1 FROM job_items WHERE job_id = ? AND status IN ('pending', 'running'))
+                THEN CASE
+                  WHEN EXISTS (SELECT 1 FROM job_items WHERE job_id = ? AND status = 'failed') THEN 'review_with_errors'
+                  ELSE 'review'
+                END
+              ELSE status
+            END,
+            updated_at = ?
+          WHERE id = ? AND status IN ('queued', 'running', 'paused')
+        `).run(jobId, jobId, jobId, jobId, jobId, jobId, timestamp, jobId);
+        await database.prepare('INSERT INTO job_logs(job_id, level, message, created_at) VALUES (?, ?, ?, ?)')
+          .run(jobId, 'info', `人工审核已接管段落：${pathLabel}`, timestamp);
+      }
+
+      await database.prepare(`
+        UPDATE projects
+        SET status = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM jobs active
+            WHERE active.project_id = projects.id
+              AND active.status IN ('queued', 'running', 'paused')
+          ) THEN 'translating'
+          ELSE 'review'
+        END,
+        updated_at = ?
+        WHERE id = (SELECT project_id FROM segments WHERE id = ?)
+      `).run(timestamp, segmentId);
+    });
+  }
+
   async function resolveFailedJobItems(segmentId: string, pathLabel: string): Promise<void> {
     const jobs = await database.prepare(`
       SELECT DISTINCT ji.job_id AS jobId
@@ -296,6 +365,7 @@ export function createTranslationJobService(
     projectResultSegmentIds,
     createTranslationJob,
     clearTranslationResults,
+    cancelActiveJobItemsForManualReview,
     resolveFailedJobItems,
     refreshHistoricalJobsAfterScan,
   };

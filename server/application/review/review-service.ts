@@ -36,6 +36,7 @@ export interface ReviewServiceDependencies {
   clock: () => string;
   publicSettings: () => PublicLanguageSettings;
   controlReferencesForProject(projectId: string): Promise<RisuControlReference[]>;
+  cancelActiveJobItemsForManualReview(segmentId: string, pathLabel: string): Promise<void>;
   resolveFailedJobItems(segmentId: string, pathLabel: string): Promise<void>;
 }
 
@@ -115,6 +116,7 @@ export function createReviewService({
   clock,
   publicSettings,
   controlReferencesForProject,
+  cancelActiveJobItemsForManualReview,
   resolveFailedJobItems,
 }: ReviewServiceDependencies) {
   async function appendSegmentQaFlag(segmentId: string, qaFlag: string): Promise<void> {
@@ -151,6 +153,7 @@ export function createReviewService({
     const references = await controlReferencesForProject(projectId);
     const settings = publicSettings();
     const approvedIds: string[] = [];
+    const approvedPathLabels = new Map<string, string>();
     const qaById = new Map<string, string[]>();
     const languageConfirmationRequired: Array<{ id: string; pathLabel: string; issue: string }> = [];
     const protectionConfirmationRequired: NonNullable<BulkApprovalResult['protectionConfirmationRequired']> = [];
@@ -204,7 +207,11 @@ export function createReviewService({
       if (protectionConfirmed) qaFlags.push(protectionConfirmationFlag(effectiveText));
       qaById.set(String(row.id), qaFlags);
       if ((missing.length && !protectionConfirmed) || protocolIssue || sourceIssue || (languageIssue && !confirmLanguageIssues)) skipped += 1;
-      else approvedIds.push(String(row.id));
+      else {
+        const segmentId = String(row.id);
+        approvedIds.push(segmentId);
+        approvedPathLabels.set(segmentId, String(row.pathLabel || segmentId));
+      }
     }
 
     if (languageConfirmationRequired.length && !confirmLanguageIssues) {
@@ -221,6 +228,10 @@ export function createReviewService({
         );
       }
       return { approved: 0, skipped: 0, protectionConfirmationRequired };
+    }
+
+    for (const segmentId of approvedIds) {
+      await cancelActiveJobItemsForManualReview(segmentId, approvedPathLabels.get(segmentId) || segmentId);
     }
 
     const update = database.prepare("UPDATE segments SET review_status = 'approved', updated_at = ? WHERE id = ?");

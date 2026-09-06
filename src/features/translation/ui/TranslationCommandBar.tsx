@@ -36,7 +36,12 @@ export function TranslationCommandBar({
           <ChevronDown size={15} />
         </div>
       </label>
-      <button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}>
+      <button
+        className="secondary-button"
+        onClick={onScan}
+        disabled={Boolean(busy) || activeTranslationJob}
+        title={activeTranslationJob ? '翻译任务进行中，完成或取消后才能重新扫描' : undefined}
+      >
         {busy === 'scan' ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}扫描字段
       </button>
       <button className="primary-button" onClick={onStartTranslation} disabled={!project.segments.length || Boolean(busy) || activeTranslationJob} title={activeTranslationJob ? '翻译任务进行中，完成或失败后才能再次执行' : undefined}>

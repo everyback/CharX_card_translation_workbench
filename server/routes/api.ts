@@ -118,6 +118,7 @@ const reviewService = createReviewService({
   clock: now,
   publicSettings,
   controlReferencesForProject,
+  cancelActiveJobItemsForManualReview: translationJobs.cancelActiveJobItemsForManualReview,
   resolveFailedJobItems: translationJobs.resolveFailedJobItems,
 });
 const exportService = createExportService({
@@ -599,9 +600,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/protocols/
 
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/protocols/analyze', async (request, reply) => {
   if (!await projectById(request.params.projectId)) return reply.code(404).send({ error: '项目不存在。' });
-  if (await translationJobs.hasActiveTranslationJob(request.params.projectId)) {
-    return reply.code(409).send({ error: '请先结束当前翻译任务再重新判断协议。' });
-  }
   const settings = publicSettings();
   if (!settings.apiKeyConfigured || !settings.model) {
     return reply.code(400).send({ error: '请先在模型设置中配置 API Key 和模型名称。' });
@@ -638,9 +636,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/protocols/
 app.patch<{ Params: { projectId: string; schemaId: string } }>(
   '/api/projects/:projectId/protocols/:schemaId',
   async (request, reply) => {
-    if (await translationJobs.hasActiveTranslationJob(request.params.projectId)) {
-      return reply.code(409).send({ error: '请先结束当前翻译任务再修改协议规则。' });
-    }
     try {
       return await updateProtocolSchema(request.params.projectId, request.params.schemaId, asRecord(request.body));
     } catch (error) {
@@ -976,9 +971,6 @@ function regexCoverageValidation(
 }
 
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-coverage/preview', async (request, reply) => {
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再执行 Lua 正则全量检查。' });
   try {
     const context = await loadRegexCoverageContext(request.params.projectId);
     if (!context) return reply.code(409).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
@@ -994,9 +986,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
  * not alter the Lua module or disable any other integrity checks.
  */
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-validation/force-pass', async (request, reply) => {
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再跳过 Lua 正则检查。' });
   try {
     const row = await db.prepare(`
       SELECT original_json AS originalJson, original_module_json AS originalModuleJson,
@@ -1076,9 +1065,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
 });
 
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-coverage/rule', async (request, reply) => {
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再执行 Lua 正则全量检查。' });
   const body = asRecord(request.body);
   const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
   const requestedPattern = typeof body.pattern === 'string' ? body.pattern : undefined;
@@ -1163,9 +1149,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
     draftModuleJson?: string | null;
   } | undefined;
   if (!row?.originalJson || !row.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再执行 Lua 正则全量检查。' });
   try {
     const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
     const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : structuredClone(originalCard);
@@ -1347,9 +1330,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
 
 /** Save a manually edited regex input into draft_module_json after syntax validation. */
 app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-rule', async (request, reply) => {
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再保存正则规则。' });
   const body = asRecord(request.body);
   const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
   const pattern = typeof body.pattern === 'string' ? body.pattern : '';
@@ -1443,9 +1423,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/runtim
     targetLanguage?: string;
   } | undefined;
   if (!row?.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可修改的 Risu Lua 模块。' });
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再合并名称别名。' });
   const body = asRecord(request.body);
   const ownerId = typeof body.ownerId === 'string' ? body.ownerId.trim() : '';
   const aliases = Array.isArray(body.aliases)
@@ -1496,9 +1473,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/router
   } | undefined;
   if (!row?.originalJson) return reply.code(404).send({ error: '项目不存在或缺少原始卡片数据。' });
   if (!row.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可修复的 Risu Lua 模块。' });
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再应用路由修复。' });
 
   try {
     const body = asRecord(request.body);
@@ -1564,9 +1538,6 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/reset-
   } | undefined;
   if (!row) return reply.code(404).send({ error: '项目不存在。' });
   if (!row.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可恢复的原始 Risu Lua 模块。' });
-  const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
-    .get(request.params.projectId) as { count: number };
-  if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再恢复 Lua 草稿。' });
 
   const hasDraftChanges = row.draftModuleJson !== row.originalModuleJson || Boolean(row.regexValidationOverrides);
   if (!hasDraftChanges) return { ok: true, reset: false };
@@ -1837,8 +1808,10 @@ app.patch<{ Params: { segmentId: string } }>('/api/segments/:segmentId', async (
   const finalText = typeof body.finalText === 'string'
     ? body.finalText
     : typeof current.final_text === 'string' ? current.final_text : null;
-  const reviewStatus = ['untranslated', 'pending', 'approved', 'rejected'].includes(text(body.reviewStatus))
-    ? text(body.reviewStatus)
+  const reviewStatusValue = text(body.reviewStatus);
+  const reviewStatusProvided = ['untranslated', 'pending', 'approved', 'rejected'].includes(reviewStatusValue);
+  const reviewStatus = reviewStatusProvided
+    ? reviewStatusValue
     : String(current.review_status);
   const included = typeof body.included === 'boolean' ? Number(body.included) : Number(current.included);
   const effectiveText = String(finalText || current.translated_text || '').trim();
@@ -1920,6 +1893,9 @@ app.patch<{ Params: { segmentId: string } }>('/api/segments/:segmentId', async (
     .filter((flag) => reviewStatus !== 'approved' || !isReviewProblemQaFlag(flag));
   if (reviewStatus === 'approved' && languageBehaviorConfirmed) qaFlags.push(LANGUAGE_BEHAVIOR_CONFIRMATION_FLAG);
   if (reviewStatus === 'approved' && protectionIssueConfirmed) qaFlags.push(protectionConfirmationFlag(effectiveText));
+  if (typeof body.finalText === 'string' || reviewStatusProvided) {
+    await translationJobs.cancelActiveJobItemsForManualReview(request.params.segmentId, String(current.path_label));
+  }
   await db.prepare('UPDATE segments SET final_text = ?, review_status = ?, included = ?, qa_flags = ?, updated_at = ? WHERE id = ?')
     .run(finalText, reviewStatus, included, JSON.stringify(qaFlags), now(), request.params.segmentId);
   if (reviewStatus === 'approved') await translationJobs.resolveFailedJobItems(request.params.segmentId, String(current.path_label));
@@ -1952,6 +1928,9 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/review-bul
   if (!ids.length) return reply.code(400).send({ error: '请选择审核条目。' });
   if (action !== 'copy-machine' && action !== 'clear-manual') {
     return reply.code(400).send({ error: '批量审核操作无效。' });
+  }
+  for (const segmentId of ids) {
+    await translationJobs.cancelActiveJobItemsForManualReview(segmentId, '批量审核操作');
   }
   const timestamp = now();
   const copyMachine = db.prepare(`

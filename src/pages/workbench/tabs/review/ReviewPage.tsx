@@ -1,4 +1,4 @@
-import { Check, CheckCheck, ChevronDown, ChevronUp, CircleAlert, Copy, FilterX, Link2, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react';
+import { Check, CheckCheck, ChevronDown, ChevronUp, CircleAlert, Copy, FilterX, Link2, LoaderCircle, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef } from 'react';
 import { RiskBadge } from '@/entities/segment/ui/RiskBadge';
 import { CATEGORY_LABELS, KIND_LABELS } from '@/entities/segment/model/labels';
@@ -41,6 +41,7 @@ export function ReviewPage({
   onClearReviewFocus,
   approving,
   resetting,
+  updating,
 }: {
   segments: Segment[];
   selected: Segment | null;
@@ -73,6 +74,7 @@ export function ReviewPage({
   onClearReviewFocus: () => void;
   approving: boolean;
   resetting: boolean;
+  updating: boolean;
 }) {
   const resultSegments = useMemo(() => segments.filter((segment) => (
     segment.reviewStatus !== 'untranslated'
@@ -363,9 +365,9 @@ export function ReviewPage({
           <div className="review-actions">
             {selected.translationError && selected.reviewStatus !== 'approved' && <button className="secondary-button" onClick={() => onDraftChange(selected.sourceText)}><Copy size={16} />载入原文</button>}
             <button className="secondary-button danger-ghost" disabled={resetting} onClick={() => onRetranslate([selected.id])}><RefreshCw size={16} />删除并重译</button>
-            <button className="secondary-button" onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'rejected' })}><X size={16} />退回</button>
-            <button className="secondary-button" onClick={() => void onUpdate({ finalText: draft, reviewStatus: selected.reviewStatus })}><Save size={16} />保存修改</button>
-            <button className="primary-button" disabled={!draft.trim()} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'approved' })}><Check size={16} />通过</button>
+            <button className="secondary-button" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'rejected' })}>{updating ? <LoaderCircle className="spin" size={16} /> : <X size={16} />}退回</button>
+            <button className="secondary-button" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: selected.reviewStatus })}>{updating ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存修改</button>
+            <button className="primary-button" disabled={updating || !draft.trim()} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'approved' })}>{updating ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}通过</button>
           </div>
         </> : <div className="table-empty">从左侧选择一个段落</div>}
       </div>

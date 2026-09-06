@@ -137,7 +137,7 @@ export function WorkbenchPage() {
 
   const showReview = useCallback(() => setTab('review'), []);
   const showLua = useCallback(() => setTab('lua'), []);
-  const activeTranslationJob = Boolean(project?.jobs.some((job) => ['queued', 'running'].includes(job.status)));
+  const activeTranslationJob = Boolean(project?.jobs.some((job) => ['queued', 'running', 'paused'].includes(job.status)));
   const {
     selectedSegment,
     updateSegment,
@@ -485,6 +485,7 @@ export function WorkbenchPage() {
                 onClearReviewFocus: () => setReviewFocus(null),
                 approving: busy.startsWith('approve-'),
                 resetting: busy === 'retranslate' || busy === 'clear-results',
+                updating: busy === 'segment-update',
               },
               glossary: {
                 terms: glossary,

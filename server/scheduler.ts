@@ -825,12 +825,13 @@ async function translateProjectRegexLanguageAlternatives(
 ): Promise<{ total: number; added: number; adapted: number; failed: number }> {
   const row = await db.prepare(`
     SELECT original_json AS originalJson, original_module_json AS originalModuleJson,
-      draft_module_json AS draftModuleJson
+      draft_module_json AS draftModuleJson, updated_at AS updatedAt
     FROM projects WHERE id = ?
   `).get(projectId) as {
     originalJson?: string | null;
     originalModuleJson?: string | null;
     draftModuleJson?: string | null;
+    updatedAt?: string;
   } | undefined;
   if (!row?.originalJson || !row.originalModuleJson) return { total: 0, added: 0, adapted: 0, failed: 0 };
 
@@ -939,8 +940,12 @@ async function translateProjectRegexLanguageAlternatives(
       : 'info', `Lua 正则语言适配完成：模型未确认需要追加的目标语言并列项（检查 ${entries.length} 条规则${failedEntries ? `，${failedEntries} 条待重试` : ''}）。`);
     return { total: entries.length, added: 0, adapted: 0, failed: failedEntries };
   }
-  await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ?')
-    .run(JSON.stringify(draftModule), now(), projectId);
+  const saved = await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
+    .run(JSON.stringify(draftModule), now(), projectId, row.updatedAt ?? '');
+  if (!saved.changes) {
+    await log(jobId, 'warn', 'Lua 正则适配结果未写回：项目草稿已被人工操作更新，已保留最新草稿。');
+    return { total: entries.length, added: 0, adapted: 0, failed: failedEntries };
+  }
   const added = changes.reduce((total, change) => total + change.addedAlternatives.length, 0);
   const adapted = coverageChanges.length;
   await log(jobId, failedEntries ? 'warn' : 'info', `Lua 正则语言适配完成：已结合完整命中集适配 ${adapted} 条规则、追加 ${added} 个目标语言并列项${failedEntries ? `，${failedEntries} 条待重试` : ''}，进入审核时可检查。`);
@@ -1355,9 +1360,10 @@ async function translateProjectRuntimeAliases(
 ): Promise<RuntimeAliasFollowUpResult> {
   if (!candidates.length) return { total: 0, failed: 0 };
   const row = await db.prepare(`
-    SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+    SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
+      updated_at AS updatedAt
     FROM projects WHERE id = ?
-  `).get(projectId) as { originalModuleJson?: string | null; draftModuleJson?: string | null } | undefined;
+  `).get(projectId) as { originalModuleJson?: string | null; draftModuleJson?: string | null; updatedAt?: string } | undefined;
   if (!row?.originalModuleJson) {
     await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
     return { total: candidates.length, failed: candidates.length };
@@ -1413,8 +1419,13 @@ async function translateProjectRuntimeAliases(
     return { total: candidates.length, failed: 0 };
   }
   try {
-    await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ?')
-      .run(JSON.stringify(applied.draft), now(), projectId);
+    const saved = await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
+      .run(JSON.stringify(applied.draft), now(), projectId, row.updatedAt ?? '');
+    if (!saved.changes) {
+      await updateRuntimeAliasFollowUp(jobId, candidates.length, 0);
+      await log(jobId, 'warn', '运行时名称本地化结果未写回：项目草稿已被人工操作更新，已保留最新草稿。');
+      return { total: candidates.length, failed: 0 };
+    }
   } catch (error) {
     await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
     await log(jobId, 'warn', `运行时名称本地化写回失败，导出时将再次尝试：${error instanceof Error ? error.message : String(error)}`);

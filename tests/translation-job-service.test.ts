@@ -177,6 +177,89 @@ test('translation job service transfers active segments while allowing same-proj
   }
 });
 
+test('translation job service lets manual review take ownership of an active segment', async () => {
+  const { database, directory } = await createJobDatabase();
+  try {
+    await database.prepare('INSERT INTO projects(id, status, updated_at) VALUES (?, ?, ?)')
+      .run('project-1', 'translating', 'before');
+    await database.prepare(`
+      INSERT INTO segments(id, project_id, review_status, qa_flags, updated_at, sort_order)
+      VALUES (?, ?, 'pending', '[]', 'before', ?)
+    `).run('segment-1', 'project-1', 0);
+    await database.prepare(`
+      INSERT INTO jobs(id, project_id, status, scope, model, total_items, created_at, updated_at)
+      VALUES (?, ?, 'running', 'all-visible', 'test-model', 1, ?, ?)
+    `).run('job-1', 'project-1', 'before', 'before');
+    await database.prepare(`
+      INSERT INTO job_items(id, job_id, segment_id, status, attempt_count, updated_at)
+      VALUES (?, ?, ?, 'running', 1, ?)
+    `).run('item-1', 'job-1', 'segment-1', 'before');
+
+    const service = createTranslationJobService({
+      database,
+      createId: () => 'unused',
+      clock: () => '2026-08-21T00:00:00.000Z',
+    });
+    await service.cancelActiveJobItemsForManualReview('segment-1', '$.name');
+
+    assert.deepEqual(await database.prepare('SELECT status, last_error AS lastError FROM job_items').all(), [
+      { status: 'cancelled', lastError: '人工审核已接管段落：$.name' },
+    ]);
+    assert.deepEqual(await database.prepare('SELECT status, total_items AS totalItems FROM jobs').all(), [
+      { status: 'cancelled', totalItems: 0 },
+    ]);
+    assert.deepEqual(await database.prepare('SELECT status FROM projects').all(), [{ status: 'review' }]);
+    assert.deepEqual(await database.prepare('SELECT level, message FROM job_logs').all(), [
+      { level: 'info', message: '人工审核已接管段落：$.name' },
+    ]);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('manual review keeps the project translating while another job remains active', async () => {
+  const { database, directory } = await createJobDatabase();
+  try {
+    await database.prepare('INSERT INTO projects(id, status, updated_at) VALUES (?, ?, ?)')
+      .run('project-1', 'translating', 'before');
+    await database.prepare(`
+      INSERT INTO segments(id, project_id, review_status, qa_flags, updated_at, sort_order)
+      VALUES (?, 'project-1', 'pending', '[]', 'before', ?)
+    `).run('segment-1', 0);
+    await database.prepare(`
+      INSERT INTO segments(id, project_id, review_status, qa_flags, updated_at, sort_order)
+      VALUES (?, 'project-1', 'pending', '[]', 'before', ?)
+    `).run('segment-2', 1);
+    for (const [jobId, segmentId] of [['job-1', 'segment-1'], ['job-2', 'segment-2']]) {
+      await database.prepare(`
+        INSERT INTO jobs(id, project_id, status, scope, model, total_items, created_at, updated_at)
+        VALUES (?, 'project-1', 'running', 'all-visible', 'test-model', 1, 'before', 'before')
+      `).run(jobId);
+      await database.prepare(`
+        INSERT INTO job_items(id, job_id, segment_id, status, attempt_count, updated_at)
+        VALUES (?, ?, ?, 'running', 1, 'before')
+      `).run(`item-${jobId}`, jobId, segmentId);
+    }
+
+    const service = createTranslationJobService({
+      database,
+      createId: () => 'unused',
+      clock: () => '2026-08-21T00:00:00.000Z',
+    });
+    await service.cancelActiveJobItemsForManualReview('segment-1', '$.name');
+
+    assert.deepEqual(await database.prepare('SELECT id, status FROM jobs ORDER BY id').all(), [
+      { id: 'job-1', status: 'cancelled' },
+      { id: 'job-2', status: 'running' },
+    ]);
+    assert.deepEqual(await database.prepare('SELECT status FROM projects').all(), [{ status: 'translating' }]);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('translation job service serializes concurrent overlap transfers inside the writer transaction', async () => {
   const { database, directory } = await createJobDatabase();
   try {

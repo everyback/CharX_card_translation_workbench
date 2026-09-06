@@ -68,6 +68,7 @@ test('review approval rolls back all segment updates when one approval is reject
       clock: () => '2026-08-21T00:00:00.000Z',
       publicSettings: () => ({ sourceLanguage: 'en', fallbackLanguage: 'ko', targetLanguage: 'zh-CN' }),
       controlReferencesForProject: async () => [],
+      cancelActiveJobItemsForManualReview: async () => {},
       resolveFailedJobItems: async () => {},
     });
 
