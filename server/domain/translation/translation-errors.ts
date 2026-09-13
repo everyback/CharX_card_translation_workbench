@@ -1,3 +1,10 @@
+export class RejectedTranslationError extends Error {
+  constructor(message: string, readonly segmentId: string, readonly translatedText: string, readonly qaFlags: string[]) {
+    super(message);
+    this.name = 'RejectedTranslationError';
+  }
+}
+
 export function shouldSplitTranslationBatch(error: unknown): boolean {
   const message = (error instanceof Error ? `${error.name}: ${error.message}` : String(error)).toLowerCase();
   if (/timeout|timed out|aborted due to timeout/.test(message)) return true;

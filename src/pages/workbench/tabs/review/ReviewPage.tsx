@@ -339,7 +339,7 @@ export function ReviewPage({
               <div>
                 <strong>模型翻译失败，可人工接管</strong>
                 <span>{selected.translationError}</span>
-                <small>请先载入原文，只修改其中的可见文字；通过后会作为最终译文写入审核稿。</small>
+                <small>{selected.translatedText ? '未通过校验的译文已保留在机器译文框，可载入后修订；审核通过后才会作为最终译文。' : '请先载入原文，只修改其中的可见文字；通过后会作为最终译文写入审核稿。'}</small>
               </div>
             </div>
           )}
@@ -364,6 +364,7 @@ export function ReviewPage({
           </div>
           <div className="review-actions">
             {selected.translationError && selected.reviewStatus !== 'approved' && <button className="secondary-button" onClick={() => onDraftChange(selected.sourceText)}><Copy size={16} />载入原文</button>}
+            {selected.translationError && selected.translatedText && selected.reviewStatus !== 'approved' && <button className="secondary-button" onClick={() => onDraftChange(selected.translatedText!)}><Copy size={16} />载入失败译文</button>}
             <button className="secondary-button danger-ghost" disabled={resetting} onClick={() => onRetranslate([selected.id])}><RefreshCw size={16} />删除并重译</button>
             <button className="secondary-button" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'rejected' })}>{updating ? <LoaderCircle className="spin" size={16} /> : <X size={16} />}退回</button>
             <button className="secondary-button" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: selected.reviewStatus })}>{updating ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存修改</button>

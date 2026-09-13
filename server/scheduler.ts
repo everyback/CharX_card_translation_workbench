@@ -1,3 +1,4 @@
+import { saveRejectedTranslation } from './application/review/rejected-translation.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { db, now, saveSetting, setting } from './db.js';
 import { chatCompletionsEndpoint, modelsEndpoint } from './domain/provider/openai-compatible.js';
@@ -22,7 +23,7 @@ import {
   type RisuRegexAlternativeProposal,
 } from './domain/card/card.js';
 import { protocolFieldReplacementIssue, type ProtocolFieldRule } from './domain/protocol/protocol.js';
-import { lorebookAliasIssue, residualLanguageIssue, shouldSplitTranslationBatch } from './domain/translation/translation-errors.js';
+import { RejectedTranslationError, lorebookAliasIssue, residualLanguageIssue, shouldSplitTranslationBatch } from './domain/translation/translation-errors.js';
 import { languageBehaviorDirectiveIssue, languageDisplayName, normalizeLanguageBehaviorDirectives } from './domain/translation/language-directives.js';
 import {
   applyRisuModuleSegments,
@@ -1953,23 +1954,27 @@ async function requestTranslations(
     const restored = restoreProtectedText(match[1], item.tokens);
     const normalized = settings.languageBehaviorMode === 'target'
       ? normalizeLanguageBehaviorDirectives(restored, settings.targetLanguage)
+      if (error instanceof RejectedTranslationError) {
+        const item = items.find((candidate) => candidate.segmentId === error.segmentId);
+        if (item) await saveRejectedTranslation(db, now, jobId, item.jobItemId, error);
+      }
       : { text: restored, changed: false, replacements: [], remaining: [] as Array<never> };
     const finalText = normalized.text;
     const directiveIssue = settings.languageBehaviorMode === 'target'
       ? languageBehaviorDirectiveIssue(finalText, settings.targetLanguage)
       : null;
-    if (directiveIssue) throw new Error(`${item.marker} 翻译质量不合格：${directiveIssue}`);
+    if (directiveIssue) throw new RejectedTranslationError(`${item.marker} 翻译质量不合格：${directiveIssue}`, item.segmentId, finalText, [directiveIssue]);
     if (item.kind === 'lorebook-key-alias') {
       const issue = lorebookAliasIssue(item.sourceText, finalText, settings);
-      if (issue) throw new Error(`${item.marker} 世界书中文别名无效：${issue}`);
+      if (issue) throw new RejectedTranslationError(`${item.marker} 世界书中文别名无效：${issue}`, item.segmentId, finalText, [issue]);
     }
     if (item.kind === 'protocol-field') {
       const issue = protocolFieldReplacementIssue(finalText, item.protocolDelimiter, item.sourceText);
-      if (issue) throw new Error(`${item.marker} ${issue}`);
+      if (issue) throw new RejectedTranslationError(`${item.marker} ${issue}`, item.segmentId, finalText, [issue]);
     }
     const qaFlags = qualityFlags(finalText, item.tokens, settings, item.sourceText);
     if (normalized.changed) qaFlags.push(`卡片语言设定已按目标语言规范化（${normalized.replacements.length} 项）`);
-    if (qaFlags.length) throw new Error(`${item.marker} 翻译质量不合格：${qaFlags.join('；')}`);
+    if (qaFlags.length) throw new RejectedTranslationError(`${item.marker} 翻译质量不合格：${qaFlags.join('；')}`, item.segmentId, finalText, qaFlags);
     translations.set(item.segmentId, { text: finalText, qaFlags });
   }
   return translations;
