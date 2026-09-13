@@ -1,3 +1,4 @@
+import { createReviewService } from '../server/application/review/review-service.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -203,6 +204,49 @@ test('manual namespace confirmation preserves an internal key or applies a confi
     const renamedModule = JSON.parse(renamedProject?.draftModule ?? '{}') as typeof module;
     assert.equal(renamedModule.namespace, '憧憬魔法少女');
     assert.match(renamedModule.trigger[0].effect[0].code, /module_assetlist::憧憬魔法少女/u);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('approved manual foreign-language examples survive save and export while structure remains protected', async () => {
+  const { database, directory } = await createNamespaceDatabase();
+  try {
+    await database.exec(`ALTER TABLE projects ADD COLUMN target_language TEXT DEFAULT 'zh-CN';
+      ALTER TABLE projects ADD COLUMN language_behavior_mode TEXT DEFAULT 'preserve';`);
+    const source = 'For a self-pointing 나 use its_me; ㅋㅋ이가 maps to female_tyrant_troubled.';
+    const finalText = '指向自己的 나 使用 its_me；ㅋㅋ이가 对应 female_tyrant_troubled。';
+    const original = JSON.stringify({ name: 'Test', description: source });
+    await database.prepare(`INSERT INTO projects(id, original_json, draft_json, source_format, status, updated_at)
+      VALUES ('manual-review', ?, ?, 'json', 'review', 'before')`).run(original, original);
+    await database.prepare(`INSERT INTO segments(id, project_id, path_json, path_label, kind, source_text, final_text, review_status)
+      VALUES ('manual', 'manual-review', '["description"]', 'description', 'field', ?, ?, 'pending')`).run(source, finalText);
+    const review = createReviewService({ database, clock: () => 'now',
+      publicSettings: () => ({ sourceLanguage: 'auto', fallbackLanguage: 'ko', targetLanguage: 'zh-CN' }),
+      controlReferencesForProject: async () => [],
+      cancelActiveJobItemsForManualReview: async () => {}, resolveFailedJobItems: async () => {},
+    });
+    // Automatic bulk approval still screens suspicious translations.
+    assert.deepEqual(await review.approveValidatedSegments('manual-review', true), { approved: 0, skipped: 1 });
+    const service = createExportService({ database, clock: () => 'now', targetLanguage: () => 'zh-CN', review });
+    await service.applyProject('manual-review');
+    let saved = await database.prepare('SELECT draft_json AS draft FROM projects WHERE id = ?').get('manual-review') as { draft: string };
+    assert.equal(JSON.parse(saved.draft).description, source);
+    // The single-item approval route stores this state after its structure checks.
+    await database.prepare("UPDATE segments SET review_status = 'approved' WHERE id = 'manual'").run();
+    await service.applyProject('manual-review');
+    saved = await database.prepare('SELECT draft_json AS draft FROM projects WHERE id = ?').get('manual-review') as { draft: string };
+    assert.equal(JSON.parse(saved.draft).description, finalText);
+    const exported = await service.exportProject('manual-review');
+    assert.equal(JSON.parse(String(exported.body)).description, finalText);
+    // Broken protocol structure must still block both entry points.
+    await database.prepare("UPDATE segments SET kind = 'protocol-field', protocol_delimiter = '|' , source_text = 'value', final_text = 'a|b' WHERE id = 'manual'").run();
+    await assert.rejects(service.applyProject('manual-review'), ProjectWorkflowError);
+    await assert.rejects(service.exportProject('manual-review'), ProjectWorkflowError);
+    saved = await database.prepare('SELECT draft_json AS draft FROM projects WHERE id = ?').get('manual-review') as { draft: string };
+    assert.equal(JSON.parse(saved.draft).description, finalText);
   } finally {
     await database.close();
     await rm(directory, { recursive: true, force: true });

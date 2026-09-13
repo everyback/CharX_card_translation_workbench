@@ -284,7 +284,6 @@ export function createReviewService({
       ORDER BY sort_order
     `).all(projectId) as Array<Record<string, unknown>>;
     const references = await controlReferencesForProject(projectId);
-    const settings = publicSettings();
     for (const row of rows) {
       const path = parsePathJson(String(row.pathJson));
       if (project?.sourceFormat === 'charx' && isRisuModuleLorebookMirrorPath(originalCard, path)) continue;
@@ -305,18 +304,9 @@ export function createReviewService({
           };
         }
       }
-      const sourceIssue = residualLanguageIssue(
-        effectiveText,
-        [
-          ...protectText(sourceText, protectedLiterals).tokens,
-          ...unchangedCodeSpanFragments(sourceText, effectiveText),
-          ...unchangedFilePathFragments(sourceText, effectiveText),
-        ],
-        settings.sourceLanguage,
-        settings.fallbackLanguage,
-        settings.targetLanguage,
-      );
-      if (sourceIssue) return { pathLabel: String(row.pathLabel), missingCount: 1, reason: sourceIssue };
+      // Language-residue detection is a translation/review heuristic, not a structural
+      // export constraint. Explicitly approved text may intentionally retain examples
+      // or resource vocabulary in another language; do not revoke that approval here.
     }
     return null;
   }
