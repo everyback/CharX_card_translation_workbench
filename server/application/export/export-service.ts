@@ -587,7 +587,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
     `).all(projectId) as Array<{ resourcePath: string; imageBlob: Uint8Array | null; storagePath: string | null }>;
     return await Promise.all(rows.map(async (row) => ({
       resourcePath: row.resourcePath,
-      imageBlob: row.imageBlob || (row.storagePath ? await readStoredFile(row.storagePath) : (() => { throw new Error('图片替换稿文件不存在。'); })()),
+      imageBlob: row.storagePath ? await readStoredFile(row.storagePath) : (row.imageBlob || (() => { throw new Error('图片替换稿文件不存在。'); })()),
     })));
   }
 

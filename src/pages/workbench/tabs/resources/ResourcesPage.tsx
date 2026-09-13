@@ -1,10 +1,11 @@
-import { Check, CircleAlert, Download, FileImage, Languages, Link2, LoaderCircle, RefreshCw, Search } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Check, CircleAlert, Download, FileImage, Languages, Link2, LoaderCircle, RefreshCw, Search, Upload } from 'lucide-react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { LoadingMask, Stat } from '@/shared/ui';
 import type { ResourceImageCandidate, ResourceInspection, ResourceItem } from '@/shared/types';
 import { formatBytes } from '@/shared/lib/format';
 import {
   generateResourceImageCandidate,
+  uploadResourceImageCandidate,
   resourceFileUrl,
   resourceImageCandidateUrl,
   setResourceImageCandidateStatus,
@@ -22,6 +23,7 @@ export function ResourcesPage({
   onRefresh: () => void;
   projectId: string;
 }) {
+  const uploadInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<'all' | ResourceItem['kind']>('all');
   const [risk, setRisk] = useState<'all' | ResourceItem['textRisk']>('all');
@@ -47,6 +49,20 @@ export function ResourcesPage({
     setImageCandidate(current?.imageCandidate ?? null);
     setImageError('');
   }, [current?.path, current?.imageCandidate?.updatedAt]);
+
+  async function uploadImage(file: File) {
+    if (!current || current.kind !== 'image' || imageBusy) return;
+    setImageBusy(true);
+    setImageError('');
+    try {
+      setImageCandidate(await uploadResourceImageCandidate(projectId, current.path, file));
+      void onRefresh();
+    } catch (error) {
+      setImageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImageBusy(false);
+    }
+  }
 
   async function generateImageCandidate() {
     if (!current || current.kind !== 'image' || imageBusy) return;
@@ -91,15 +107,15 @@ export function ResourcesPage({
         <button className="secondary-button resource-refresh" onClick={onRefresh}><RefreshCw size={15} />重新扫描</button>
       </div>
       <div className="resource-toolbar">
-        <div className="search-input"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资源名、哈希或引用" /></div>
-        <select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="all">全部类型</option>{Object.entries(RESOURCE_KIND_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
-        <select value={risk} onChange={(event) => setRisk(event.target.value as typeof risk)}><option value="all">全部风险</option>{Object.entries(RESOURCE_RISK_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+        <div className="search-input"><Search size={15} /><input disabled={imageBusy} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资源名、哈希或引用" /></div>
+        <select disabled={imageBusy} value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="all">全部类型</option>{Object.entries(RESOURCE_KIND_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+        <select disabled={imageBusy} value={risk} onChange={(event) => setRisk(event.target.value as typeof risk)}><option value="all">全部风险</option>{Object.entries(RESOURCE_RISK_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         <span>{filtered.length} / {inspection.resources.length} 个资源</span>
       </div>
       <div className="resource-layout">
         <div className="resource-list">
           {filtered.map((resource) => (
-            <button key={resource.path} className={resource.path === current?.path ? 'active' : ''} onClick={() => setSelected(resource.path)}>
+            <button disabled={imageBusy} key={resource.path} className={resource.path === current?.path ? 'active' : ''} onClick={() => setSelected(resource.path)}>
               <span className={`resource-kind resource-kind-${resource.kind}`}>{RESOURCE_KIND_LABELS[resource.kind]}</span>
               <strong title={`${resource.displayName}\n内部路径：${resource.path}`}>{resource.displayName}</strong>
               <small>{resource.width && resource.height ? `${resource.width}×${resource.height} · ` : ''}{formatBytes(resource.size)}{resource.languageHint ? ` · ${resource.languageHint}` : ''}</small>
@@ -109,7 +125,14 @@ export function ResourcesPage({
         </div>
         <div className="resource-detail">
           {current ? <>
-            <div className="resource-detail-heading"><div><span>{RESOURCE_KIND_LABELS[current.kind]} · {RESOURCE_RISK_LABELS[current.textRisk]}</span><h2 title={current.displayName}>{current.displayName}</h2>{current.path !== current.displayName && <small>内部资源：{current.path}</small>}</div><a className="secondary-button" href={resourceFileUrl(projectId, current.path, current.displayName)} download={current.displayName}><Download size={15} />下载</a></div>
+            <div className="resource-detail-heading"><div><span>{RESOURCE_KIND_LABELS[current.kind]} · {RESOURCE_RISK_LABELS[current.textRisk]}</span><h2 title={current.displayName}>{current.displayName}</h2>{current.path !== current.displayName && <small>内部资源：{current.path}</small>}</div>{current.kind === 'image' && <>
+              <input ref={uploadInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={(event) => {
+                const file = event.currentTarget.files?.[0];
+                event.currentTarget.value = '';
+                if (file) void uploadImage(file);
+              }} />
+              <button className="secondary-button" disabled={imageBusy} onClick={() => uploadInput.current?.click()}><Upload size={15} />上传替换图片</button>
+            </>}<a className="secondary-button" href={resourceFileUrl(projectId, current.path, current.displayName)} download={current.displayName}><Download size={15} />下载</a></div>
             {current.kind === 'image' && current.size > 0 && <img draggable={false} className="resource-preview" src={resourceFileUrl(projectId, current.path, current.displayName)} alt={current.displayName} />}
             <div className="resource-properties"><span>SHA-256 <code>{current.sha256 || '模块内资源暂未展开'}</code></span><span>识别格式 <code>{current.detectedFormat} · {current.mimeType}</code></span>{current.declaredType && <span>模块声明 <code>{current.declaredType}</code></span>}<span>尺寸 <code>{current.width && current.height ? `${current.width} × ${current.height}` : '未知'}</code></span></div>
             <div className="resource-review-card">
@@ -117,17 +140,17 @@ export function ResourcesPage({
               <p>{current.textRisk === 'unknown' ? '图片可能包含画面内文字，可按需生成 AI 图片替换稿并在导出前确认。' : current.textRisk === 'path' ? `文件名包含 ${current.languageHint} 文字，可在资源审核中确认是否需要保留原引用。` : '当前资源未从文件名检测到可疑文字。'}</p>
               {current.kind === 'image' ? <>
                 <div className="resource-image-edit">
-                  <div className="resource-mode-heading"><strong>AI 图片汉化</strong><span>直接替换画面文字</span></div>
-                  <p>发送原图给独立图片编辑模型，只替换画面文字并保持构图。生成后先对比，确认后才写入导出包。</p>
+                  <div className="resource-mode-heading"><strong>图片替换</strong><span>手动上传或 AI 图片汉化</span></div>
+                  <p>可上传 PNG、JPEG、WebP、GIF 图片，也可用 AI 替换画面文字。上传或生成后先对比，确认后才写入导出包；保留原资源路径和引用。</p>
                   <button className="secondary-button" onClick={() => void generateImageCandidate()} disabled={imageBusy}>
                     {imageBusy ? <LoaderCircle size={15} className="spin" /> : <FileImage size={15} />}
-                    {imageBusy ? '正在生成替换稿…' : imageCandidate ? '重新生成 AI 替换稿' : '生成 AI 图片替换稿'}
+                    {imageBusy ? '正在处理替换稿…' : imageCandidate ? '重新生成 AI 替换稿' : '生成 AI 图片替换稿'}
                   </button>
                   {imageError && <div className="resource-ocr-error"><CircleAlert size={14} />{imageError}</div>}
                   {imageCandidate && <>
                     <div className="resource-image-comparison">
                       <figure><img draggable={false} src={resourceFileUrl(projectId, current.path)} alt="原图" /><figcaption>原图</figcaption></figure>
-                      <figure><img draggable={false} src={resourceImageCandidateUrl(projectId, current.path, imageCandidate.updatedAt)} alt="AI 图片替换稿" /><figcaption>AI 替换稿 · {imageCandidate.model}</figcaption></figure>
+                      <figure><img draggable={false} src={resourceImageCandidateUrl(projectId, current.path, imageCandidate.updatedAt)} alt="图片替换稿" /><figcaption>{imageCandidate.model === 'manual-upload' ? '手动上传替换稿' : `AI 替换稿 · ${imageCandidate.model}`} </figcaption></figure>
                     </div>
                     <div className="resource-ocr-actions">
                       <button className="secondary-button" onClick={() => void setImageCandidateStatus('draft')} disabled={imageBusy}>保留待审</button>

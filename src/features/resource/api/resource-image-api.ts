@@ -29,3 +29,9 @@ export function resourceImageCandidateUrl(projectId: string, path: string, updat
   const search = new URLSearchParams({ path, v: updatedAt });
   return `/api/projects/${projectId}/resources/image-edit/file?${search.toString()}`;
 }
+
+export function uploadResourceImageCandidate(projectId: string, path: string, file: File) {
+  const body = new FormData();
+  body.set('image', file);
+  return api<ResourceImageCandidate>(`/api/projects/${projectId}/resources/image-edit?${new URLSearchParams({ path })}`, { method: 'POST', body });
+}

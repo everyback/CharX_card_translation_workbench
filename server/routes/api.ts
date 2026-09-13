@@ -1,3 +1,5 @@
+import { saveImageCandidate } from '../application/resources/image-candidate-service.js';
+import { validateUploadedImage } from '../domain/resources/image-upload.js';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import multipart from '@fastify/multipart';
@@ -442,8 +444,9 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/resources',
   }
 });
 
-app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/image-edit', async (request, reply) => {
-  const resourcePath = text(asRecord(request.body).path);
+app.post<{ Params: { projectId: string }; Querystring: { path?: string } }>('/api/projects/:projectId/resources/image-edit', async (request, reply) => {
+  const manualUpload = request.isMultipart();
+  const resourcePath = manualUpload ? text(request.query.path) : text(asRecord(request.body).path);
   if (!resourcePath) return reply.code(400).send({ error: '缺少资源路径。' });
   const row = await db.prepare(`
     SELECT source_format AS sourceFormat,
@@ -458,25 +461,25 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/
     const bytes = await projectResourceBytes(request.params.projectId, row.sourceFormat, row.sourceBlob, row.sourceBytes, resourcePath);
     const mimeType = resourceContentType(resourcePath, bytes);
     if (!mimeType.startsWith('image/')) return reply.code(400).send({ error: '只有图片资源支持 AI 图片汉化。' });
-    const imageSettings = privateImageSettings();
-    const targetLanguage = row.targetLanguage || publicSettings().targetLanguage;
-    const result = await editImageText(bytes, mimeType, targetLanguage, imageSettings);
-    const prompt = `仅将画面文字替换为 ${targetLanguage}，保持其他视觉内容不变。`;
-    const timestamp = now();
-    const storedImage = await storeFile(
-      projectStoragePath(request.params.projectId, 'image', imageExtension(result.mimeType), resourcePath),
-      result.bytes,
-    );
-    await db.prepare(`
-      INSERT INTO resource_image_candidates(
-        id, project_id, resource_path, mime_type, image_blob, storage_path, storage_bytes, storage_sha256,
-        prompt, model, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, zeroblob(0), ?, ?, ?, ?, ?, 'draft', ?, ?)
-      ON CONFLICT(project_id, resource_path) DO UPDATE SET mime_type = excluded.mime_type, image_blob = zeroblob(0),
-        storage_path = excluded.storage_path, storage_bytes = excluded.storage_bytes, storage_sha256 = excluded.storage_sha256,
-        prompt = excluded.prompt, model = excluded.model, status = 'draft', updated_at = excluded.updated_at
-    `).run(id(), request.params.projectId, resourcePath, result.mimeType, storedImage.path, storedImage.bytes, storedImage.sha256, prompt, imageSettings.model, timestamp, timestamp);
-    return { path: resourcePath, mimeType: result.mimeType, model: imageSettings.model, prompt, status: 'draft', updatedAt: timestamp };
+    let result: { bytes: Buffer; mimeType: string };
+    let model: string;
+    let prompt: string;
+    if (manualUpload) {
+      const part = await request.file();
+      if (!part) return reply.code(400).send({ error: '请选择要上传的图片。' });
+      result = validateUploadedImage(await part.toBuffer());
+      model = 'manual-upload';
+      prompt = '手动上传替换图片';
+    } else {
+      const imageSettings = privateImageSettings();
+      const targetLanguage = row.targetLanguage || publicSettings().targetLanguage;
+      result = await editImageText(bytes, mimeType, targetLanguage, imageSettings);
+      model = imageSettings.model;
+      prompt = `仅将画面文字替换为 ${targetLanguage}，保持其他视觉内容不变。`;
+    }
+    return await saveImageCandidate({ database: db, id, now, storeFile, removeStoredFile }, {
+      projectId: request.params.projectId, resourcePath, ...result, model, prompt,
+    });
   } catch (error) {
     return reply.code(422).send({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -490,7 +493,7 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/resources
   const timestamp = now();
   const result = await db.prepare(`UPDATE resource_image_candidates SET status = ?, updated_at = ? WHERE project_id = ? AND resource_path = ?`)
     .run(status, timestamp, request.params.projectId, resourcePath);
-  if (!result.changes) return reply.code(404).send({ error: '请先生成 AI 图片替换稿。' });
+  if (!result.changes) return reply.code(404).send({ error: '请先生成或上传图片替换稿。' });
   return { ok: true, path: resourcePath, status, updatedAt: timestamp };
 });
 
@@ -500,8 +503,8 @@ app.get<{ Params: { projectId: string }; Querystring: { path?: string } }>('/api
     SELECT mime_type AS mimeType, image_blob AS imageBlob, storage_path AS storagePath FROM resource_image_candidates
     WHERE project_id = ? AND resource_path = ?
   `).get(request.params.projectId, resourcePath) as { mimeType?: string; imageBlob?: Uint8Array | null; storagePath?: string | null } | undefined;
-  const imageBlob = row?.imageBlob || (row?.storagePath ? await readStoredFile(row.storagePath) : null);
-  if (!imageBlob) return reply.code(404).send({ error: 'AI 图片替换稿不存在。' });
+  const imageBlob = row?.storagePath ? await readStoredFile(row.storagePath) : row?.imageBlob;
+  if (!imageBlob) return reply.code(404).send({ error: '图片替换稿不存在。' });
   return reply.header('Content-Type', row?.mimeType || 'image/png').send(Buffer.from(imageBlob));
 });
 
