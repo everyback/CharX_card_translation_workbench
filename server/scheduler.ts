@@ -493,8 +493,7 @@ export function normalizeRisuRegexLanguageAlternatives(
     const anchorAlternatives = clean(row.anchorAlternatives);
     const additions = clean(row.additions);
     const pattern = input.mode === 'coverage' && typeof row.pattern === 'string'
-      && row.pattern.trim().length <= 4_000 && !/[\r\n]/u.test(row.pattern)
-      ? row.pattern.trim()
+      ? row.pattern
       : undefined;
     if (!pattern && (!anchorAlternatives.length || !additions.length)) continue;
     output.push({ pathLabel, anchorAlternatives, additions, ...(pattern ? { pattern } : {}) });

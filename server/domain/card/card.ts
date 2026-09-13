@@ -736,7 +736,7 @@ function isAdditiveRegexExtension(original: string, draft: string): boolean {
 }
 
 function isSafeRegexLanguageAdaptation(original: string, candidate: string, originalCard: Record<string, unknown>): boolean {
-  if (!candidate || candidate.length > 4_000 || /[\r\n]/u.test(candidate)) return false;
+  if (!candidate) return false;
   if (isZeroWidthCardinalityTrigger(original)) return false;
   try { new RegExp(candidate); } catch { return false; }
   if (countCapturingGroups(original) !== countCapturingGroups(candidate)) return false;
@@ -781,7 +781,7 @@ export function isSafeRisuDisplayFormattingRegexChange(
   const originalPattern = typeof originalRule?.in === 'string' ? originalRule.in : '';
   const candidatePattern = typeof candidateRule?.in === 'string' ? candidateRule.in : '';
   if (originalType !== candidateType || originalOutput !== candidateOutput) return false;
-  if (!originalPattern || !candidatePattern || candidatePattern.length > 4_000 || /[\r\n]/u.test(candidatePattern)) return false;
+  if (!originalPattern || !candidatePattern) return false;
   const captureCount = countCapturingGroups(originalPattern);
   if (captureCount !== countCapturingGroups(candidatePattern)) return false;
   if (!isDisplayFormattingReplacement(candidateOutput, captureCount)) return false;
@@ -805,7 +805,7 @@ function isSafeRisuOutputPostprocessInputChange(original: RisuRegexInput, candid
   // removes a generated image tag. Empty output remains valid: it deliberately
   // deletes a match in Risu's own rule format.
   if (candidate.out.length > 16_000) return false;
-  if (candidate.pattern.length > 4_000 || /[\r\n]/u.test(candidate.pattern)) return false;
+  if (!candidate.pattern) return false;
   try { new RegExp(candidate.pattern); } catch { return false; }
   return true;
 }

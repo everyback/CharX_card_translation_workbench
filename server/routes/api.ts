@@ -1072,8 +1072,8 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
   const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
   const requestedPattern = typeof body.pattern === 'string' ? body.pattern : undefined;
   if (!pathLabel) return reply.code(400).send({ error: '请提供要分析的正则规则路径。' });
-  if (requestedPattern !== undefined && (!requestedPattern.trim() || requestedPattern.length > 4_000 || /[\r\n]/u.test(requestedPattern))) {
-    return reply.code(400).send({ error: '请提供有效的不含换行的正则规则，长度不能超过 4000。' });
+  if (requestedPattern !== undefined && !requestedPattern) {
+    return reply.code(400).send({ error: '请提供非空的正则规则。' });
   }
   const clientAbort = new AbortController();
   const abortWhenClientDisconnects = () => clientAbort.abort();
@@ -1319,8 +1319,8 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
   const body = asRecord(request.body);
   const pathLabel = typeof body.pathLabel === 'string' ? body.pathLabel.trim() : '';
   const pattern = typeof body.pattern === 'string' ? body.pattern : '';
-  if (!pathLabel || !pattern || pattern.length > 4_000 || /[\r\n]/u.test(pattern)) {
-    return reply.code(400).send({ error: '请提供有效的正则路径和不含换行的规则，长度不能超过 4000。' });
+  if (!pathLabel || !pattern) {
+    return reply.code(400).send({ error: '请提供有效的正则路径和非空的规则。' });
   }
   try {
     const context = await loadRegexRuleCardContext(request.params.projectId, pathLabel);
@@ -1341,8 +1341,8 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex
   const output = typeof body.out === 'string' ? body.out : undefined;
   const expectedOutput = typeof body.expectedOut === 'string' ? body.expectedOut : undefined;
   const forcePass = body.forcePass === true;
-  if (!pathLabel || !pattern || pattern.length > 4_000 || /[\r\n]/u.test(pattern)) {
-    return reply.code(400).send({ error: '请提供有效的正则路径和不含换行的规则，长度不能超过 4000。' });
+  if (!pathLabel || !pattern) {
+    return reply.code(400).send({ error: '请提供有效的正则路径和非空的规则。' });
   }
   if ((hasOutput && output === undefined) || (output !== undefined && output.length > 16_000)) {
     return reply.code(400).send({ error: '聊天后处理替换输出必须是长度不超过 16000 的文本。' });

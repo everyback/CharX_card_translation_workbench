@@ -341,7 +341,7 @@ export function LuaPage({
   }
 
   function queueRegexCoverageAnalysis(rule: RegexCoverageRule) {
-    const pattern = (regexCoverageDrafts[rule.pathLabel] ?? rule.candidatePattern ?? rule.pattern).trim();
+    const pattern = (regexCoverageDrafts[rule.pathLabel] ?? rule.candidatePattern ?? rule.pattern);
     if (!pattern || regexCoverageControllersRef.current.has(rule.pathLabel) || regexCoverageQueueRef.current.some((entry) => entry.pathLabel === rule.pathLabel)) return;
     regexCoverageQueueRef.current.push({ pathLabel: rule.pathLabel, pattern });
     updateRegexRule(rule.pathLabel, { status: 'queued', error: undefined, validation: undefined });
