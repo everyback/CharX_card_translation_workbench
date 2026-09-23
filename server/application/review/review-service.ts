@@ -148,6 +148,7 @@ export function createReviewService({
         COALESCE(NULLIF(TRIM(final_text), ''), TRIM(translated_text)) AS effectiveText
       FROM segments
       WHERE project_id = ? AND review_status = 'pending' ${safeClause}
+        AND path_label <> '$module.namespace'
         AND (TRIM(COALESCE(final_text, '')) != '' OR TRIM(COALESCE(translated_text, '')) != '')
     `).all(projectId) as Array<Record<string, unknown>>;
     const references = await controlReferencesForProject(projectId);

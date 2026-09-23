@@ -30,9 +30,9 @@ interface UseReviewActionsOptions {
 
 interface ApplyProjectResult {
   ignoredLuaSegments: number;
+  ignoredProtectedSegments?: number;
+  ignoredProtectedPaths?: string[];
   runtimeAliasAdditions: number;
-  runtimeAliasTranslationError?: string;
-  runtimeAliasSegmentationError?: string;
 }
 
 export function useReviewActions({
@@ -53,23 +53,16 @@ export function useReviewActions({
 }: UseReviewActionsOptions) {
   const selectedSegment = project?.segments.find((segment) => segment.id === selectedSegmentId) ?? null;
 
-  function aliasFailures(result: ApplyProjectResult): string[] {
-    return [result.runtimeAliasTranslationError, result.runtimeAliasSegmentationError]
-      .filter((value): value is string => Boolean(value?.trim()));
-  }
-
   function isRegexCoverageBlocker(error: unknown): error is ApiError {
     return error instanceof ApiError && error.payload.code === 'REGEX_MATCH_COUNT_CHANGED';
   }
 
-  async function chooseLuaFallback(message: string, kind: 'regex' | 'alias' = 'regex'): Promise<boolean> {
-    const detail = kind === 'regex'
-      ? '选择“跳过并继续”会只对当前检测到的正则命中差异建立精确豁免，其他 Lua 语法、模板和脚本完整性检查仍会保留。'
-      : '选择“跳过并继续”会跳过本次别名自动处理并继续保存/导出；其他 Lua 语法、模板和脚本完整性检查仍会保留。';
+  async function chooseLuaFallback(message: string): Promise<boolean> {
+    const detail = '选择“跳过并继续”会只对当前检测到的正则命中差异建立精确豁免，其他 Lua 语法、模板和脚本完整性检查仍会保留。';
     const skip = await showUiConfirm({
       title: 'Lua 自动处理未完成',
-      message: `${message}\n\n模型已经无法继续处理。${detail}选择“去 脚本管理检查”可人工检查后再保存。`,
-      confirmLabel: kind === 'regex' ? '跳过并继续' : '跳过别名并继续',
+      message: `${message}\n\n当前正则命中校验未通过。${detail}选择“去 脚本管理检查”可人工检查后再保存。`,
+      confirmLabel: '跳过并继续',
       cancelLabel: '去 脚本管理检查',
       tone: 'warning',
     });
@@ -88,20 +81,12 @@ export function useReviewActions({
   async function applyWithLuaFallback(navigateOnError: boolean): Promise<ApplyProjectResult | null> {
     if (!project) return null;
     let regexSkipAttempted = false;
-    let aliasPrompted = false;
     while (true) {
       try {
         const result = await api<ApplyProjectResult>(`/api/projects/${project.id}/apply`, {
           method: 'POST',
           ...jsonBody({}),
         });
-        const failures = aliasFailures(result);
-        if (navigateOnError && failures.length && !aliasPrompted) {
-          aliasPrompted = true;
-          const skip = await chooseLuaFallback(`运行时名称别名自动处理失败：${failures.join('；')}`, 'alias');
-          if (!skip) return null;
-          onNotice('已按确认跳过本次别名自动处理；其余 Lua 和卡片完整性检查仍会继续。');
-        }
         return result;
       } catch (error) {
         if (navigateOnError && !regexSkipAttempted && isRegexCoverageBlocker(error)) {
@@ -341,13 +326,12 @@ export function useReviewActions({
       try {
         const result = await applyWithLuaFallback(true);
         if (!result) return;
-        const failures = aliasFailures(result);
-        onNotice(result.ignoredLuaSegments > 0
-          ? `审核稿已保存并通过 Lua 语法校验；已忽略 ${result.ignoredLuaSegments} 条会改动 Lua 代码的旧扫描译文。${failures.length ? ' 别名自动处理未完成，已按确认继续。' : ''}`
-          : failures.length ? '审核稿已保存；别名自动处理未完成，已按确认继续，其余完整性校验已完成。'
-            : result.runtimeAliasAdditions > 0
-              ? `审核稿已保存，并通过 Risu Lua 语法校验；已自动补充 ${result.runtimeAliasAdditions} 个名称别名。`
-              : '审核稿已保存，并通过 Risu Lua 语法校验。');
+        const ignoredProtected = result.ignoredProtectedSegments ?? 0;
+        onNotice(ignoredProtected > 0
+          ? `审核稿已保存，已忽略 ${ignoredProtected} 条旧扫描写入受保护字段的段落（例如 ${result.ignoredProtectedPaths?.[0] || '受保护字段'}）；重新扫描项目可彻底删除它们。`
+          : result.ignoredLuaSegments > 0
+            ? `审核稿已保存，已忽略 ${result.ignoredLuaSegments} 条会改动 Lua 代码的旧扫描译文。`
+            : '审核稿已保存，已通过完整性检查。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
         onClearReviewFocus();
       } catch (applyError) {
@@ -378,8 +362,7 @@ export function useReviewActions({
       try {
         const result = await applyWithLuaFallback(navigateOnError);
         if (!result) return;
-        const failures = aliasFailures(result);
-        let response: Response;
+          let response: Response;
         let exportRegexSkipAttempted = false;
         while (true) {
           response = await fetch('/api/projects/' + project.id + '/export');
@@ -421,13 +404,9 @@ export function useReviewActions({
         link.click();
         link.remove();
         window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
-        onNotice(result.ignoredLuaSegments > 0
-          ? '审核稿已保存，已通过导出前语法检查并开始下载；已忽略 ' + result.ignoredLuaSegments + ' 条会改动 Lua 代码的旧扫描译文。'
-          : failures.length
-            ? '审核稿已保存，已按确认跳过别名自动处理并开始下载。'
-            : result.runtimeAliasAdditions > 0
-              ? `审核稿已保存，已自动补充 ${result.runtimeAliasAdditions} 个名称别名并开始下载。`
-              : '审核稿已保存，已通过导出前语法检查并开始下载。');
+        onNotice((result.ignoredProtectedSegments ?? 0) > 0
+          ? `审核稿已保存：已忽略 ${result.ignoredProtectedSegments} 条写入受保护字段的旧扫描段落；导出前检查已通过并开始下载。`
+          : '审核稿已保存，已通过导出前检查并开始下载。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
         onClearReviewFocus();
       } catch (exportError) {

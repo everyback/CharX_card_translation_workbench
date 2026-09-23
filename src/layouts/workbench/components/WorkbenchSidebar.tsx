@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   Search,
   Settings as SettingsIcon,
+  Settings2,
 } from 'lucide-react';
 import { useMemo, useState, type RefObject } from 'react';
 import { STATUS_LABELS } from '@/entities/project/model/status-labels';
@@ -98,7 +99,9 @@ export function WorkbenchSidebar({
             <span className="project-icon">
               {item.sourceFormat === 'charx' || item.sourceFormat === 'risum'
                 ? <FileArchive size={16} />
-                : item.sourceFormat === 'png' ? <FileImage size={16} /> : <FileJson size={16} />}
+                : item.sourceFormat === 'png' ? <FileImage size={16} />
+                  : item.sourceFormat === 'st-preset' ? <Settings2 size={16} />
+                    : <FileJson size={16} />}
             </span>
             <span className="project-copy">
               <span className="project-title-line translated" title={item.translatedName || '尚未翻译'}>

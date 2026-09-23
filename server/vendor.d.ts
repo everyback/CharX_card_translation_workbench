@@ -19,3 +19,21 @@ declare module 'png-chunk-text' {
   };
   export default textChunk;
 }
+
+/**
+ * RisuAI bundles msgpackr's `index-no-eval` entry (it avoids `eval` for CSP).
+ * The package ships types only for its main entry, so declare the subpath here
+ * and keep using the exact same module RisuAI does.
+ */
+declare module 'msgpackr/index-no-eval' {
+  export interface MsgpackOptions {
+    useRecords?: boolean;
+    mapsAsObjects?: boolean;
+    variableMapSize?: boolean;
+    structuredClone?: boolean;
+  }
+  export function encode(value: unknown, options?: MsgpackOptions): Buffer;
+  export function decode(input: Uint8Array, options?: MsgpackOptions): unknown;
+  export function pack(value: unknown, options?: MsgpackOptions): Buffer;
+  export function unpack(input: Uint8Array, options?: MsgpackOptions): unknown;
+}

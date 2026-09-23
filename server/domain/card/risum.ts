@@ -1,15 +1,8 @@
+import { decodeRpack, encodeRpack } from './rpack.js';
+
 const RISUM_MAGIC = 111;
 const RISUM_VERSION = 0;
 
-// RPack byte-substitution table from RisuAI. See THIRD_PARTY_NOTICES.md.
-const RPACK_MAP = Buffer.from(
-  'xA0eC70rP1X8RW71ZlNPGuC7MJSGumu/QVBvm+/etxBhFyDfMomonW2ryZAADF2v0sFW5RZkkYJldJfKI9ZS0f+0oOgvilg4WmAZlknb18g7PkNLpWNHqmopkvQVz2I0eNMdPOIFjipXDhvNTC3yQCwleUgPsnq1p2w35px7VH7+h9yaAuQzouuxLgPdmaaw59WIGIN89r7hXJ/DIUYfCE7QdhJf7v2PROqjXosoCTWeacwKx4UHrUrzd+ln1NqEgJO2TXP6JyZ/BMb78XI5UcI2qWis+O3FucvOdaQ9gdlCcByVEbzYjJj5WaET9xR9s+xxwOON8AGuWzEGJCI6uCz3hIvJZfu2n66zAy0BaXQf5KPs7lw0IZNKD2riYgKeIpz9PPxxx8atWWcFcG2KRBL6JIZfr9F6R87+UGPdUQZvGOBSqAmdVnNMuFNsw6AOGc8+DX4HMmhG6kj5mS6rpEkgXlU1OAy807FYFnkoChrh8s3EOduiumBydn2V73/IwN43lL+1FIGSJUWs5/Vmpys2WsET40s66I2DG3wnsJpC64eq3FSOeCbSVynUt/gvj4l18EF3wh7/2BUR5QSXF/Mx0JsA18q0Tyo72bJr2l2hPzBhvZE9Tubfvk2CjB0jEJhk9IUze5BDu6mI8dalHPbMbrlbC5bt1enFywimgEA=',
-  'base64',
-);
-
-if (RPACK_MAP.length !== 512) throw new Error('内置 RPack 映射无效。');
-const ENCODE_MAP = RPACK_MAP.subarray(0, 256);
-const DECODE_MAP = RPACK_MAP.subarray(256);
 
 export interface ParsedRisuModule {
   module: Record<string, unknown>;
@@ -51,7 +44,7 @@ export function readRisuModuleAsset(source: Uint8Array, assetIndex: number): Uin
   const parsed = parseContainer(source);
   let selected: Uint8Array | null = null;
   visitAssetSuffix(source, parsed.suffixOffset, (index, offset, length) => {
-    if (index === assetIndex) selected = transform(source.subarray(offset, offset + length), DECODE_MAP);
+    if (index === assetIndex) selected = decodeRpack(source.subarray(offset, offset + length));
   });
   if (!selected) throw new Error('RISUM 中不存在该模块资源。');
   return selected;
@@ -91,7 +84,7 @@ export async function visitRisuModuleAssets(
           || assetReadOffset < 0 || assetReadLength < 0 || assetReadOffset + assetReadLength > length) {
           throw new Error('RISUM 资源读取范围无效。');
         }
-        return transform(await readExact(source, assetOffset + assetReadOffset, assetReadLength), DECODE_MAP);
+        return decodeRpack(await readExact(source, assetOffset + assetReadOffset, assetReadLength));
       },
     });
     offset += length;
@@ -139,7 +132,7 @@ export function replaceRisuModuleAssets(source: Uint8Array, replacements: Record
 
 export function createRisuModule(module: Record<string, unknown>, assets: Uint8Array[] = []): Buffer {
   const main = encodeEnvelope(module);
-  const encodedAssets = assets.map((asset) => transform(asset, ENCODE_MAP));
+  const encodedAssets = assets.map((asset) => encodeRpack(asset));
   const size = 6 + main.length + encodedAssets.reduce((total, asset) => total + 5 + asset.length, 0) + 1;
   const output = Buffer.allocUnsafe(size);
   output[0] = RISUM_MAGIC;
@@ -169,7 +162,7 @@ function parseContainer(source: Uint8Array): ParsedContainer {
 
   let envelope: unknown;
   try {
-    const decoded = transform(source.subarray(6, suffixOffset), DECODE_MAP);
+    const decoded = decodeRpack(source.subarray(6, suffixOffset));
     envelope = JSON.parse(Buffer.from(decoded).toString('utf8').replace(/^\uFEFF/, ''));
   } catch (error) {
     throw new Error(`RISUM 模块 JSON 无法解析：${error instanceof Error ? error.message : String(error)}`);
@@ -185,7 +178,7 @@ function parseContainer(source: Uint8Array): ParsedContainer {
 function readAssetSuffix(source: Uint8Array, start: number): Uint8Array[] {
   const assets: Uint8Array[] = [];
   visitAssetSuffix(source, start, (_index, offset, length) => {
-    assets.push(transform(source.subarray(offset, offset + length), DECODE_MAP));
+    assets.push(decodeRpack(source.subarray(offset, offset + length)));
   });
   return assets;
 }
@@ -229,14 +222,9 @@ async function readExact(source: RisuModuleSourceReader, offset: number, length:
 function encodeEnvelope(module: Record<string, unknown>): Buffer {
   const envelope: RisuModuleEnvelope = { module, type: 'risuModule' };
   const json = Buffer.from(JSON.stringify(envelope, null, 2), 'utf8');
-  return transform(json, ENCODE_MAP);
+  return encodeRpack(json);
 }
 
-function transform(source: Uint8Array, map: Uint8Array): Buffer {
-  const output = Buffer.allocUnsafe(source.length);
-  for (let index = 0; index < source.length; index += 1) output[index] = map[source[index]];
-  return output;
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);

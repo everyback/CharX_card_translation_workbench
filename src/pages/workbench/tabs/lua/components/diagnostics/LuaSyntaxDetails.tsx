@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Check, Code2, Minus, Plus, RefreshCw } from 'lucide-react';
 import type { LuaManagementReport } from '@/shared/types';
 
@@ -13,7 +14,7 @@ export interface LuaSyntaxDetailsProps {
   syntaxSaveMessage: string | null;
   onSetDraft: (issueKey: string, value: string) => void;
   onToggleContext: (issueKey: string, expanded: boolean) => void;
-  onSaveSyntaxLine: (issue: LuaIssue, issueKey: string) => void;
+  onSaveSyntaxLine: (issue: LuaIssue, issueKey: string, replacement?: string) => Promise<boolean>;
 }
 
 export function LuaSyntaxDetails({
@@ -30,7 +31,8 @@ export function LuaSyntaxDetails({
 }: LuaSyntaxDetailsProps) {
   return (
     <section className="lua-panel lua-syntax-detail" id="lua-syntax-detection-detail">
-      <div className="lua-panel-header"><div><h2>Lua 语法问题</h2><span>每个错误显示真实 Lua 片段；前后 2 行用于判断上下文，红色行可直接编辑。</span></div><Code2 size={17} /></div>
+      <div className="lua-panel-header"><div><h2>Lua 语法问题</h2><span>每个错误显示真实 Lua 片段；原文与当前稿分别显示行号及上下文，当前稿每一行均可点击编辑、单独保存。</span></div><Code2 size={17} /></div>
+      {syntaxSaveMessage && <p className="lua-inline-save-message" role="status">{syntaxSaveMessage}</p>}
       {syntaxIssues.length > 0 ? <div className="lua-snippet-list">
         {syntaxIssues.map((issue, index) => {
           const reportIssueIndex = report.issues.findIndex((item) => item.kind === 'syntax' && item.pathLabel === issue.pathLabel && item.line === issue.line);
@@ -39,30 +41,32 @@ export function LuaSyntaxDetails({
           const contextLines = issue.contextLines ?? [];
           const visibleContextLines = expandedContext || !issue.line
             ? contextLines
-            : contextLines.filter((contextLine) => Math.abs(contextLine.line - issue.line!) <= 2);
+            : contextLines.filter((contextLine) => Math.abs(contextLine.line - issue.line!) <= 5);
           const canExpandContext = visibleContextLines.length < contextLines.length;
-          const errorContextLine = contextLines.find((contextLine) => contextLine.errorLine);
-          const currentErrorLine = syntaxLineDrafts[issueKey] ?? errorContextLine?.draftLine ?? issue.draftLine ?? '';
           return <article className="lua-snippet-card" id={`lua-syntax-snippet-${index}`} data-lua-issue-key={issueKey} key={issueKey}>
             <div className="lua-editor-meta"><strong>{issue.pathLabel}</strong><span>{issue.line ? `第 ${issue.line} 行，第 ${issue.column ?? '?'} 列` : 'Lua 语法错误'}</span></div>
-            <div className="lua-snippet-help">当前 Lua 代码片段</div>
-            {errorContextLine && <div className="lua-snippet-comparison">
-              <div><span>原始文本</span><code>{errorContextLine.sourceLine || '（空行）'}</code></div>
-              <div><span>当前文本</span><code>{currentErrorLine || '（空行）'}</code></div>
-            </div>}
-            {contextLines.length ? <div className="lua-code-editor lua-snippet-code-editor">
-              {visibleContextLines.map((contextLine) => <div className={`lua-code-line${contextLine.errorLine ? ' error-line' : ''}`} key={contextLine.line}>
-                <span className="lua-code-line-number">{contextLine.line}</span>
-                {contextLine.errorLine
-                  ? <div className="lua-code-line-edit"><textarea
-                    value={syntaxLineDrafts[issueKey] ?? contextLine.draftLine ?? ''}
-                    onChange={(event) => onSetDraft(issueKey, event.target.value)}
-                    rows={2}
-                    spellCheck={false}
-                    aria-label={`编辑 Lua 第 ${contextLine.line} 行`}
-                  />{issue.column ? <small className="lua-code-column-marker">解析器错误列：{issue.column}</small> : null}{contextLine.sourceLine !== contextLine.draftLine ? <small className="lua-code-baseline">原始代码：<code>{contextLine.sourceLine || '（空行）'}</code></small> : null}</div>
-                  : <code className="lua-code-line-text">{contextLine.draftLine || ' '}</code>}
+            <div className="lua-snippet-help">{issue.message}</div>
+            <div className="lua-snippet-help">原文参考上下文{issue.sourceLineNumber ? ` · 原文第 ${issue.sourceLineNumber} 行` : ` · 参考位置 ${issue.sourceReferenceLine ?? '?'} 行（未精确对齐）`}</div>
+            {issue.sourceContextLines?.length ? <div className="lua-code-editor">
+              {issue.sourceContextLines.map((row) => <div className={`lua-code-line${row.line === issue.sourceLineNumber ? ' error-line' : ''}`} key={row.line}>
+                <span className="lua-code-line-number">{row.line}</span><code className="lua-code-line-text">{row.text || ' '}</code>
               </div>)}
+            </div> : <div className="lua-snippet-help">增删行或代码变动导致原文无法可靠定位；请以当前稿解析器行号为准。</div>}
+            <div className="lua-snippet-help">当前稿上下文 · 红色行为解析器报错位置；点击任意行编辑，保存只修改这一行</div>
+            {contextLines.length ? <div className="lua-code-editor lua-snippet-code-editor">
+              {visibleContextLines.map((contextLine) => <EditableSyntaxLine
+                key={`${issue.pathJson}:${contextLine.line}`}
+                line={contextLine.line}
+                text={contextLine.draftLine}
+                errorLine={contextLine.errorLine}
+                column={contextLine.errorLine ? issue.column : undefined}
+                disabled={loading || savingSyntaxKey !== null}
+                saving={savingSyntaxKey === `${issueKey}:line:${contextLine.line}`}
+                onSave={(replacement, expectedLine) => onSaveSyntaxLine(
+                  { ...issue, line: contextLine.line, draftLine: expectedLine },
+                  `${issueKey}:line:${contextLine.line}`, replacement,
+                )}
+              />)}
             </div> : <textarea
               className="lua-snippet-single-editor"
               value={syntaxLineDrafts[issueKey] ?? issue.draftLine ?? ''}
@@ -72,16 +76,41 @@ export function LuaSyntaxDetails({
               aria-label={`编辑 Lua 第 ${issue.line ?? '?'} 行`}
             />}
             {expandedContext ? <button type="button" className="secondary-button lua-context-expand" onClick={() => onToggleContext(issueKey, false)}><Minus size={14} />收起附近代码</button> : canExpandContext ? <button type="button" className="secondary-button lua-context-expand" onClick={() => onToggleContext(issueKey, true)} title="查看错误行附近更多原始 Lua 代码"><Plus size={14} />展开附近更多行</button> : null}
-            <div className="lua-syntax-actions">
-              <button type="button" className="primary-button" disabled={loading || !issue.pathJson || !issue.line || savingSyntaxKey === issueKey} onClick={() => onSaveSyntaxLine(issue, issueKey)}>
+            {!contextLines.length && <div className="lua-syntax-actions">
+              <button type="button" className="primary-button" disabled={loading || !issue.pathJson || !issue.line || savingSyntaxKey !== null} onClick={() => onSaveSyntaxLine(issue, issueKey)}>
                 {savingSyntaxKey === issueKey ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}
                 保存错误行并重新校验
               </button>
-              {syntaxSaveMessage && savingSyntaxKey !== issueKey && <span className="lua-inline-save-message">{syntaxSaveMessage}</span>}
-            </div>
+            </div>}
           </article>;
         })}
       </div> : <div className="lua-simple-empty">当前没有待修复的 Lua 语法片段。</div>}
     </section>
   );
+}
+
+
+function EditableSyntaxLine({ line, text, errorLine, column, disabled, saving, onSave }: {
+  line: number; text: string; errorLine: boolean; column?: number; disabled: boolean; saving: boolean;
+  onSave: (replacement: string, expectedLine: string) => Promise<boolean>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const [baseline, setBaseline] = useState(text);
+  const begin = () => { setBaseline(text); setDraft(text); setEditing(true); };
+  const save = async () => { if (await onSave(draft, baseline)) setEditing(false); };
+  return <div className={`lua-code-line${errorLine ? ' error-line' : ''}`}>
+    <span className="lua-code-line-number">{line}</span>
+    {editing ? <div className="lua-code-line-edit">
+      <textarea autoFocus value={draft} disabled={disabled} rows={2} spellCheck={false}
+        aria-label={`编辑 Lua 第 ${line} 行`} onChange={event => setDraft(event.target.value)} />
+      <div className="lua-line-actions">
+        <button type="button" className="primary-button" disabled={disabled || draft === baseline}
+          onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}保存第 {line} 行并校验</button>
+        <button type="button" className="secondary-button" disabled={disabled} onClick={() => setEditing(false)}>取消</button>
+      </div>
+      {column && <small className="lua-code-column-marker">解析器错误列：{column}</small>}
+    </div> : <button type="button" className="lua-line-edit-trigger" disabled={disabled}
+      aria-label={`编辑 Lua 第 ${line} 行`} onClick={begin}><code>{text || '（空行）'}</code><span>编辑</span></button>}
+  </div>;
 }

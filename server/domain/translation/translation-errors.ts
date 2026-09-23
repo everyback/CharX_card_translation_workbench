@@ -1,3 +1,4 @@
+import { textAttributes } from '../card/text-attributes.js';
 export class RejectedTranslationError extends Error {
   constructor(message: string, readonly segmentId: string, readonly translatedText: string, readonly qaFlags: string[]) {
     super(message);
@@ -56,7 +57,7 @@ export function residualHangulIssue(translated: string, protectedFragments: read
   return `可能残留韩文：${residual.slice(0, 3).join('、')}`;
 }
 
-export function residualLanguageIssue(
+function residualLanguageIssueCore(
   translated: string,
   protectedFragments: readonly string[] = [],
   sourceLanguage = 'auto',
@@ -148,4 +149,17 @@ function languageFamily(value: string): string {
     greek: 'el', '希腊语': 'el',
   };
   return aliases[tag] || tag.split('-')[0];
+}
+
+
+export function residualLanguageIssue(
+  translated: string, protectedFragments: readonly string[] = [], sourceLanguage = 'auto',
+  fallbackLanguage = 'en', targetLanguage = 'zh-CN',
+): string | null {
+  for (const attr of textAttributes(translated)) {
+    const variables = attr.text.match(/\{\{[\s\S]*?\}\}|\$\{[^}]+\}|https?:\/\/[^\s]+/gu) ?? [];
+    const issue = residualLanguageIssueCore(attr.text, variables, sourceLanguage, fallbackLanguage, targetLanguage);
+    if (issue) return `<${attr.tag}> @${attr.name}：${issue}`;
+  }
+  return residualLanguageIssueCore(translated, protectedFragments, sourceLanguage, fallbackLanguage, targetLanguage);
 }

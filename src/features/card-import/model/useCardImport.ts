@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/shared/api/http';
-import { SUPPORTED_CARD_EXTENSIONS } from './card-file';
+import { IMPORT_FORMAT_HINT, SUPPORTED_CARD_EXTENSIONS } from './card-file';
 import type { RunWorkbenchAction, ShowWorkbenchError } from '@/shared/model/workbench-actions';
 
 export interface CardImportResult {
@@ -8,6 +8,9 @@ export interface CardImportResult {
   projectId?: string;
   status: 'imported' | 'failed';
   error?: string;
+  /** Set for imported files so the summary can tell conversion from translation. */
+  sourceFormat?: string;
+  conversionWarnings?: string[];
 }
 
 interface UseCardImportOptions {
@@ -41,7 +44,7 @@ export function useCardImport({
     if (busy) return;
     const supported = files.filter((file) => SUPPORTED_CARD_EXTENSIONS.has(file.name.split('.').pop()?.toLowerCase() ?? ''));
     if (!supported.length) {
-      onError('不支持这些文件。请拖入 JSON、PNG、CHARX 或 RISUM 文件。');
+      onError(`不支持这些文件。请拖入 ${IMPORT_FORMAT_HINT}`);
       return;
     }
     await runAction('import', async () => {
@@ -50,11 +53,17 @@ export function useCardImport({
         try {
           const formData = new FormData();
           formData.append('file', file);
-          const created = await api<{ id: string }>('/api/projects/import', {
+          const created = await api<{ id: string; sourceFormat?: string; conversion?: { warnings?: string[] } }>('/api/projects/import', {
             method: 'POST',
             body: formData,
           });
-          results.push({ fileName: file.name, projectId: created.id, status: 'imported' });
+          results.push({
+            fileName: file.name,
+            projectId: created.id,
+            status: 'imported',
+            sourceFormat: created.sourceFormat,
+            conversionWarnings: created.conversion?.warnings,
+          });
         } catch (error) {
           results.push({ fileName: file.name, status: 'failed', error: error instanceof Error ? error.message : '导入失败' });
         }
@@ -71,7 +80,8 @@ export function useCardImport({
       onShowOverview();
       const ignored = files.length - supported.length;
       const failed = results.filter((item) => item.status === 'failed').length;
-      onNotice(`已处理 ${supported.length} 个文件${failed ? `，${failed} 个失败` : ''}${ignored ? `，忽略 ${ignored} 个不支持的文件` : ''}。`);
+      const conversionWarnings = results.flatMap((item) => item.conversionWarnings ?? []);
+      onNotice(`已处理 ${supported.length} 个文件${failed ? `，${failed} 个失败` : ''}${ignored ? `，忽略 ${ignored} 个不支持的文件` : ''}${conversionWarnings.length ? `；预设转换有 ${conversionWarnings.length} 项需复核` : ''}。`);
     });
   }, [busy, onError, onImportResults, onImportedProject, onNotice, onShowOverview, refreshProjects, runAction, selectProject]);
 

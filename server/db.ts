@@ -225,6 +225,8 @@ await addColumnIfMissing('projects', 'source_storage_sha256', 'TEXT');
 await addColumnIfMissing('projects', 'draft_storage_path', 'TEXT');
 await addColumnIfMissing('projects', 'draft_storage_bytes', 'INTEGER');
 await addColumnIfMissing('projects', 'draft_storage_sha256', 'TEXT');
+// Which `prompt_order` block a SillyTavern preset project converts; NULL = auto.
+await addColumnIfMissing('projects', 'preset_block_index', 'INTEGER');
 await addColumnIfMissing('resource_image_candidates', 'storage_path', 'TEXT');
 await addColumnIfMissing('resource_image_candidates', 'storage_bytes', 'INTEGER');
 await addColumnIfMissing('resource_image_candidates', 'storage_sha256', 'TEXT');

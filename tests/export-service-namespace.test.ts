@@ -1,3 +1,8 @@
+import { buildReviewedDraft, loadReviewedDraft } from '../server/application/export/reviewed-draft.js';
+import { countRegexMatchesInStrings } from '../server/domain/card/card.js';
+import { buildLuaManagementReport } from '../server/domain/lua/lua-management.js';
+import { unzipSync, strFromU8 } from 'fflate';
+import { buildPresetProjectView } from '../server/domain/card/st-preset-edit.js';
 import { createReviewService } from '../server/application/review/review-service.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -23,6 +28,7 @@ async function createNamespaceDatabase(): Promise<{ database: AsyncDatabase; dir
       source_filename TEXT,
       regex_validation_overrides TEXT,
       source_blob BLOB,
+      preset_block_index INTEGER,
       source_storage_path TEXT,
       source_storage_bytes INTEGER,
       source_metadata_keys TEXT,
@@ -163,6 +169,10 @@ test('manual namespace confirmation preserves an internal key or applies a confi
       clock: () => '2026-09-03T00:00:00.000Z',
     });
 
+    await confirmations.ensureReviewItem('mahou-shoujo');
+    await confirmations.ensureReviewItem('mahou-shoujo');
+    const pending = await database.prepare('SELECT review_status AS status, final_text AS finalText, included FROM segments WHERE project_id = ?').all('mahou-shoujo');
+    assert.deepEqual(pending, [{ status: 'pending', finalText: module.namespace, included: 0 }]);
     await confirmations.confirm('mahou-shoujo', module.namespace);
     const preserved = await database.prepare<{
       pathJson: string; reviewStatus: string; finalText: string | null; translatedText: string | null;
@@ -251,4 +261,129 @@ test('approved manual foreign-language examples survive save and export while st
     await database.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+
+test('save and export preserve stage-two aliases without generating additional names', async () => {
+  const { database, directory } = await createNamespaceDatabase();
+  try {
+    const code = 'local roster = [==[[{"id":"cirno","aliases":["Cirno","琪露诺"],"sfw":["cirno_angry"]}]]==]\nlocal function thv2_detect_response_owners(text) return text end';
+    const module = { trigger: [{ effect: [{ code }] }] };
+    const card = { name: 'Test', character_book: { entries: [{ content: '<TouhouAssetIndexV2>\n- `cirno` = 冰之妖精 [SFW:G1]\n</TouhouAssetIndexV2>' }] } };
+    await database.prepare(`INSERT INTO projects(id, original_json, draft_json, original_module_json, draft_module_json, source_format, status, updated_at)
+      VALUES ('aliases', ?, ?, ?, ?, 'risum', 'review', 'before')`).run(JSON.stringify(card), JSON.stringify(card), JSON.stringify(module), JSON.stringify(module));
+    const service = createExportService({ database, clock: () => 'now', targetLanguage: () => 'zh-CN', review: {
+      projectLanguageBehaviorIssue: async () => null, approvedSegmentProtectionIssue: async () => null, resolveMirroredModuleLorebookFailures: async () => {},
+    } });
+    assert.equal((await service.applyProject('aliases')).runtimeAliasAdditions, 0);
+    assert.equal((await service.applyProject('aliases')).runtimeAliasAdditions, 0);
+    await service.exportProject('aliases');
+    const saved = await database.prepare('SELECT draft_module_json AS module FROM projects WHERE id = ?').get('aliases') as { module: string };
+    assert.deepEqual(JSON.parse(saved.module), module);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('preset export blocks unsupported injection while archive remains available and matches the UI report', async () => {
+  const { database, directory } = await createNamespaceDatabase();
+  try {
+    const source = { name: 'Preset', prompts: [{ identifier: 'main', content: '正文', role: 'system', injection_position: 4 }] };
+    await database.prepare(`INSERT INTO projects(id, name, original_json, draft_json, source_format, status, updated_at)
+      VALUES ('preset', 'Preset', ?, ?, 'st-preset', 'review', 'before')`).run(JSON.stringify(source), JSON.stringify(source));
+    const service = createExportService({ database, clock: () => 'now', targetLanguage: () => 'zh-CN', review: {
+      projectLanguageBehaviorIssue: async () => null, approvedSegmentProtectionIssue: async () => null, resolveMirroredModuleLorebookFailures: async () => {},
+    } });
+    await assert.rejects(service.exportProject('preset'), (error: unknown) => error instanceof ProjectWorkflowError
+      && error.statusCode === 409 && error.payload.code === 'PRESET_CONVERSION_UNSUPPORTED');
+    const archive = await service.exportProject('preset', { presetBundle: true });
+    assert.equal(archive.contentType, 'application/zip');
+    const files = unzipSync(archive.body as Uint8Array);
+    assert.equal(files['converted.risup'], undefined);
+    assert.deepEqual(JSON.parse(strFromU8(files['original.st.json'])), source);
+    assert.deepEqual(JSON.parse(strFromU8(files['conversion.report.json'])), buildPresetProjectView(source, source, null, 'Preset').report);
+    const fixed = { ...source, prompts: [{ identifier: 'main', content: '可以运行的正文', role: 'system' }] };
+    await database.prepare("UPDATE projects SET draft_json = ? WHERE id = 'preset'").run(JSON.stringify(fixed));
+    const exported = await service.exportProject('preset');
+    assert.equal(exported.contentType, 'application/octet-stream');
+    const state = await database.prepare("SELECT original_json AS original, draft_json AS draft FROM projects WHERE id = 'preset'").get() as { original: string; draft: string };
+    assert.deepEqual(JSON.parse(state.original), source);
+    assert.deepEqual(JSON.parse(state.draft), fixed);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('regex diagnostics and exact waiver use the reviewed candidate after a failed apply', async () => {
+  const { database, directory } = await createNamespaceDatabase();
+  const pattern = 'name:[a-z]+';
+  const originalCard = { data: { first_mes: Array(6).fill('name:alice').join(' ') } };
+  const translated = 'name:alice name:bob 姓名:甲 姓名:乙 姓名:丙 姓名:丁';
+  const module = { regex: [{ in: pattern, out: '$0' }] };
+  const service = createExportService({
+    database, clock: () => '2026-09-20T00:00:00.000Z', targetLanguage: () => 'zh-CN',
+    review: {
+      projectLanguageBehaviorIssue: async () => null,
+      approvedSegmentProtectionIssue: async () => null,
+      resolveMirroredModuleLorebookFailures: async () => {},
+    },
+  });
+  try {
+    await database.prepare(`INSERT INTO projects (id, original_json, draft_json, original_module_json,
+      draft_module_json, source_format, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('regex-stale', JSON.stringify(originalCard), JSON.stringify(originalCard), JSON.stringify(module),
+        JSON.stringify(module), 'json', 'ready', 'now');
+    await database.prepare(`INSERT INTO segments (id, project_id, path_json, path_label, kind,
+      source_text, translated_text, review_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('text', 'regex-stale', '["data","first_mes"]', 'data.first_mes', 'field',
+        originalCard.data.first_mes, translated, 'approved');
+    const candidate = await loadReviewedDraft(database, 'regex-stale');
+    assert.equal(countRegexMatchesInStrings(candidate.draftCard, pattern), 2);
+    const report = buildLuaManagementReport({ originalCard, originalModule: module, ...candidate });
+    assert.equal(report.regexRules[0].originalMatches, 6);
+    assert.equal(report.regexRules[0].draftMatches, 2);
+    await assert.rejects(service.applyProject('regex-stale'), (error: unknown) => {
+      assert.ok(error instanceof ProjectWorkflowError);
+      assert.equal(error.payload.code, 'REGEX_MATCH_COUNT_CHANGED');
+      assert.equal(error.payload.originalMatches, 6);
+      assert.equal(error.payload.draftMatches, 2);
+      return true;
+    });
+    const stored = await database.prepare('SELECT draft_json AS draft FROM projects WHERE id = ?')
+      .get('regex-stale') as { draft: string };
+    assert.deepEqual(JSON.parse(stored.draft), originalCard);
+    const override = { '模块.regex.0.in': {
+      pattern, originalMatchCount: 6, draftMatchCount: countRegexMatchesInStrings(candidate.draftCard, pattern), confirmedAt: 'now',
+    } };
+    await database.prepare('UPDATE projects SET regex_validation_overrides = ? WHERE id = ?')
+      .run(JSON.stringify(override), 'regex-stale');
+    assert.equal((await service.applyProject('regex-stale')).ok, true);
+    // A later review revision must invalidate the exact acknowledgement.
+    await database.prepare('UPDATE segments SET translated_text = ? WHERE id = ?').run('name:alice 姓名:乙', 'text');
+    await assert.rejects(service.applyProject('regex-stale'), (error: unknown) => {
+      assert.ok(error instanceof ProjectWorkflowError);
+      assert.equal(error.payload.code, 'REGEX_MATCH_COUNT_CHANGED');
+      return true;
+    });
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('reviewed regex candidate ignores pending translations and protected stored paths', () => {
+  const original = { data: { first_mes: 'name:alice', viewScreen: 'none' } };
+  const candidate = buildReviewedDraft(original, null, null, [
+    { pathJson: '["data","first_mes"]', kind: 'field', sourceText: 'name:alice',
+      translatedText: '姓名:甲', finalText: null, reviewStatus: 'pending', start: null, end: null },
+    { pathJson: '["data","viewScreen"]', kind: 'field', sourceText: 'none',
+      translatedText: '无', finalText: null, reviewStatus: 'approved', start: null, end: null },
+  ], 'json');
+  assert.deepEqual(candidate.draftCard, original);
+  assert.equal(candidate.ignoredProtectedPaths.length, 1);
 });

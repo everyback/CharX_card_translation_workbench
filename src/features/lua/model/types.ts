@@ -136,7 +136,7 @@ export interface LuaManagementSegment {
 }
 
 export interface LuaManagementIssue {
-  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router' | 'namespace';
+  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router' | 'namespace' | 'regex-drift' | 'protocol-regression';
   pathJson?: string;
   pathLabel: string;
   message: string;
@@ -145,6 +145,9 @@ export interface LuaManagementIssue {
   line?: number;
   column?: number;
   sourceLine?: string;
+  sourceLineNumber?: number;
+  sourceReferenceLine?: number;
+  sourceContextLines?: Array<{ line: number; text: string }>;
   draftLine?: string;
   contextLines?: Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }>;
 }

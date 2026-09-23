@@ -8,11 +8,14 @@ interface ImportSummaryProps {
   onScanProject: (projectId: string) => void;
   onScanAll: () => void | Promise<void>;
   onClose: () => void;
+  /** Formats that are converted rather than translated get a different action. */
+  conversionFormats?: readonly string[];
 }
 
-export function ImportSummary({ results, busy, onSelectProject, onScanProject, onScanAll, onClose }: ImportSummaryProps) {
+export function ImportSummary({ results, busy, onSelectProject, onScanProject, onScanAll, onClose, conversionFormats }: ImportSummaryProps) {
   const imported = results.filter((item) => item.status === 'imported' && item.projectId);
   const canScan = imported.length > 0 && !busy;
+  const isConversion = (item: CardImportResult) => Boolean(item.sourceFormat && conversionFormats?.includes(item.sourceFormat));
   return (
     <section className="import-summary" role="status" aria-label="导入结果">
       <div className="import-summary-header">
@@ -27,9 +30,11 @@ export function ImportSummary({ results, busy, onSelectProject, onScanProject, o
             {item.status === 'imported' ? (
               <div className="import-summary-actions">
                 <button className="link-button" type="button" onClick={() => item.projectId && onSelectProject(item.projectId)}>打开</button>
-                <button className="secondary-button compact-button" type="button" disabled={!canScan} onClick={() => item.projectId && onScanProject(item.projectId)}>
-                  {busy === `scan-${item.projectId}` ? <LoaderCircle className="spin" size={14} /> : <ScanSearch size={14} />}扫描
-                </button>
+                {!isConversion(item) && (
+                  <button className="secondary-button compact-button" type="button" disabled={!canScan} onClick={() => item.projectId && onScanProject(item.projectId)}>
+                    {busy === `scan-${item.projectId}` ? <LoaderCircle className="spin" size={14} /> : <ScanSearch size={14} />}扫描
+                  </button>
+                )}
               </div>
             ) : <span className="import-summary-error">{item.error}</span>}
           </div>

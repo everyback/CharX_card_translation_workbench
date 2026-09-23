@@ -164,7 +164,6 @@ export function LuaPage({
       if (issue.kind === 'syntax') drafts[`${issue.kind}:${issue.pathLabel}:${index}`] = issue.draftLine ?? '';
     });
     setSyntaxLineDrafts(drafts);
-    setSyntaxSaveMessage(null);
     setSyntaxContextExpanded({});
   }, [report?.generatedAt]);
   function focusSyntaxEditor(): void {
@@ -194,23 +193,28 @@ export function LuaPage({
     window.setTimeout(() => document.getElementById(`lua-syntax-snippet-${syntaxIndex}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
   }, [reviewFocus, report?.generatedAt, syntaxIssues]);
 
-  async function saveSyntaxLine(issue: LuaManagementReport['issues'][number], issueKey: string) {
+  async function saveSyntaxLine(issue: LuaManagementReport['issues'][number], issueKey: string, editedLine?: string): Promise<boolean> {
+    if (savingSyntaxKey) return false;
     const line = issue.line;
     const pathJson = issue.pathJson;
     if (!pathJson || !line) {
       onPreviewError(new Error('该语法错误缺少可定位的 Lua 路径或行号，请刷新诊断。'));
-      return;
+      return false;
     }
-    const replacement = syntaxLineDrafts[issueKey] ?? issue.draftLine ?? '';
+    const replacement = editedLine ?? syntaxLineDrafts[issueKey] ?? issue.draftLine ?? '';
     setSavingSyntaxKey(issueKey);
     setSyntaxSaveMessage(null);
     try {
       const result = await onSaveLuaSyntaxLine(pathJson, line, replacement, issue.draftLine);
+      const nextIssue = result.remainingSyntaxIssues?.[0] as { line?: number } | undefined;
       setSyntaxSaveMessage(result.syntaxOk
-        ? '已保存人工修改，当前 脚本 语法校验通过。'
-        : `已保存人工修改，但仍有 ${result.remainingSyntaxIssues?.length ?? 1} 条 脚本 语法错误，请继续检查。`);
+        ? `第 ${line} 行已保存，当前脚本语法校验通过。正在刷新其他诊断。`
+        : `第 ${line} 行已保存；${nextIssue?.line === line ? "该行仍有语法问题" : `下一处语法错误在第 ${nextIssue?.line ?? "?"} 行`}。正在刷新诊断，这不代表保存失败。`);
+      return true;
     } catch (error) {
+      setSyntaxSaveMessage(`保存失败：${error instanceof Error ? error.message : String(error)}`);
       onPreviewError(error);
+      return false;
     } finally {
       setSavingSyntaxKey(null);
     }
@@ -695,7 +699,7 @@ export function LuaPage({
           {staticRegexReferences.map((reference) => {
             const mismatch = !reference.dynamicDisplay && reference.originalMatches !== reference.draftMatches && reference.forcePassed !== true;
             return <button type="button" className={`lua-static-regex-row${mismatch ? ' problem' : ''}`} key={reference.pathLabel} onClick={() => openRegexEditor(reference)}>
-              <code>{reference.pathLabel}</code><span>{reference.fullPattern || reference.pattern}</span><em>{mismatch ? `命中异常：${reference.originalMatches} → ${reference.draftMatches}` : reference.dynamicDisplay ? '动态展示规则' : '命中已保持'}</em><ArrowRight size={14} />
+              <code>{reference.pathLabel}</code><span>{reference.fullPattern || reference.pattern}</span><em>{mismatch ? `命中异常：${reference.originalMatches} → ${reference.draftMatches}` : reference.forcePassed ? `已豁免：${reference.originalMatches} → ${reference.draftMatches}` : reference.dynamicDisplay ? '动态展示规则' : '命中已保持'}</em><ArrowRight size={14} />
             </button>;
           })}
           {!staticRegexReferences.length && <div className="lua-simple-empty">本模块的正则均在回复生成后执行，因此不显示静态命中校验。</div>}
@@ -738,7 +742,7 @@ export function LuaPage({
         syntaxSaveMessage={syntaxSaveMessage}
         onSetDraft={(issueKey, value) => setSyntaxLineDrafts((drafts) => ({ ...drafts, [issueKey]: value }))}
         onToggleContext={(issueKey, expanded) => setSyntaxContextExpanded((current) => ({ ...current, [issueKey]: expanded }))}
-        onSaveSyntaxLine={(issue, issueKey) => void saveSyntaxLine(issue, issueKey)}
+        onSaveSyntaxLine={saveSyntaxLine}
       />
 
       <div className="lua-maintenance-row">

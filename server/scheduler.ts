@@ -1,3 +1,4 @@
+import { buildRuntimeAliasDraft } from './application/translation/runtime-alias-stage.js';
 import { saveRejectedTranslation } from './application/review/rejected-translation.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { db, now, saveSetting, setting } from './db.js';
@@ -6,7 +7,10 @@ export { chatCompletionsEndpoint, modelsEndpoint } from './domain/provider/opena
 import { WORKBENCH_DEFAULTS, workbenchConfig } from '../config/workbench.js';
 import {
   applyApprovedSegments,
+  applyCardCustomscriptRegexAlternatives,
   applyRisuRegexCoverageProposals,
+  cardCustomscriptRegexFlags,
+  cardCustomscriptRegexPathLabel,
   countRegexMatchesInStrings,
   isRisuDisplayFormattingRegexRule,
   isRisuOutputPostprocessRegexRule,
@@ -118,6 +122,12 @@ export interface RisuRegexLanguageEntry {
   formatProbe?: RegexWhitespaceProbe;
   sourceMatchCount?: number;
   draftMatchCount?: number;
+  /**
+   * Where the rule lives. Module rules may receive a whole-pattern candidate; card
+   * `customscript` rules may only receive additive alternatives, because the card surface
+   * has no coverage guard to fall back on.
+   */
+  origin?: 'module' | 'card';
 }
 
 export interface RegexWhitespaceProbe {
@@ -895,7 +905,7 @@ async function translateProjectRegexLanguageAlternatives(
   const translatedModule = moduleSegments.length
     ? applyRisuModuleSegments(draftModule, moduleSegments).draft
     : draftModule;
-  const entries = collectRegexLanguageEntries(
+  const moduleEntries = collectRegexLanguageEntries(
     originalModule,
     translatedModule,
     originalCard,
@@ -903,13 +913,18 @@ async function translateProjectRegexLanguageAlternatives(
     moduleSourceSamples,
     moduleDraftSamples,
   );
+  // Card `customscript` regex rules are a separate surface from the module `regex` array.
+  // They only ever receive additive alternatives, so they ride the same model pass but are
+  // applied through the additive-only adapter below.
+  const cardEntries = collectCardCustomscriptRegexEntries(originalCard, translatedCard);
+  const entries = [...moduleEntries, ...cardEntries];
   if (!entries.length) return { total: 0, added: 0, adapted: 0, failed: 0 };
 
   const batches = splitRegexLanguageEntries(entries, settings.batchItems, settings.batchChars);
-  await log(jobId, 'info', `阶段 2 正在并发请求模型：${entries.length} 条 Lua 正则拆为 ${batches.length} 批，按当前 ${settings.concurrency} 路共享模型通道调度。`);
+  await log(jobId, 'info', `阶段 2 正在并发请求模型：${entries.length} 条 Risu 正则（模块 ${moduleEntries.length} 条、卡片 ${cardEntries.length} 条）拆为 ${batches.length} 批，按当前 ${settings.concurrency} 路共享模型通道调度。`);
   const results = await mapWithConcurrency(batches, Math.min(settings.concurrency, batches.length), async (batch, index) => {
     try {
-      await log(jobId, 'info', `阶段 2 请求 ${index + 1}/${batches.length}：分析 ${batch.length} 条 Lua 正则。`);
+      await log(jobId, 'info', `阶段 2 请求 ${index + 1}/${batches.length}：分析 ${batch.length} 条 Risu 正则。`);
       const proposals = await analyzeRisuRegexLanguageAlternatives({
         targetLanguage: settings.targetLanguage,
         entries: batch,
@@ -919,36 +934,41 @@ async function translateProjectRegexLanguageAlternatives(
       return { proposals, failedEntries: 0 };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await log(jobId, 'warn', `Lua 正则适配批次失败（${batch.length} 条），保留原规则并交给审核：${message.slice(0, 240)}`);
+      await log(jobId, 'warn', `正则适配批次失败（${batch.length} 条），保留原规则并交给审核：${message.slice(0, 240)}`);
       return { proposals: [] as RisuRegexAlternativeProposal[], failedEntries: batch.length };
     }
   });
   const proposals = results.flatMap((result) => result.proposals);
   const failedEntries = results.reduce((total, result) => total + result.failedEntries, 0);
   await log(jobId, 'info', '阶段 2 已收到模型返回：准备校验并写入正则语言适配结果。');
+  // Module surface: whole-pattern candidates are allowed, but runtime rules refuse them.
   const coverageChanges = applyRisuRegexCoverageProposals(draftModule, proposals, originalCard);
-  const changes = [
-    ...coverageChanges,
-    ...applyRisuRegexAlternativeProposals(
-      draftModule,
-      proposals.filter((proposal) => !coverageChanges.some((change) => change.pathLabel === proposal.pathLabel)),
-    ),
-  ];
+  const moduleAlternativeChanges = applyRisuRegexAlternativeProposals(
+    draftModule,
+    proposals.filter((proposal) => !coverageChanges.some((change) => change.pathLabel === proposal.pathLabel)),
+  );
+  // Card surface: additive alternatives only — no whole-pattern candidate is ever applied.
+  const cardAlternativeChanges = applyCardCustomscriptRegexAlternatives(translatedCard, proposals);
+  const changes = [...coverageChanges, ...moduleAlternativeChanges, ...cardAlternativeChanges];
   if (!changes.length) {
     await log(jobId, failedEntries
       ? 'warn'
-      : 'info', `Lua 正则语言适配完成：模型未确认需要追加的目标语言并列项（检查 ${entries.length} 条规则${failedEntries ? `，${failedEntries} 条待重试` : ''}）。`);
+      : 'info', `正则语言适配完成：模型未确认需要追加的目标语言并列项（检查 ${entries.length} 条规则${failedEntries ? `，${failedEntries} 条待重试` : ''}）。`);
     return { total: entries.length, added: 0, adapted: 0, failed: failedEntries };
   }
-  const saved = await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
-    .run(JSON.stringify(draftModule), now(), projectId, row.updatedAt ?? '');
+  const saved = cardAlternativeChanges.length
+    ? await db.prepare('UPDATE projects SET draft_module_json = ?, draft_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
+      .run(JSON.stringify(draftModule), JSON.stringify(translatedCard), now(), projectId, row.updatedAt ?? '')
+    : await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
+      .run(JSON.stringify(draftModule), now(), projectId, row.updatedAt ?? '');
   if (!saved.changes) {
-    await log(jobId, 'warn', 'Lua 正则适配结果未写回：项目草稿已被人工操作更新，已保留最新草稿。');
+    await log(jobId, 'warn', '正则适配结果未写回：项目草稿已被人工操作更新，已保留最新草稿。');
     return { total: entries.length, added: 0, adapted: 0, failed: failedEntries };
   }
   const added = changes.reduce((total, change) => total + change.addedAlternatives.length, 0);
   const adapted = coverageChanges.length;
-  await log(jobId, failedEntries ? 'warn' : 'info', `Lua 正则语言适配完成：已结合完整命中集适配 ${adapted} 条规则、追加 ${added} 个目标语言并列项${failedEntries ? `，${failedEntries} 条待重试` : ''}，进入审核时可检查。`);
+  const cardAdded = cardAlternativeChanges.reduce((total, change) => total + change.addedAlternatives.length, 0);
+  await log(jobId, failedEntries ? 'warn' : 'info', `正则语言适配完成：已结合完整命中集适配 ${adapted} 条模块规则、追加 ${added} 个目标语言并列项（其中卡片正则 ${cardAdded} 个）${failedEntries ? `，${failedEntries} 条待重试` : ''}，进入审核时可检查。`);
   return { total: entries.length, added, adapted, failed: failedEntries };
 }
 
@@ -1178,7 +1198,7 @@ export function regexLanguagePayloadEntry(entry: RisuRegexLanguageEntry): Record
       ...(dynamicDisplay ? { dynamicDisplay: true } : {}),
       ...(runtimePostprocess ? { runtimePostprocess: true } : {}),
       runtimeScope: dynamicDisplay ? 'Risu 运行时消息展示；不要从卡片静态素材推断行为。' : 'Risu 聊天回复后处理；不要从卡片静态素材命中数推断行为。',
-      runtimeRequirement: '请适配目标语言回复文本的标点、引号、分词与中文无空格边界，同时保留 type、out、捕获组数量和捕获组顺序。',
+      runtimeRequirement: '请适配目标语言回复文本的标点、引号、分词与中文无空格边界，同时保留 type、out、捕获组数量和捕获组顺序。运行期规则不得返回完整 pattern：不要改动任何量词（*、+、?、{m,n}）、字符类边界（[ \\t]、\\s）、断言（(?=)、(?!)、(?<=)、(?<!)）或分组结构——这类改动不会改变静态卡片命中数，却会改变渲染期行为。需要覆盖新的目标语言写法时，只用 anchorAlternatives + additions 追加普通文字并列项。',
     };
   }
   const selection = selectRegexModelRecords(entry);
@@ -1344,7 +1364,7 @@ async function prepareRuntimeAliasFollowUp(
   const candidates = collectRuntimeAliasTranslationCandidates(originalModule, targetLanguage);
   await db.prepare(`
     UPDATE jobs SET post_total_items = ?, post_completed_items = 0, post_failed_items = 0, updated_at = ? WHERE id = ?
-  `).run(candidates.length, now(), jobId);
+  `).run(Math.max(1, candidates.length), now(), jobId);
   if (candidates.length) {
     await log(jobId, 'info', `阶段 2 已登记：文本翻译完成后，将处理 Lua 正则并本地化 ${candidates.length} 个运行时名称目录。`);
   }
@@ -1358,15 +1378,14 @@ async function translateProjectRuntimeAliases(
   settings: RuntimeSettings,
   candidates: RuntimeAliasTranslationCandidate[],
 ): Promise<RuntimeAliasFollowUpResult> {
-  if (!candidates.length) return { total: 0, failed: 0 };
+  const workCount = Math.max(1, candidates.length);
   const row = await db.prepare(`
-    SELECT original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
+    SELECT original_json AS originalJson, original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
       updated_at AS updatedAt
     FROM projects WHERE id = ?
-  `).get(projectId) as { originalModuleJson?: string | null; draftModuleJson?: string | null; updatedAt?: string } | undefined;
+  `).get(projectId) as { originalJson?: string | null; originalModuleJson?: string | null; draftModuleJson?: string | null; updatedAt?: string } | undefined;
   if (!row?.originalModuleJson) {
-    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
-    return { total: candidates.length, failed: candidates.length };
+    return { total: 0, failed: 0 };
   }
 
   let draftModule: Record<string, unknown>;
@@ -1376,64 +1395,45 @@ async function translateProjectRuntimeAliases(
       ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
       : structuredClone(originalModule);
   } catch {
-    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
+    await updateRuntimeAliasFollowUp(jobId, 0, workCount);
     await log(jobId, 'warn', '运行时别名阶段跳过：项目模块 JSON 无法解析。');
-    return { total: candidates.length, failed: candidates.length };
+    return { total: workCount, failed: workCount };
   }
 
+  if (!detectRisuPortraitRouting(draftModule).detected) return { total: 0, failed: 0 };
+  const textRows = await db.prepare(`SELECT path_json AS pathJson, source_text AS sourceText, kind, start_pos AS start, end_pos AS end, translated_text AS translatedText, final_text AS finalText, 'approved' AS reviewStatus FROM segments WHERE project_id = ? AND (final_text IS NOT NULL OR translated_text IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM job_items ji WHERE ji.segment_id = segments.id AND ji.status = 'failed')`).all(projectId) as unknown as ApplicableSegment[];
+  const aliasSource = applyApprovedSegments(JSON.parse(row.originalJson || '{}'), textRows.filter((segment) => !JSON.parse(segment.pathJson).includes('$module')));
   await log(jobId, 'info', `阶段 2 继续：正在本地化 ${candidates.length} 个运行时名称目录，完成后进入审核。`);
-  let translated: Record<string, string[]> = {};
-  try {
-    translated = await translateRuntimeAliases(candidates, settings.targetLanguage);
-    const segmentationInput = Object.entries(translated)
-      .flatMap(([ownerId, aliases]) => aliases.map((name) => ({ ownerId, name })));
-    if (segmentationInput.length) {
-      const segmented = await segmentRuntimeNames(segmentationInput);
-      for (const [ownerId, names] of Object.entries(segmented)) {
-        const current = translated[ownerId] ?? [];
-        translated[ownerId] = [...current, ...names].filter((name, index, all) => all.indexOf(name) === index);
-      }
-    }
-  } catch (error) {
-    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
-    await log(jobId, 'warn', `运行时名称本地化失败，导出时将再次尝试：${error instanceof Error ? error.message : String(error)}`);
-    return { total: candidates.length, failed: candidates.length };
-  }
-  if (!Object.keys(translated).length) {
-    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
-    await log(jobId, 'warn', '运行时名称本地化没有返回可验证的目标语言别名。');
-    return { total: candidates.length, failed: candidates.length };
-  }
-
   let applied: ReturnType<typeof applyRisuModuleSegments>;
   try {
-    applied = applyRisuModuleSegments(draftModule, [], '', undefined, translated);
+    applied = await buildRuntimeAliasDraft(draftModule, aliasSource, settings.targetLanguage, translateRuntimeAliases, segmentRuntimeNames);
+    if (applied.syntaxIssues.length) throw new Error(applied.syntaxIssues[0].message);
   } catch (error) {
-    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
-    await log(jobId, 'warn', `运行时名称本地化写回失败，导出时将再次尝试：${error instanceof Error ? error.message : String(error)}`);
-    return { total: candidates.length, failed: candidates.length };
+    await updateRuntimeAliasFollowUp(jobId, 0, workCount);
+    await log(jobId, 'warn', `运行时名称本地化失败，请在任务页重试阶段 2：${error instanceof Error ? error.message : String(error)}`);
+    return { total: workCount, failed: workCount };
   }
   if (!applied.runtimeAliasAdditions) {
-    await updateRuntimeAliasFollowUp(jobId, candidates.length, 0);
+    await updateRuntimeAliasFollowUp(jobId, workCount, 0);
     await log(jobId, 'info', '运行时名称本地化结果没有新增目录项。');
-    return { total: candidates.length, failed: 0 };
+    return { total: workCount, failed: 0 };
   }
   try {
     const saved = await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
       .run(JSON.stringify(applied.draft), now(), projectId, row.updatedAt ?? '');
     if (!saved.changes) {
-      await updateRuntimeAliasFollowUp(jobId, candidates.length, 0);
-      await log(jobId, 'warn', '运行时名称本地化结果未写回：项目草稿已被人工操作更新，已保留最新草稿。');
-      return { total: candidates.length, failed: 0 };
+      await updateRuntimeAliasFollowUp(jobId, 0, workCount);
+      await log(jobId, 'warn', '运行时名称本地化结果未写回：项目草稿已被人工操作更新，请重试阶段 2。');
+      return { total: workCount, failed: workCount };
     }
   } catch (error) {
-    await updateRuntimeAliasFollowUp(jobId, 0, candidates.length);
-    await log(jobId, 'warn', `运行时名称本地化写回失败，导出时将再次尝试：${error instanceof Error ? error.message : String(error)}`);
-    return { total: candidates.length, failed: candidates.length };
+    await updateRuntimeAliasFollowUp(jobId, 0, workCount);
+    await log(jobId, 'warn', `运行时名称本地化写回失败，请在任务页重试阶段 2：${error instanceof Error ? error.message : String(error)}`);
+    return { total: workCount, failed: workCount };
   }
-  await updateRuntimeAliasFollowUp(jobId, candidates.length, 0);
+  await updateRuntimeAliasFollowUp(jobId, workCount, 0);
   await log(jobId, 'info', `已在翻译阶段写入 ${applied.runtimeAliasAdditions} 个运行时目标语言别名，进入审核时即可检查。`);
-  return { total: candidates.length, failed: 0 };
+  return { total: workCount, failed: 0 };
 }
 
 function runtimeSettings(): RuntimeSettings {
@@ -1508,6 +1508,73 @@ export function collectRegexLanguageEntries(
       // must use the same complete cardinality check as export validation.
       sourceMatchCount: countRegexMatchesInStrings(originalCard, rule.in),
       draftMatchCount: countRegexMatchesInStrings(draftCard, currentPattern),
+      origin: 'module',
+    });
+  });
+  return entries;
+}
+
+/**
+ * Language entries for a plain card's `customscript` regex rules.
+ *
+ * Card rules used to receive no language adaptation at all, so source-language trigger words
+ * inside them never gained target-language equivalents and had to be patched by hand. These
+ * entries carry `origin: 'card'`, and only the additive path is applied to them (see
+ * `applyCardCustomscriptRegexAlternatives`): a card rule can gain `|literal` alternatives but
+ * its quantifiers, groups, anchors and assertions are never rewritten.
+ *
+ * Rules for characters other than `editdisplay` / `editoutput` also stay out of scope here,
+ * because `editprocess` / `editinput` / `editoutput` rules already run on card or request text
+ * and are covered by the existing cardinality validation.
+ */
+export function collectCardCustomscriptRegexEntries(
+  originalCard: Record<string, unknown>,
+  draftCard: Record<string, unknown>,
+): RisuRegexLanguageEntry[] {
+  const originalScripts = Array.isArray(originalCard.customscript) ? originalCard.customscript : [];
+  if (!originalScripts.length) return [];
+  const draftScripts = Array.isArray(draftCard.customscript) ? draftCard.customscript : [];
+  const entries: RisuRegexLanguageEntry[] = [];
+  originalScripts.forEach((rawRule, index) => {
+    if (!rawRule || typeof rawRule !== 'object' || Array.isArray(rawRule)) return;
+    const rule = rawRule as Record<string, unknown>;
+    if (typeof rule.in !== 'string' || !rule.in) return;
+    const draftRule = draftScripts[index] && typeof draftScripts[index] === 'object' && !Array.isArray(draftScripts[index])
+      ? draftScripts[index] as Record<string, unknown>
+      : {};
+    const currentPattern = typeof draftRule.in === 'string' && draftRule.in ? draftRule.in : rule.in;
+    if (currentPattern !== rule.in) return;
+    const { dynamicDisplay, runtimePostprocess } = cardCustomscriptRegexFlags(rule);
+    const runtimeRule = dynamicDisplay || runtimePostprocess;
+    const samples = runtimeRule
+      ? []
+      : collectRegexSamplePairsWithPatterns(originalCard, draftCard, rule.in, currentPattern)
+        .filter((sample, item, all) => all.findIndex((candidate) => candidate.source === sample.source && candidate.draft === sample.draft) === item)
+        .slice(0, 8);
+    const coverageRecords = runtimeRule
+      ? []
+      : collectRegexCoveragePairsWithPatterns(originalCard, draftCard, rule.in, currentPattern)
+        .filter((record, item, all) => all.findIndex((candidate) => candidate.pathLabel === record.pathLabel
+        && candidate.sourceText === record.sourceText && candidate.draftText === record.draftText) === item)
+        .slice(0, MAX_REGEX_COVERAGE_RECORDS);
+    entries.push({
+      pathLabel: cardCustomscriptRegexPathLabel(index),
+      originalPattern: rule.in,
+      pattern: currentPattern,
+      type: typeof rule.type === 'string' ? rule.type : '',
+      out: typeof rule.out === 'string' ? rule.out : typeof draftRule.out === 'string' ? draftRule.out : '',
+      dynamicDisplay,
+      runtimePostprocess,
+      sourceSamples: coverageRecords.length ? coverageRecords.slice(0, 8).map((record) => record.sourceText) : samples.map((sample) => sample.source),
+      draftSamples: coverageRecords.length ? coverageRecords.slice(0, 8).map((record) => record.draftText) : samples.map((sample) => sample.draft),
+      sourceMatches: coverageRecords.flatMap((record) => record.sourceMatches),
+      draftMatches: coverageRecords.flatMap((record) => record.draftMatches),
+      coveragePaths: coverageRecords.map((record) => record.pathLabel),
+      coverageRecords,
+      formatProbe: runtimeRule ? undefined : buildRegexWhitespaceProbe(originalCard, draftCard, rule.in, currentPattern),
+      sourceMatchCount: countRegexMatchesInStrings(originalCard, rule.in),
+      draftMatchCount: countRegexMatchesInStrings(draftCard, currentPattern),
+      origin: 'card',
     });
   });
   return entries;
@@ -1868,6 +1935,10 @@ async function translateWithRetry(
     } catch (error) {
       if (signal.aborted) throw error;
       lastError = error;
+      if (error instanceof RejectedTranslationError) {
+        const item = items.find((candidate) => candidate.segmentId === error.segmentId);
+        if (item) await saveRejectedTranslation(db, now, jobId, item.jobItemId, error);
+      }
       if (items.length > 1 && shouldSplitTranslationBatch(error)) throw error;
       if (attempt < 3) {
         await log(jobId, 'warn', `模型请求失败，准备第 ${attempt + 1} 次尝试。`);
@@ -1953,10 +2024,6 @@ async function requestTranslations(
     const restored = restoreProtectedText(match[1], item.tokens);
     const normalized = settings.languageBehaviorMode === 'target'
       ? normalizeLanguageBehaviorDirectives(restored, settings.targetLanguage)
-      if (error instanceof RejectedTranslationError) {
-        const item = items.find((candidate) => candidate.segmentId === error.segmentId);
-        if (item) await saveRejectedTranslation(db, now, jobId, item.jobItemId, error);
-      }
       : { text: restored, changed: false, replacements: [], remaining: [] as Array<never> };
     const finalText = normalized.text;
     const directiveIssue = settings.languageBehaviorMode === 'target'

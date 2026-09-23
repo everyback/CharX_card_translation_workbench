@@ -10,6 +10,8 @@ export interface CreateProjectInput {
   filename?: string;
   blob?: Uint8Array;
   metadataKeys?: string[];
+  /** For `st-preset` projects: which `prompt_order` block to convert. */
+  presetBlockIndex?: number | null;
 }
 
 export interface ProjectLanguageRoute {
@@ -42,8 +44,8 @@ export function createProjectService({
         INSERT INTO projects(
           id, name, source_format, source_language, target_language, language_behavior_mode, scope, status,
           original_hash, original_json, draft_json, original_module_json, draft_module_json,
-          source_filename, source_blob, source_metadata_keys, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'all', 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          source_filename, source_blob, source_metadata_keys, preset_block_index, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'all', 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         projectId, options.name, options.sourceFormat,
         route.sourceLanguage, route.targetLanguage, route.languageBehaviorMode, cardHash(options.card),
@@ -51,7 +53,8 @@ export function createProjectService({
         options.module ? JSON.stringify(options.module) : null,
         options.module ? JSON.stringify(options.module) : null,
         options.filename || null,
-        options.blob ? Buffer.from(options.blob) : null, JSON.stringify(options.metadataKeys || []), timestamp, timestamp,
+        options.blob ? Buffer.from(options.blob) : null, JSON.stringify(options.metadataKeys || []),
+        options.presetBlockIndex ?? null, timestamp, timestamp,
       );
       return projectId;
     }
@@ -63,8 +66,8 @@ export function createProjectService({
         id, name, source_format, source_language, target_language, language_behavior_mode, scope, status,
         original_hash, original_json, draft_json, original_module_json, draft_module_json,
         source_filename, source_blob, source_storage_path, source_storage_bytes, source_storage_sha256,
-        source_metadata_keys, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'all', 'new', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+        source_metadata_keys, preset_block_index, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'all', 'new', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       projectId, options.name, options.sourceFormat,
       route.sourceLanguage, route.targetLanguage, route.languageBehaviorMode, cardHash(options.card),
@@ -73,7 +76,7 @@ export function createProjectService({
       options.module ? JSON.stringify(options.module) : null,
       options.filename || null,
       storedSource?.path || null, storedSource?.bytes || null, storedSource?.sha256 || null,
-      JSON.stringify(options.metadataKeys || []), timestamp, timestamp,
+      JSON.stringify(options.metadataKeys || []), options.presetBlockIndex ?? null, timestamp, timestamp,
     );
     return projectId;
   }

@@ -230,7 +230,7 @@ export function GuidedWorkflow({
             <div className="guided-next-copy">
               <span className="guided-eyebrow">下一步 · 05</span>
               <h2>审核已通过，可以保存并导出</h2>
-            <p>已有译文已经全部通过审核。点击“保存并导出”会先检查 Lua、脚本引用和卡片结构，并自动尝试补齐运行时名称别名；校验通过后下载文件。</p>
+            <p>已有译文已经全部通过审核。点击“保存并导出”会先检查 Lua、脚本引用和卡片结构，运行时名称别名已由翻译阶段处理；校验通过后下载文件。</p>
             </div>
             <div className="guided-actions">
               <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
@@ -266,7 +266,7 @@ export function GuidedWorkflow({
           <div className="guided-next-copy">
             <span className="guided-eyebrow">最后一步 · 05</span>
             <h2>审核稿已保存，可以继续导出</h2>
-            <p>保存并导出会在下载前再次检查 Lua、脚本引用和卡片结构，并自动尝试补齐运行时名称别名；之后请在目标客户端实际打开复核。</p>
+            <p>保存并导出会在下载前再次检查 Lua、脚本引用和卡片结构，运行时名称别名已由翻译阶段处理；之后请在目标客户端实际打开复核。</p>
           </div>
           <div className="guided-actions">
             <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
@@ -333,7 +333,7 @@ export function GuidedWorkflow({
       {project.scanSummary?.luaSegments ? (
         <div className="guided-lua-tip">
           <Code2 size={16} />
-          <div><strong>检测到 Lua 脚本</strong><span>保存或导出时会自动检查脚本并尝试补齐运行时名称别名；只有人名、地名等专有名词才会进入匹配流程，无法自动处理时可转到 脚本管理页。</span></div>
+          <div><strong>检测到 Lua 脚本</strong><span>运行时名称别名在翻译阶段补全；保存和导出只应用已有结果并检查脚本。补全失败请在任务页重试阶段 2，或到脚本管理页检查。</span></div>
           <button className="secondary-button" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 脚本管理</button>
         </div>
       ) : null}

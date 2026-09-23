@@ -1,3 +1,4 @@
+import { textAttributes, escapeTextAttribute, MARKUP_TOKEN_SOURCE } from './text-attributes.js';
 import { createHash } from 'node:crypto';
 import { parse } from 'luaparse';
 import { parseProtocols, protocolMatchesForText, type ProtocolSchemaRule } from '../protocol/protocol.js';
@@ -221,7 +222,7 @@ export function scanCard(
     const baseSegments = source.length >= LARGE_FIELD_THRESHOLD
       ? extractStructuredFieldText(source, path, category, risk)
       : [fieldSegment(path, source, category, risk)];
-    const extracted = protocolAwareSegments(source, path, category, risk, baseSegments, protocolSchemas);
+    const extracted = protocolAwareSegments(source, path, category, risk, splitTextAttributes(source, path, category, risk, baseSegments), protocolSchemas);
     extracted.forEach(add);
   };
 
@@ -347,7 +348,7 @@ export function scanRisuModule(module: Record<string, unknown>, scope: ScopePres
         const extracted = value.length >= LARGE_FIELD_THRESHOLD
           ? extractStructuredFieldText(value, path, category, 'medium')
           : [fieldSegment(path, value, category, 'medium')];
-        extracted.forEach(add);
+        splitTextAttributes(value, path, category, 'medium', extracted).forEach(add);
       }
     });
   }
@@ -359,6 +360,15 @@ export function scanRisuModule(module: Record<string, unknown>, scope: ScopePres
       if (scope === 'lua-only' && !luaCode) return;
       const background = isBackgroundPath(path);
       const script = isScriptPath(path);
+      // RisuAI trigger copy. `trigger` makes `isGenericProtectedPath()` reject the
+      // generic branch below, and the message usually carries no markup for
+      // `extractVisibleText()` to find, so without this branch player-visible text
+      // is dropped at every scope. Only allowlisted effect fields qualify: a bare
+      // `value` on any other effect type is runtime data, not copy.
+      if (isRisuTriggerEffectFieldPath(path) && !luaCode) {
+        if (risuTriggerEffectCopyField(module, path)) extractRisuTriggerCopy(value, path).forEach(add);
+        return;
+      }
       if (scope === 'all' && !luaCode && !background && !script
         && !isGenericProtectedPath(path, String(path.at(-1) ?? ''))) {
         add(fieldSegment(path, value, 'core', 'medium'));
@@ -390,6 +400,58 @@ export function scanRisuModule(module: Record<string, unknown>, scope: ScopePres
   };
 
   visit(module, ['$module']);
+  return segments;
+}
+
+/**
+ * Scan a SillyTavern chat-completion preset.
+ *
+ * `scanCard` cannot be used here: a preset also carries `role`, `identifier`,
+ * `system_prompt`, `injection_*` and sampler fields whose values are runtime
+ * keywords ("user", "main", "disabled"), and the generic walker would offer them
+ * for translation. Rewriting those breaks the preset, so this scanner uses an
+ * explicit allowlist of the only two fields that hold user-visible copy.
+ */
+export function scanStPreset(preset: Record<string, unknown>, scope: ScopePreset): ScannedSegment[] {
+  if (scope === 'lua-only') return [];
+  const segments: ScannedSegment[] = [];
+  const seen = new Set<string>();
+  const add = (segment: ScannedSegment) => {
+    if (!likelyNeedsTranslation(segment.sourceText)) return;
+    if (seen.has(segment.pathLabel)) return;
+    seen.add(segment.pathLabel);
+    segments.push(segment);
+  };
+
+  const addField = (
+    path: Array<string | number>,
+    value: string,
+    category: SegmentCategory,
+  ) => {
+    const extracted = value.length >= LARGE_FIELD_THRESHOLD
+      ? extractStructuredFieldText(value, path, category, 'low')
+      : [fieldSegment(path, value, category, 'low')];
+    extracted.forEach(add);
+  };
+
+  if (scope !== 'core' && typeof preset.name === 'string') {
+    addField(['name'], preset.name, 'name');
+  }
+
+  const prompts = Array.isArray(preset.prompts) ? preset.prompts : [];
+  prompts.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.content === 'string' && record.content.length) {
+      addField(['prompts', index, 'content'], record.content, 'core');
+    }
+    // Names are display-only, but they also become the RisuAI toggle labels, so
+    // translating them is what makes the generated switch panel readable.
+    if (typeof record.name === 'string') {
+      addField(['prompts', index, 'name'], record.name, 'name');
+    }
+  });
+
   return segments;
 }
 
@@ -674,6 +736,12 @@ export function applyRisuRegexCoverageProposals(
     if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) return;
     const entry = rawEntry as Record<string, unknown>;
     if (typeof entry.in !== 'string') return;
+    // Runtime rules (`editdisplay` / `editoutput`) execute on generated chat text, so a
+    // full-pattern replacement cannot be proven safe from static card strings: the
+    // coverage guard only measures static hits and happily accepts a quantifier change
+    // that breaks rendering. These rules may still gain additive `|literal` alternatives
+    // through `applyRisuRegexAlternativeProposals`; only the whole-pattern rewrite is refused.
+    if (isRuntimeScopeRegexRule(entry)) return;
     const pathLabelValue = pathLabel(['$module', 'regex', index, 'in']);
     const proposal = byPath.get(pathLabelValue);
     if (!proposal?.pattern || proposal.pattern === entry.in) return;
@@ -760,6 +828,429 @@ export function isRisuOutputPostprocessRegexRule(rule: Record<string, unknown> |
   return String(rule?.type ?? '').trim().toLowerCase() === 'editoutput'
     && Boolean(pattern)
     && typeof rule?.out === 'string';
+}
+
+/**
+ * Rules that Risu executes against generated chat text rather than against card copy.
+ *
+ * Their behaviour cannot be measured from static card strings, so a rewrite that keeps
+ * the capture groups, the output template and the static hit count identical can still
+ * change what the rule does at render time. `[ \t]+` -> `[ \t]*` is exactly such a change:
+ * it leaves every static match untouched but starts swallowing the quote inside an
+ * `<img="...">` tag, which silently breaks every downstream asset-display rule.
+ *
+ * Only additive alternations (`|literal`) are safe for these rules; see
+ * `applyRisuRegexCoverageProposals`.
+ */
+export function isRuntimeScopeRegexRule(rule: Record<string, unknown> | null | undefined): boolean {
+  return isRisuDisplayFormattingRegexRule(rule) || isRisuOutputPostprocessRegexRule(rule);
+}
+
+/** A structural change inside a runtime regex that static hit counts cannot reveal. */
+export interface RisuRegexStructuralDrift {
+  pathLabel: string;
+  kind: 'quantifier' | 'character-class' | 'escape' | 'assertion';
+  message: string;
+  removed: string[];
+  added: string[];
+}
+
+function collectRisuRegexInputRules(
+  module: Record<string, unknown>,
+  rootLabel = '$module',
+): Array<{ rule: Record<string, unknown>; pathLabel: string }> {
+  const rules: Array<{ rule: Record<string, unknown>; pathLabel: string }> = [];
+  const visit = (value: unknown, path: Array<string | number>) => {
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => visit(entry, [...path, index]));
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    const record = value as Record<string, unknown>;
+    if (typeof record.in === 'string' && typeof record.out === 'string') {
+      rules.push({ rule: record, pathLabel: pathLabel([rootLabel, ...path, 'in']) });
+    }
+    for (const [key, child] of Object.entries(record)) visit(child, [...path, key]);
+  };
+  visit(module, []);
+  return rules;
+}
+
+/**
+ * Build a token fingerprint for one regular expression.
+ *
+ * The point is to see the things that decide *which characters a pattern consumes*,
+ * because those are invisible to a static hit count: `[ \t]+` and `[ \t]*` score
+ * identically against every card string yet behave differently at render time.
+ */
+export function regexStructureFingerprint(pattern: string): {
+  quantifiers: string[];
+  characterClasses: string[];
+  escapes: string[];
+  assertions: string[];
+} {
+  const quantifiers = new Set<string>();
+  const characterClasses = new Set<string>();
+  const escapes = new Set<string>();
+  const assertions = new Set<string>();
+  const source = String(pattern ?? '');
+  let previousAtom: string | null = null;
+  let index = 0;
+
+  while (index < source.length) {
+    const char = source[index];
+
+    if (char === '\\') {
+      const next = source[index + 1];
+      if (next === undefined) { escapes.add('\\'); index += 1; continue; }
+      escapes.add(`\\${next}`);
+      previousAtom = `\\${next}`;
+      index += 2;
+      continue;
+    }
+
+    if (char === '[') {
+      let end = index + 1;
+      if (source[end] === '^') end += 1;
+      if (source[end] === ']') end += 1;
+      while (end < source.length && source[end] !== ']') {
+        if (source[end] === '\\') end += 1;
+        end += 1;
+      }
+      const body = source.slice(index, Math.min(end + 1, source.length));
+      characterClasses.add(body);
+      previousAtom = body;
+      index = Math.min(end + 1, source.length);
+      continue;
+    }
+
+    if (char === '(') {
+      if (source.startsWith('(?:', index)) { previousAtom = null; index += 3; continue; }
+      if (source.startsWith('(?<=', index)) { assertions.add('(?<='); previousAtom = null; index += 4; continue; }
+      if (source.startsWith('(?<!', index)) { assertions.add('(?<!'); previousAtom = null; index += 4; continue; }
+      if (source.startsWith('(?=', index)) { assertions.add('(?='); previousAtom = null; index += 3; continue; }
+      if (source.startsWith('(?!', index)) { assertions.add('(?!'); previousAtom = null; index += 3; continue; }
+      if (source.startsWith('(?<', index)) {
+        const close = source.indexOf('>', index);
+        previousAtom = close < 0 ? null : `(?<${source.slice(index + 3, close)}>`;
+        index = close < 0 ? index + 2 : close + 1;
+        continue;
+      }
+      if (source.startsWith('(?', index)) {
+        const close = source.indexOf(')', index);
+        previousAtom = null;
+        index = close < 0 ? index + 2 : close + 1;
+        continue;
+      }
+      previousAtom = null;
+      index += 1;
+      continue;
+    }
+
+    if (char === '*' || char === '+' || char === '?') {
+      const suffix = source[index + 1] === '?' ? '?' : source[index + 1] === '+' ? '+' : '';
+      quantifiers.add(`${previousAtom ?? ''}${char}${suffix}`);
+      index += 1 + (suffix ? 1 : 0);
+      continue;
+    }
+
+    if (char === '{') {
+      const match = /^\{(\d+)(?:,(\d*))?\}/u.exec(source.slice(index));
+      if (match) {
+        quantifiers.add(`${previousAtom ?? ''}${match[0]}`);
+        index += match[0].length;
+        continue;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (char === '|' || char === ')' || char === '^' || char === '$') { previousAtom = null; index += 1; continue; }
+    previousAtom = char;
+    index += 1;
+  }
+
+  return {
+    quantifiers: [...quantifiers].sort(),
+    characterClasses: [...characterClasses].sort(),
+    escapes: [...escapes].sort(),
+    assertions: [...assertions].sort(),
+  };
+}
+
+function diffSorted(original: readonly string[], draft: readonly string[]): { removed: string[]; added: string[] } {
+  const originalSet = new Set(original);
+  const draftSet = new Set(draft);
+  return {
+    removed: original.filter((value) => !draftSet.has(value)),
+    added: draft.filter((value) => !originalSet.has(value)),
+  };
+}
+
+/**
+ * Report structural drift inside runtime-scope regex rules (`editdisplay` / `editoutput`).
+ *
+ * This is deliberately advisory. A runtime rule may legitimately need a new character
+ * range for the target language, so these findings must reach a human reviewer rather
+ * than block a job or an export. The blocking gate lives in
+ * `applyRisuRegexCoverageProposals`, which refuses whole-pattern rewrites outright.
+ *
+ * `rootLabel` names the container the draft rules live in (`$module` for a Risu module,
+ * `卡片` for a card's `customscript`), so a finding points at the surface it came from.
+ */
+export function collectRisuRuntimeRegexStructuralDrift(
+  originalModule: Record<string, unknown>,
+  draftModule: Record<string, unknown> | null | undefined,
+  rootLabel = '$module',
+): RisuRegexStructuralDrift[] {
+  if (!draftModule) return [];
+  const originalRules = collectRisuRegexInputRules(originalModule, rootLabel);
+  if (!originalRules.length) return [];
+  const draftByPath = new Map(collectRisuRegexInputRules(draftModule, rootLabel).map((entry) => [entry.pathLabel, entry.rule]));
+  const drifts: RisuRegexStructuralDrift[] = [];
+
+  for (const { rule, pathLabel: ruleLabel } of originalRules) {
+    if (!isRuntimeScopeRegexRule(rule)) continue;
+    const draftRule = draftByPath.get(ruleLabel);
+    if (!draftRule) continue;
+    const originalPattern = String(rule.in ?? '');
+    const draftPattern = String(draftRule.in ?? '');
+    if (!draftPattern || originalPattern === draftPattern) continue;
+    const before = regexStructureFingerprint(originalPattern);
+    const after = regexStructureFingerprint(draftPattern);
+
+    const checks: Array<{ kind: RisuRegexStructuralDrift['kind']; label: string; before: string[]; after: string[] }> = [
+      { kind: 'quantifier', label: '量词', before: before.quantifiers, after: after.quantifiers },
+      { kind: 'character-class', label: '字符类', before: before.characterClasses, after: after.characterClasses },
+      { kind: 'escape', label: '转义序列', before: before.escapes, after: after.escapes },
+      { kind: 'assertion', label: '零宽断言', before: before.assertions, after: after.assertions },
+    ];
+    for (const check of checks) {
+      const { removed, added } = diffSorted(check.before, check.after);
+      if (!removed.length && !added.length) continue;
+      const parts: string[] = [];
+      if (removed.length) parts.push(`移除 ${removed.map((value) => JSON.stringify(value)).join('、')}`);
+      if (added.length) parts.push(`新增 ${added.map((value) => JSON.stringify(value)).join('、')}`);
+      drifts.push({
+        pathLabel: ruleLabel,
+        kind: check.kind,
+        removed,
+        added,
+        message: `${check.label}发生变化（${parts.join('，')}）。运行期正则的这类改动不会改变静态卡片命中数，但会改变渲染期行为，请对照原文人工确认。`,
+      });
+    }
+  }
+  return drifts;
+}
+
+/**
+ * Apply validated literal alternatives to a plain character card's `customscript` regex rules.
+ *
+ * Cards keep their regex rules in `customscript` rather than in a module `regex` array, and
+ * that surface previously received no language adaptation at all: a rule written around
+ * source-language trigger words (`하고|하는|라고`) never gained target-language equivalents,
+ * so authors patched the patterns by hand — which is exactly how the Madoka Magica card lost
+ * its portraits (a hand edit loosened `[ \t]+` inside a display regex).
+ *
+ * This adapter is deliberately additive-only: it reuses `appendRegexLiteralAlternatives`, so
+ * only `|literal` items may appear inside an existing non-capturing alternation group. It
+ * never rewrites quantifiers, groups, anchors or assertions, and it never touches `out`.
+ * Whole-pattern adaptation stays exclusive to `applyRisuRegexCoverageProposals` for module
+ * rules, which have a coverage guard; card rules have no comparable guard, so they must not
+ * receive one.
+ */
+export function applyCardCustomscriptRegexAlternatives(
+  card: Record<string, unknown>,
+  proposals: readonly RisuRegexAlternativeProposal[],
+): RisuRegexAlternativeChange[] {
+  if (!proposals.length || !Array.isArray(card.customscript)) return [];
+  const byPath = new Map<string, RisuRegexAlternativeProposal>();
+  for (const proposal of proposals) {
+    if (!proposal || typeof proposal.pathLabel !== 'string') continue;
+    if (!byPath.has(proposal.pathLabel)) byPath.set(proposal.pathLabel, proposal);
+  }
+  const changes: RisuRegexAlternativeChange[] = [];
+  card.customscript.forEach((rawEntry, index) => {
+    if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) return;
+    const entry = rawEntry as Record<string, unknown>;
+    if (typeof entry.in !== 'string' || !entry.in) return;
+    const pathLabelValue = cardCustomscriptRegexPathLabel(index);
+    const proposal = byPath.get(pathLabelValue);
+    if (!proposal) return;
+    // Ambiguity guard. A hand-edited card can contain the same literal in several alternation
+    // groups (the Madoka card carries `说` in the trigger list *and* in the dialogue-verb list),
+    // and appending to the wrong group would silently change matching. Refuse rather than guess;
+    // the author can still add the literal through the manual rule editor.
+    if (isAmbiguousRegexAlternativeAnchor(entry.in, proposal.anchorAlternatives)) return;
+    const result = appendRegexLiteralAlternatives(entry.in, proposal.anchorAlternatives, proposal.additions);
+    if (!result.added.length) return;
+    entry.in = result.pattern;
+    changes.push({ pathLabel: pathLabelValue, addedAlternatives: result.added });
+  });
+  return changes;
+}
+
+/**
+ * True when the proposal's anchor literals do not identify a safe, unambiguous extension point.
+ *
+ * The guard accepts an anchor only when it is a **top-level literal alternative** of exactly one
+ * non-capturing group. A nested body such as the inner `(?:하고|하는)` of `^(?:a|(?:하고|하는))$`
+ * is correctly extended by `appendRegexLiteralAlternatives` — the nested group is its own
+ * alternation — but only because the anchor happens to be the innermost match, which is hard to
+ * reason about from the outside. Restricting the accepted shape to a single top-level group keeps
+ * the behaviour predictable; a refused rule is left for the manual editor, whereas an unexpected
+ * extension silently changes matching.
+ *
+ * Also refused: more than one group qualifying, and an anchor that is a strict prefix of a sibling
+ * alternative (`说` vs `说道`). The latter is meant to match as text, but would then only match
+ * when not followed by the longer alternative; RisuAI has no suffix-alternative syntax, so leaving
+ * the rule untouched is safer than silently narrowing it.
+ */
+function isAmbiguousRegexAlternativeAnchor(pattern: string, anchors: readonly string[]): boolean {
+  const cleanAnchors = [...new Set(anchors.map((value) => value.trim()).filter(Boolean))];
+  if (!cleanAnchors.length) return false;
+  const groups = findNonCapturingGroups(pattern);
+  // The appender extends the innermost group whose top-level alternatives contain the anchor, so
+  // a nested body is a legitimate target (`^(?:a|(?:하고|하는))$` -> `^(?:a|(?:하고|하는|新增))$`).
+  // Refuse only when no group qualifies at all, when several qualify, or when the anchor would
+  // silently narrow a sibling literal.
+  let matchingGroups = 0;
+  let ambiguousInsideGroup = false;
+  for (const group of groups) {
+    const alternatives = splitTopLevelRegexAlternatives(pattern.slice(group.bodyStart, group.end));
+    if (!cleanAnchors.some((anchor) => alternatives.includes(anchor))) continue;
+    matchingGroups += 1;
+    if (cleanAnchors.some((anchor) => alternatives.some((value) => value !== anchor && value.startsWith(anchor)))) {
+      ambiguousInsideGroup = true;
+    }
+  }
+  return matchingGroups === 0 || matchingGroups > 1 || ambiguousInsideGroup;
+}
+
+/** Stable path label for one card `customscript` regex input. */
+export function cardCustomscriptRegexPathLabel(index: number): string {
+  return pathLabel(['卡片', 'customscript', index, 'in']);
+}
+
+/**
+ * Card `customscript` rules that consume generated chat text rather than card copy.
+ *
+ * Used to tell the model which card rules may only gain additive alternatives, mirroring the
+ * `dynamicDisplay` / `runtimePostprocess` flags carried for module rules.
+ */
+export function cardCustomscriptRegexFlags(entry: Record<string, unknown> | null | undefined): {
+  dynamicDisplay: boolean;
+  runtimePostprocess: boolean;
+} {
+  return {
+    dynamicDisplay: isRisuDisplayFormattingRegexRule(entry),
+    runtimePostprocess: isRisuOutputPostprocessRegexRule(entry),
+  };
+}
+
+/** A protocol tag that survives the card's own display rules and would render as literal text. */
+export interface RisuUnconsumedProtocolTag {
+  pathLabel: string;
+  tag: string;
+  count: number;
+  unconsumed: number;
+  message: string;
+}
+
+/** Matches a whole pseudo-tag such as `<img="kyoko_normal_smug">`, quoted or bare. */
+const PROTOCOL_TAG_PATTERN = /<([a-zA-Z][a-zA-Z0-9_-]{0,30})\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'>]+)\s*\/?>/gu;
+
+function protocolTagKind(tag: string): string {
+  const match = /^<([a-zA-Z][a-zA-Z0-9_-]{0,30})\s*=/u.exec(tag);
+  return match ? match[1].toLowerCase() : '';
+}
+
+/**
+ * Detect protocol tags that the card emits but no display rule consumes.
+ *
+ * Cards express inline artwork with a self-closing pseudo-tag such as `<img="name">` and rely
+ * on `editdisplay` regex rules to turn it into real markup. When one of those rules stops
+ * matching, the tag either survives verbatim and Risu renders it as visible text, or it is
+ * mangled by an earlier rule (a line-break rule firing *inside* the tag does exactly that) so
+ * that no display pattern matches it any more. A third failure mode is silent: the card's own
+ * "hide old artwork" rule still matches the mangled tag and deletes it, leaving a blank gap.
+ * None of these produce an error anywhere, so this runs the card's own display rules over
+ * representative text and compares how many pseudo-tags the text emitted against how many the
+ * rules actually consumed.
+ *
+ * Only `editdisplay` rules participate, because those are the rules Risu runs while rendering a
+ * message. Rules whose pattern needs CBS expansion (`<cbs>` flag) and rules that emit control
+ * directives (`@@…`) are skipped rather than guessed at. A sample is reported only when the
+ * rules demonstrably consumed something, so an unusable simulation stays silent instead of
+ * flagging every tag.
+ */
+export function collectRisuUnconsumedProtocolTags(
+  card: Record<string, unknown>,
+  samples: readonly { pathLabel: string; text: string }[],
+): RisuUnconsumedProtocolTag[] {
+  const scripts = Array.isArray(card.customscript) ? card.customscript : [];
+  const displayRules: Array<{ in: string; out: string; flag: string }> = [];
+  for (const rawRule of scripts) {
+    if (!rawRule || typeof rawRule !== 'object' || Array.isArray(rawRule)) continue;
+    const rule = rawRule as Record<string, unknown>;
+    if (String(rule.type ?? '').trim().toLowerCase() !== 'editdisplay') continue;
+    if (typeof rule.in !== 'string' || !rule.in) continue;
+    if (typeof rule.out !== 'string') continue;
+    // `<cbs>` patterns are expanded by the Risu parser before the rule runs; without that
+    // expansion the regex would not match and the simulation would be misleading.
+    if (typeof rule.flag === 'string' && rule.flag.includes('cbs')) continue;
+    const out = rule.out.replaceAll('$n', '\n');
+    if (/@@/u.test(out)) continue;
+    const rawFlag = rule.ableFlag ? (typeof rule.flag === 'string' ? rule.flag : 'g') : 'g';
+    const flag = rawFlag.trim().replace(/[^dgimsuvy]/gu, '').split('')
+      .filter((value: string, index: number, all: string[]) => all.indexOf(value) === index).join('') || 'u';
+    displayRules.push({ in: rule.in, out, flag });
+  }
+
+  const findings = new Map<string, RisuUnconsumedProtocolTag>();
+  const reported = new Set<string>();
+  for (const sample of samples) {
+    const text = String(sample.text ?? '');
+    if (!text) continue;
+    const emitted = [...text.matchAll(PROTOCOL_TAG_PATTERN)].filter((match) => protocolTagKind(match[0]) !== '');
+    if (!emitted.length) continue;
+
+    let data = text;
+    let matchedAnything = false;
+    for (const rule of displayRules) {
+      let regex: RegExp;
+      try { regex = new RegExp(rule.in, rule.flag); } catch { continue; }
+      if (!regex.test(data)) continue;
+      matchedAnything = true;
+      if (regex.global) regex.lastIndex = 0;
+      try { data = data.replace(regex, rule.out); } catch { /* unusable replacement is skipped */ }
+    }
+    // Nothing matched at all: the simulation proved nothing about this sample, so stay silent
+    // rather than flagging every tag. This is the guard that keeps CBS-dependent rules and
+    // unusual inputs from producing noise.
+    if (!matchedAnything) continue;
+
+    const survivors = [...data.matchAll(PROTOCOL_TAG_PATTERN)]
+      .filter((match) => protocolTagKind(match[0]) !== '')
+      .map((match) => match[0])
+      .filter((tag, index, all) => all.indexOf(tag) === index);
+    if (!survivors.length) continue;
+    if (reported.has(sample.pathLabel)) continue;
+    reported.add(sample.pathLabel);
+
+    // Only tags that are still intact pseudo-tags count as unconsumed. A rule that mangles a
+    // tag is reported through its own mangled-tag survivor, and a rule that merely fires on
+    // ordinary quotes elsewhere in the prose cannot produce a survivor here.
+    const survivorCount = [...data.matchAll(PROTOCOL_TAG_PATTERN)].filter((match) => protocolTagKind(match[0]) !== '').length;
+    findings.set(sample.pathLabel, {
+      pathLabel: sample.pathLabel,
+      tag: survivors[0],
+      count: emitted.length,
+      unconsumed: survivorCount,
+      message: `这段文本发出 ${emitted.length} 个 <名称="值"> 形式的协议标签，但卡片自身的“修改显示”规则跑完后仍有 ${survivorCount} 个以标签形式残留（例如 ${survivors[0]}）。渲染时这些标签会当成普通文字显示，或按旧消息规则被整段删除而只剩空白。请检查对应的 editdisplay 正则是否仍然匹配卡片实际发出的标签。`,
+    });
+  }
+  return [...findings.values()];
 }
 
 function isDisplayFormattingReplacement(output: string, captureCount: number): boolean {
@@ -889,6 +1380,116 @@ export function isLuaModuleCodePath(path: Array<string | number>): boolean {
   return path.at(-1) === 'code' && path.some((part) => part === 'effect' || part === 'trigger');
 }
 
+/**
+ * RisuAI trigger effect fields that hold **player-visible copy**.
+ *
+ * A generic walk cannot tell `v2Impersonate.value` (the message a trigger posts)
+ * from `v2SetRequestStateRole.value` (`"user"` — an enum the runtime compares
+ * against), `v2Command.value` (`/setvar …` — command syntax) or `v2SetVar.value`
+ * with `valueType: "var"` (a variable name the runtime resolves with `getVar()`).
+ * Translating any of those changes behaviour silently, so this scanner uses an
+ * explicit allowlist keyed by effect type, exactly like `scanStPreset()` does for
+ * SillyTavern presets. Effect shapes follow `kwaroran/RisuAI`
+ * `src/ts/process/triggers.ts`, which keeps the v1 (`triggerEffectV1`) and v2
+ * (`triggerEffectV2`) unions side by side, so the three v1 spellings of the same
+ * copy-bearing effects are listed as well.
+ *
+ * `v2GetAlertSelect` is listed by `display`, not `value`: its `value` is the
+ * `|`-joined option list whose selected entry is stored as the trigger result, so
+ * replacing it would rewrite runtime data instead of a label.
+ *
+ * Deliberately excluded, because they are not shown to the player:
+ * `v2Comment`, `v2ModifyChat`, `v2ImgGen`, `v2RunLLM`, `v1 setvar/command/
+ * runtrigger/cutchat/modifychat/extractRegex/checkSimilarity/runImgGen/
+ * runLLM/runAxLLM`, and every `…Type: "var"` literal.
+ */
+const RISU_TRIGGER_COPY_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  v2Impersonate: ['value'],
+  v2SystemPrompt: ['value'],
+  v2ShowAlert: ['value'],
+  v2SetAuthorNote: ['value'],
+  v2SetReplaceGlobalNote: ['value'],
+  v2GetAlertSelect: ['display'],
+  v2GetAlertInput: ['display'],
+  // v1 spellings of the same player-visible effects. RisuAI still ships both
+  // unions, and older cards carry `type: "impersonate"` rather than the v2 form.
+  impersonate: ['value'],
+  systemprompt: ['value'],
+  showAlert: ['value'],
+};
+
+/** Shape of a `$module.trigger[n].effect[m].<field>` path, with or without the module root. */
+export function isRisuTriggerEffectFieldPath(path: Array<string | number>): boolean {
+  const parts = path[0] === '$module' ? path.slice(1) : path;
+  return parts.length === 5
+    && parts[0] === 'trigger'
+    && typeof parts[1] === 'number'
+    && parts[2] === 'effect'
+    && typeof parts[3] === 'number'
+    && typeof parts[4] === 'string';
+}
+
+/**
+ * Resolve the copy field a RisuAI trigger effect exposes at `path`, or null.
+ *
+ * Returns the field name only when the effect type is on the copy allowlist *and*
+ * the literal is not a variable reference: a sibling `valueType` / `displayType`
+ * flag of `"var"` means the value is a variable **name** the runtime resolves
+ * with `getVar()`, so it stays data even when the field is named `value`.
+ */
+export function risuTriggerEffectCopyField(
+  module: Record<string, unknown>,
+  path: Array<string | number>,
+): string | null {
+  if (!isRisuTriggerEffectFieldPath(path)) return null;
+  const parts = path[0] === '$module' ? path.slice(1) : path;
+  const effect = getAt(module, ['trigger', parts[1], 'effect', parts[3]]);
+  if (!effect || typeof effect !== 'object' || Array.isArray(effect)) return null;
+  const record = effect as Record<string, unknown>;
+  const type = typeof record.type === 'string' ? record.type : '';
+  const field = String(parts[4]);
+  const fields = Object.hasOwn(RISU_TRIGGER_COPY_FIELDS, type) ? RISU_TRIGGER_COPY_FIELDS[type] : undefined;
+  if (!fields || !fields.includes(field)) return null;
+  if (record[`${field}Type`] === 'var') return null;
+  return field;
+}
+
+/** Keep plain prose around CBS macros without offering macro operands for translation. */
+function extractRisuTriggerCopy(source: string, path: Array<string | number>): ScannedSegment[] {
+  // Check outer macro boundaries before accepting candidates from the generic
+  // extractor. It recognizes button syntax even inside a comparison operand.
+  const macros = templateMacros(source, true);
+  const extracted = extractVisibleText(source, path, 'script-ui').filter((segment) => {
+    if (segment.start == null || segment.end == null) return false;
+    const overlapping = macros.filter((macro) => segment.start! < macro.end && segment.end! > macro.start);
+    if (!overlapping.length) return true;
+    if (overlapping.length !== 1 || segment.kind !== 'button') return false;
+    const macro = overlapping[0];
+    if (macro.incomplete) return false;
+    const button = /^\{\{button::([^{}]*?)::[\w.-]+\}\}$/u.exec(source.slice(macro.start, macro.end));
+    if (!button) return false;
+    const labelStart = macro.start + '{{button::'.length;
+    return segment.start >= labelStart && segment.end <= labelStart + button[1].length;
+  });
+  if (/[<>]/u.test(source)) return extracted;
+  if (!source.includes('{{') && !source.includes('}}') && !extracted.length) {
+    return [fieldSegment(path, source, 'script-ui', 'medium')];
+  }
+  const excluded = [...macros, ...extracted.map((segment) => ({
+    start: segment.start!, end: segment.end!,
+  }))];
+  for (const range of subtractRanges([{ start: 0, end: source.length }], excluded)) {
+    const raw = source.slice(range.start, range.end);
+    // An incomplete macro is ambiguous; never turn its remaining operands into copy.
+    if (/\{\{|\}\}/u.test(raw)) continue;
+    const text = raw.trim();
+    if (!text) continue;
+    const start = range.start + raw.length - raw.trimStart().length;
+    extracted.push({ ...fieldSegment(path, text, 'script-ui', 'medium'), kind: 'text-node', start, end: start + text.length });
+  }
+  return removeOverlaps(extracted);
+}
+
 export function applyApprovedSegments(card: Record<string, unknown>, segments: ApplicableSegment[]): Record<string, unknown> {
   const draft = structuredClone(card);
   const ranged = new Map<string, ApplicableSegment[]>();
@@ -898,6 +1499,7 @@ export function applyApprovedSegments(card: Record<string, unknown>, segments: A
     const translation = segment.finalText?.trim() || segment.translatedText?.trim();
     if (!translation) continue;
     const path = JSON.parse(segment.pathJson) as Array<string | number>;
+    if (isRisuTriggerEffectFieldPath(path) && isProtectedStoredPath(segment.kind, path, card)) continue;
     if (segment.kind === 'lorebook-key-alias') {
       appendLorebookKeywordAlias(draft, path, translation);
       continue;
@@ -916,11 +1518,12 @@ export function applyApprovedSegments(card: Record<string, unknown>, segments: A
   for (const [pathJson, group] of ranged) {
     const path = JSON.parse(pathJson) as Array<string | number>;
     let source = String(getAt(draft, path) ?? '');
-    const resolved = resolveSegmentRanges(source, group);
+    const resolved = resolveSegmentRanges(source, group, isLuaModuleCodePath(path) ? luaLiteralRanges(source) : undefined);
     resolved.sort((a, b) => b.start - a.start);
     for (const { segment, start, end } of resolved) {
       const translation = segment.finalText?.trim() || segment.translatedText?.trim() || '';
-      const replacement = segment.kind === 'lua-long-string'
+      const attribute = segment.kind === 'attribute' ? textAttributes(source).find(attr => attr.start <= start && attr.end >= end) : undefined;
+      const replacement = attribute ? escapeTextAttribute(translation, attribute.quote) : segment.kind === 'lua-long-string'
         ? encodeLuaLongString(
             preserveBoundaryWhitespace(segment.sourceText ?? '', translation),
             luaLongStringEquals(source.slice(start, end)),
@@ -997,7 +1600,18 @@ export function protectText(text: string, extraFragments: readonly string[] = []
   };
 
   const structuredText = protectNaturalStatusPayloads(text, keep);
-  const protectedText = structuredText.replace(protectedPattern(extraFragments), keep);
+  const protectedText = structuredText.replace(protectedPattern(extraFragments), (fragment) => {
+    const attributes = textAttributes(fragment);
+    if (!attributes.length || extraFragments.includes(fragment)) return keep(fragment);
+    let result = '';
+    let cursor = 0;
+    for (const attr of attributes) {
+      result += keep(fragment.slice(cursor, attr.start));
+      result += attr.text.replace(protectedPattern(extraFragments), keep);
+      cursor = attr.end;
+    }
+    return result + keep(fragment.slice(cursor));
+  });
   return { protectedText, tokens };
 }
 
@@ -1155,10 +1769,11 @@ function protectedPatterns(): RegExp[] {
     /`(?=[\p{L}\p{N}_./:-]+(?: [\p{L}\p{N}_./:-]+)*\.(?:png|jpe?g|webp|gif|json|lua|charx|risum)\b)[^`\n]*`/giu,
     /`(?=[\p{L}_][\p{L}\p{N}_.:-]{0,120}`)[^`\n]*`/gu,
     /<!--[\s\S]*?-->/g,
+    /<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)\s*>/gi,
     /https?:\/\/[^\s<>"')]+/g,
     /\{\{[\s\S]*?\}\}/g,
     /\$\{[^}]+\}/g,
-    /<\/?[^<>\n]{1,240}>/g,
+    new RegExp(MARKUP_TOKEN_SOURCE, 'g'),
     /^@@[^\n]*/gm,
   ];
 }
@@ -1438,7 +2053,6 @@ function extractVisibleText(
   const hiddenRanges = hiddenContentRanges(source);
   const patterns: Array<{ kind: ScannedSegment['kind']; regex: RegExp; group: number }> = [
     { kind: 'button', regex: /\{\{button::([\s\S]*?)::[\w.-]+\}\}/g, group: 1 },
-    { kind: 'attribute', regex: /\b(?:title|aria-label|placeholder|data-tooltip|alt|value|data-label)=["']([^"']+)["']/g, group: 1 },
     { kind: 'text-node', regex: />([^<>]*[A-Za-z\u3040-\u30ff\uac00-\ud7af][^<>]*)</g, group: 1 },
     // A long string may end immediately after a dynamic concatenation:
     // `[[<div class="name">名称: ]] .. name .. [[</div>]]`. In that case
@@ -1450,6 +2064,18 @@ function extractVisibleText(
   ];
 
   segments.push(...extractRuntimeMessages(source, path, category));
+  for (const attr of textAttributes(source)) {
+    if (hiddenRanges.some(range => attr.start >= range.start && attr.end <= range.end)) continue;
+    if (!likelyNeedsTranslation(attr.text)) continue;
+    for (const range of subtractRanges([{ start: 0, end: attr.text.length }], templateMacros(attr.text))) {
+      const value = attr.text.slice(range.start, range.end);
+      const sourceText = value.trim();
+      if (!likelyNeedsTranslation(sourceText)) continue;
+      const start = attr.start + range.start + value.length - value.trimStart().length;
+      segments.push({ path, pathLabel: `${pathLabel(path)} · <${attr.tag}> @${attr.name}`, category, risk,
+        sourceText, start, end: start + sourceText.length, kind: 'attribute' });
+    }
+  }
 
   for (const definition of patterns) {
     let match: RegExpExecArray | null;
@@ -1495,6 +2121,28 @@ interface SourceRange {
 
 interface TemplateMacro extends SourceRange {
   content: string;
+  incomplete?: boolean;
+}
+
+
+function splitTextAttributes(source: string, path: Array<string | number>, category: SegmentCategory,
+  risk: ScannedSegment['risk'], base: ScannedSegment[]): ScannedSegment[] {
+  const hidden = hiddenContentRanges(source);
+  const preferred = preferredLanguageRanges(source);
+  const attributes = textAttributes(source).filter(attr => likelyNeedsTranslation(attr.text)
+    && !hidden.some(range => attr.start >= range.start && attr.end <= range.end)
+    && (!preferred.length || preferred.some(range => attr.start >= range.start && attr.end <= range.end)));
+  if (!attributes.length) return base;
+  const tags = [...source.matchAll(new RegExp(MARKUP_TOKEN_SOURCE, 'gu'))]
+    .filter(tag => attributes.some(attr => attr.start >= tag.index && attr.end <= tag.index + tag[0].length))
+    .map(tag => ({ start: tag.index, end: tag.index + tag[0].length }));
+  const prose = base.flatMap(segment => subtractRanges([{ start: segment.start ?? 0, end: segment.end ?? source.length }], tags)
+    .filter(range => likelyNeedsTranslation(stripTemplateControls(source.slice(range.start, range.end))))
+    .map(range => ({ ...segment, start: range.start, end: range.end, sourceText: source.slice(range.start, range.end),
+      pathLabel: `${pathLabel(path)} · 正文 ${range.start}`, kind: 'structured-text' as const })));
+  return [...prose, ...attributes.map(attr => ({ path, pathLabel: `${pathLabel(path)} · <${attr.tag}> @${attr.name} · ${attr.start}`,
+    category, risk, sourceText: attr.text, start: attr.start, end: attr.end, kind: 'attribute' as const }))]
+    .sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
 }
 
 function extractStructuredFieldText(
@@ -1647,7 +2295,7 @@ function preferredLanguageRanges(source: string): SourceRange[] {
   return mergeRanges(selected);
 }
 
-function templateMacros(source: string): TemplateMacro[] {
+function templateMacros(source: string, includeIncomplete = false): TemplateMacro[] {
   const macros: TemplateMacro[] = [];
   let index = 0;
   while (index < source.length - 1) {
@@ -1673,7 +2321,10 @@ function templateMacros(source: string): TemplateMacro[] {
       }
       cursor += 1;
     }
-    if (end < 0) break;
+    if (end < 0) {
+      if (includeIncomplete) macros.push({ start, end: source.length, content: source.slice(start + 2).trim(), incomplete: true });
+      break;
+    }
     macros.push({ start, end, content: source.slice(start + 2, end - 2).trim() });
     index = end;
   }
@@ -2251,9 +2902,41 @@ function encodeLuaLongString(value: string, preferredEquals = ''): string {
   return `[${equals}[${value}]${equals}]`;
 }
 
+// Scan even syntactically broken Lua: stale translated ranges must never land
+// inside identifiers. Embedded HTML may live in long strings, not just quotes.
+function luaLiteralRanges(source: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let index = 0;
+  while (index < source.length) {
+    const comment = source.startsWith('--', index);
+    const open = index + (comment ? 2 : 0);
+    const long = source.slice(open, open + 100).match(/^\[(=*)\[/u);
+    if (long) {
+      const close = `]${long[1]}]`;
+      const closeAt = source.indexOf(close, open + long[0].length);
+      const end = closeAt < 0 ? source.length : closeAt + close.length;
+      if (!comment) ranges.push({ start: open, end });
+      index = end;
+    } else if (comment) {
+      const end = source.indexOf('\n', index);
+      index = end < 0 ? source.length : end + 1;
+    } else if (source[index] === '"' || source[index] === "'") {
+      const quote = source[index++];
+      const start = index;
+      while (index < source.length && source[index] !== quote) {
+        index += source[index] === '\\' ? 2 : 1;
+      }
+      ranges.push({ start, end: Math.min(index, source.length) });
+      index++;
+    } else index++;
+  }
+  return ranges;
+}
+
 function resolveSegmentRanges(
   source: string,
   segments: ApplicableSegment[],
+  literalRanges?: Array<{ start: number; end: number }>,
 ): Array<{ segment: ApplicableSegment; start: number; end: number }> {
   const used: Array<{ start: number; end: number }> = [];
   const resolved: Array<{ segment: ApplicableSegment; start: number; end: number }> = [];
@@ -2263,6 +2946,7 @@ function resolveSegmentRanges(
     const originalStart = segment.start ?? 0;
     const originalEnd = segment.end ?? originalStart;
     if (!overlaps(originalStart, originalEnd)
+      && (!literalRanges || literalRanges.some(range => originalStart >= range.start && originalEnd <= range.end))
       && segmentRangeMatches(source, segment, originalStart, originalEnd)) {
       used.push({ start: originalStart, end: originalEnd });
       resolved.push({ segment, start: originalStart, end: originalEnd });
@@ -2274,7 +2958,8 @@ function resolveSegmentRanges(
     // leaving the approved translation unapplied.
     if (segment.kind === 'lua-long-string') continue;
     const candidates = segmentRangeCandidates(source, segment)
-      .filter((candidate) => !overlaps(candidate.start, candidate.end))
+      .filter((candidate) => !overlaps(candidate.start, candidate.end)
+        && (!literalRanges || literalRanges.some(range => candidate.start >= range.start && candidate.end <= range.end)))
       .sort((a, b) => Math.abs(a.start - originalStart) - Math.abs(b.start - originalStart));
     const candidate = candidates[0];
     if (!candidate) continue;
@@ -2428,6 +3113,93 @@ function isBackgroundPath(path: Array<string | number>): boolean {
 function isGenericProtectedPath(path: Array<string | number>, key: string): boolean {
   if (/^(?:id|uuid|guid|key|code|type|state|status|mode|viewScreen|view_screen|class|className|style|path|file|filename|asset|url|src|href|regex|pattern|script|lua|css|html|version|spec|spec_version|format|hash|sha|mime|extension|language|lang|targetLanguage|sourceLanguage|trigger|action|enabled|probability|order|count|index)$/iu.test(key)) return true;
   return path.some((part) => /^(?:assets?|chats?|chatPage|sdData|vits|regex|triggers?|customscripts?|scripts?|virtualscript|cjs)$/iu.test(String(part)));
+}
+
+/**
+ * Segment kinds that copy plain card/module text through the generic scan.
+ *
+ * Script, Lua and resource rows live under the very paths this protection list
+ * rejects (`customscript`, `regex`, `assets`) and follow their own extraction
+ * rules instead, so re-checking them here would drop legitimate translations.
+ */
+const GENERIC_COPY_KINDS = new Set(['field', 'structured-text', 'protocol-field']);
+
+/**
+ * Re-apply scan-time path protection to a stored segment.
+ *
+ * `isGenericProtectedPath()` only runs while scanning, so a row created before
+ * a key joined the protected list stays in the database, stays approved, and
+ * is written back by `applyApprovedSegments()`. That is how a Risu card's
+ * `viewScreen: "none"` became `无` in an already translated project. Applying
+ * and exporting therefore re-check the path instead of trusting the stored
+ * review state; the row is ignored until the project is scanned again.
+ */
+export function isProtectedStoredPath(
+  kind: string | undefined,
+  path: Array<string | number>,
+  module?: Record<string, unknown> | null,
+): boolean {
+  // Revalidate even ranged HTML/button rows: a variable reference may look like HTML.
+  // Lua code retains its dedicated literal extraction and writeback rules.
+  if (isRisuTriggerEffectFieldPath(path) && !isLuaModuleCodePath(path)) {
+    return !module || !risuTriggerEffectCopyField(module, path);
+  }
+  if (!GENERIC_COPY_KINDS.has(String(kind))) return false;
+  return isGenericProtectedPath(path, String(path.at(-1) ?? ''));
+}
+
+/**
+ * Draft paths where a stored approved row still overrides a now-protected
+ * field. Drafts saved before the protection list grew keep the stale write even
+ * after the row is gone, so exporting them is refused until the project is saved
+ * again: saving rebuilds the draft from the original plus the rows that are
+ * still translatable.
+ */
+export function staleProtectedDraftPaths(
+  original: Record<string, unknown>,
+  draft: Record<string, unknown>,
+  segments: ReadonlyArray<Pick<ApplicableSegment, 'pathJson' | 'pathLabel' | 'kind' | 'reviewStatus'>>,
+): string[] {
+  const stale: string[] = [];
+  for (const segment of segments) {
+    if (segment.reviewStatus !== 'approved') continue;
+    const path = parseSegmentPath(segment.pathJson);
+    if (!path || !isProtectedStoredPath(segment.kind, path, original)) continue;
+    const source = getAt(original, path);
+    const candidate = getAt(draft, path);
+    if (typeof source === 'string' && typeof candidate === 'string' && candidate !== source) {
+      stale.push(segment.pathLabel || segment.pathJson);
+    }
+  }
+  return stale;
+}
+
+/** Repair only stored writes that now fail trigger protection, retaining unrelated draft work. */
+export function restoreProtectedModuleDraft(
+  original: Record<string, unknown>,
+  draft: Record<string, unknown>,
+  segments: ReadonlyArray<Pick<ApplicableSegment, 'pathJson' | 'kind' | 'reviewStatus'>>,
+): Record<string, unknown> {
+  const restored = structuredClone(draft);
+  for (const segment of segments) {
+    if (segment.reviewStatus !== 'approved') continue;
+    const raw = parseSegmentPath(segment.pathJson);
+    if (!raw || raw[0] !== '$module') continue;
+    const path = raw.slice(1);
+    if (!isRisuTriggerEffectFieldPath(path) || !isProtectedStoredPath(segment.kind, path, original)) continue;
+    const source = getAt(original, path);
+    if (typeof source === 'string') setAt(restored, path, source);
+  }
+  return restored;
+}
+
+function parseSegmentPath(pathJson: string): Array<string | number> | null {
+  try {
+    const parsed = JSON.parse(pathJson) as unknown;
+    return Array.isArray(parsed) ? parsed as Array<string | number> : null;
+  } catch {
+    return null;
+  }
 }
 
 function isGreetingPath(path: Array<string | number>): boolean {

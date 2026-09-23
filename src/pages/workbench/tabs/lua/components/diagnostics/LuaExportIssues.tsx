@@ -13,7 +13,9 @@ export function LuaExportIssues({ report, onOpenRegex }: LuaExportIssuesProps) {
       <div className="lua-panel-header"><div><h2>导出校验问题</h2><span>按检测类型归类；阻断项必须在导出前处理</span></div><AlertTriangle size={17} /></div>
       <div className="lua-issue-list">
         {report.issues.filter((issue) => issue.kind !== 'syntax').map((issue, index) => {
-          const reference = issue.kind === 'control'
+          // Both control blockers and runtime-regex drift findings point at a concrete rule,
+          // so both keep the "open rule" affordance that leads to the manual comparison editor.
+          const reference = issue.kind === 'control' || issue.kind === 'regex-drift'
             ? report.controlReferences.find((item) => item.pathLabel === issue.pathLabel)
             : null;
           return <div className={`lua-issue ${issue.blocking ? 'blocking' : ''}`} key={`${issue.kind}:${issue.pathLabel}:${index}`}>
@@ -21,7 +23,7 @@ export function LuaExportIssues({ report, onOpenRegex }: LuaExportIssuesProps) {
             <div className="lua-issue-content">
               <strong>{LUA_ISSUE_LABELS[issue.kind]} · {issue.pathLabel}</strong>
               <span>{issue.message}</span>
-              {reference?.kind === 'regex' && <button type="button" className="secondary-button lua-issue-open-rule" onClick={() => onOpenRegex(reference)}><Code2 size={14} />打开规则</button>}
+              {reference?.kind === 'regex' && <button type="button" className="secondary-button lua-issue-open-rule" data-probe="lua-open-rule" onClick={() => onOpenRegex(reference)}><Code2 size={14} />打开规则</button>}
             </div>
           </div>;
         })}

@@ -6,4 +6,6 @@ export const LUA_ISSUE_LABELS = {
   portrait: '立绘别名',
   router: '路由修复',
   namespace: '命名空间',
+  'regex-drift': '运行期正则结构',
+  'protocol-regression': '协议回归',
 } as const;

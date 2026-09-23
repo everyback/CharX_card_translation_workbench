@@ -1,3 +1,4 @@
+import { loadReviewedDraft } from '../application/export/reviewed-draft.js';
 import { saveImageCandidate } from '../application/resources/image-candidate-service.js';
 import { validateUploadedImage } from '../domain/resources/image-upload.js';
 import { existsSync } from 'node:fs';
@@ -24,6 +25,7 @@ import {
   risuTranslationControlFragments,
   scanCard,
   scanRisuModule,
+  scanStPreset,
   validateRisuControlReferences,
   type RisuControlReference,
   type ApplicableSegment,
@@ -39,6 +41,16 @@ import {
 import { parseCardPng } from '../domain/card/png.js';
 import { inspectProjectOverview } from '../domain/card/tavern-card.js';
 import { parseRisuModule, readRisuModuleAssetFromReader, type RisuModuleSourceReader } from '../domain/card/risum.js';
+import { analyzeStPreset, isSillyTavernPreset } from '../domain/card/st-preset.js';
+import {
+  SETVAR_DEFINITION_REMOVED,
+  analyzePresetEditImpact,
+  buildPresetProjectView,
+  isEditablePresetPath,
+  readPresetPath,
+  validateEditedText,
+  writePresetPath,
+} from '../domain/card/st-preset-edit.js';
 import { detectRisuRuntimeRisks, validateRisuTemplateChanges } from '../domain/lua/risu-qa.js';
 import { buildLuaManagementReport } from '../domain/lua/lua-management.js';
 import {
@@ -128,8 +140,6 @@ const exportService = createExportService({
   clock: now,
   targetLanguage: () => publicSettings().targetLanguage,
   review: reviewService,
-  segmentRuntimeNames,
-  translateRuntimeAliases,
 });
 
 registerSystemRoutes(app);
@@ -159,8 +169,29 @@ app.post('/api/projects/import', async (request, reply) => {
   const extension = path.extname(part.filename).toLowerCase();
   try {
     if (extension === '.json' || part.mimetype === 'application/json') {
-      const card = asRecord(JSON.parse(buffer.toString('utf8')));
+      const parsedJson = JSON.parse(buffer.toString('utf8'));
+      const card = asRecord(parsedJson);
       if (!Object.keys(card).length) return reply.code(400).send({ error: 'JSON 卡片必须是对象。' });
+      if (isSillyTavernPreset(card)) {
+        // Stored as the raw ST preset so segment paths stay `["prompts", N, "content"]`
+        // and the approved-translation pipeline applies without adaptation. The
+        // `.risup` container is produced at export time from the translated draft.
+        const presetName = text(card.name) || path.basename(part.filename, extension) || 'SillyTavern 预设';
+        const analysis = analyzeStPreset(card);
+        const projectId = await createProject({
+          name: presetName, sourceFormat: 'st-preset', card, filename: part.filename, blob: buffer,
+        });
+        return reply.code(201).send({
+          ...(await projectById(projectId)),
+          conversion: {
+            warnings: analysis.warnings,
+            blocks: analysis.blocks,
+            recommendedBlockIndex: analysis.recommendedBlockIndex,
+            promptCount: analysis.promptCount,
+            orphanCount: analysis.orphanCount,
+          },
+        });
+      }
       const projectId = await createProject({ name: cardName(card), sourceFormat: 'json', card, filename: part.filename });
       return reply.code(201).send(await projectById(projectId));
     }
@@ -198,6 +229,7 @@ app.post('/api/projects/import', async (request, reply) => {
 registerInspectionRoutes(app, uploadLimitMib, { createProject, projectById, cardName });
 
 app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('/api/projects/:projectId', async (request, reply) => {
+  await namespaceReviewService.ensureReviewItem(request.params.projectId);
   const project = await projectById(request.params.projectId);
   if (!project) return reply.code(404).send({ error: '项目不存在。' });
   const controlReferences = await controlReferencesForProject(request.params.projectId);
@@ -332,6 +364,7 @@ app.get<{
 }>('/api/projects/:projectId/segments', async (request, reply) => {
   const project = await projectById(request.params.projectId);
   if (!project) return reply.code(404).send({ error: '项目不存在。' });
+  await namespaceReviewService.ensureReviewItem(request.params.projectId);
   const offset = nonNegativeInteger(request.query.offset, 0);
   const limit = Math.min(1000, positiveIntegerQuery(request.query.limit, 500));
   const controlReferences = await controlReferencesForProject(request.params.projectId);
@@ -690,13 +723,11 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
       translatedText: string | null;
     }>;
     const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
-    const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : null;
+    const { draftCard, draftModule } = await loadReviewedDraft(db, request.params.projectId);
     const originalModule = row.originalModuleJson
       ? JSON.parse(row.originalModuleJson) as Record<string, unknown>
       : null;
-    const draftModule = row.draftModuleJson
-      ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
-      : null;
+
     return buildLuaManagementReport({
       originalCard,
       draftCard,
@@ -742,9 +773,8 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/synta
   if (!row?.originalModuleJson) return reply.code(404).send({ error: '项目不存在或缺少原始 Risu Lua 模块。' });
   try {
     const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
-    const draftModule = row.draftModuleJson
-      ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
-      : structuredClone(originalModule);
+    const { draftModule } = await loadReviewedDraft(db, request.params.projectId);
+    if (!draftModule) return reply.code(404).send({ error: '项目缺少 Risu Lua 模块。' });
     const result = replaceRisuLuaLine(draftModule, pathJson, line, replacement, expectedLine);
     if (!result.ok) {
       if (result.reason === 'stale') {
@@ -812,11 +842,11 @@ async function loadRegexCoverageContext(projectId: string, includePathLabel?: st
   if (!row?.originalJson || !row.originalModuleJson) return null;
 
   const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
-  const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : structuredClone(originalCard);
+  const { draftCard, draftModule } = await loadReviewedDraft(db, projectId);
+  if (!draftModule) throw new Error('项目缺少 Risu 模块。');
   const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
-  const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
-  // Export validates the stored drafts. Rebuilding from segment rows here can
-  // resurrect an older review revision and present different hit counts.
+
+  // Check the same reviewed candidate that apply will validate before saving.
   const activeCard = draftCard;
   const activeModule = draftModule;
   const originalRules = Array.isArray(originalModule.regex) ? originalModule.regex : [];
@@ -1005,36 +1035,10 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
     if (!row?.originalJson || !row.originalModuleJson) {
       return reply.code(404).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
     }
-    const allSegments = await db.prepare(`
-      SELECT id, path_json AS pathJson, path_label AS pathLabel, kind, source_text AS sourceText,
-        start_pos AS start, end_pos AS end, translated_text AS translatedText,
-        final_text AS finalText, review_status AS reviewStatus
-      FROM segments WHERE project_id = ?
-    `).all(request.params.projectId) as unknown as ApplicableSegment[];
-    const cardSegments: ApplicableSegment[] = [];
-    const moduleSegments: ApplicableSegment[] = [];
-    for (const segment of allSegments) {
-      const segmentPath = JSON.parse(segment.pathJson) as Array<string | number>;
-      if (segmentPath[0] === '$resource') continue;
-      if (segmentPath[0] === '$module') {
-        moduleSegments.push({ ...segment, pathJson: JSON.stringify(segmentPath.slice(1)) });
-      } else {
-        cardSegments.push(segment);
-      }
-    }
     const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
     const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
-    const moduleBase = row.draftModuleJson
-      ? JSON.parse(row.draftModuleJson) as Record<string, unknown>
-      : originalModule;
-    const draftCard = applyApprovedSegments(originalCard, cardSegments);
-    const portraitRouting = detectRisuPortraitRouting(originalModule).detected;
-    const draftModule = applyRisuModuleSegments(
-      moduleBase,
-      moduleSegments,
-      portraitRouting ? row.targetLanguage || '' : '',
-      portraitRouting ? draftCard : undefined,
-    ).draft;
+    const { draftCard, draftModule } = await loadReviewedDraft(db, request.params.projectId);
+    if (!draftModule) throw new Error('项目缺少 Risu 模块。');
     const overrides = { ...parseRegexValidationOverrides(row.regexValidationOverrides) } as Record<string, RisuRegexValidationOverride>;
     const forcedPaths: string[] = [];
     const originalRules = Array.isArray(originalModule.regex) ? originalModule.regex : [];
@@ -1154,9 +1158,10 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/regex-
   if (!row?.originalJson || !row.originalModuleJson) return reply.code(409).send({ error: '当前卡片没有可检查的 Risu Lua 模块。' });
   try {
     const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
-    const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : structuredClone(originalCard);
+    const { draftCard, draftModule } = await loadReviewedDraft(db, request.params.projectId);
+    if (!draftModule) throw new Error('项目缺少 Risu 模块。');
     const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
-    const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
+
     // Keep this legacy full-pass endpoint aligned with export as well.
     const activeCard = draftCard;
     const activeModule = draftModule;
@@ -1261,9 +1266,10 @@ async function loadRegexRuleCardContext(projectId: string, pathLabel: string): P
   } | undefined;
   if (!row?.originalJson || !row.originalModuleJson) return null;
   const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
-  const draftCard = row.draftJson ? JSON.parse(row.draftJson) as Record<string, unknown> : structuredClone(originalCard);
+  const { draftCard, draftModule } = await loadReviewedDraft(db, projectId);
+  if (!draftModule) throw new Error('项目缺少 Risu 模块。');
   const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
-  const draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) as Record<string, unknown> : structuredClone(originalModule);
+
   const originalRule = regexRuleAt(originalModule, index);
   const draftRule = regexRuleAt(draftModule, index);
   const originalPattern = typeof originalRule?.in === 'string' ? originalRule.in : '';
@@ -1553,6 +1559,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/reset-
 });
 
 app.delete<{ Params: { projectId: string } }>('/api/projects/:projectId', async (request, reply) => {
+  await namespaceReviewService.ensureReviewItem(request.params.projectId);
   const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running')")
     .get(request.params.projectId) as { count: number };
   if (Number(active.count) > 0) return reply.code(409).send({ error: '项目仍有运行中的任务。' });
@@ -1637,13 +1644,18 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
   const segments = [
     ...(row.source_format === 'risum'
       ? []
-      : scanCard(card, scope, controlLiterals, protocolRules, publicSettings().sourceLanguage)),
+      : row.source_format === 'st-preset'
+        // The generic walker would also offer `role` / `identifier` / sampler
+        // keywords for translation, which corrupts the preset.
+        ? scanStPreset(card, scope)
+        : scanCard(card, scope, controlLiterals, protocolRules, publicSettings().sourceLanguage)),
     ...moduleSegments,
     ...(row.source_format === 'charx' && sourceBlob
       ? scanCharxResourceJson(sourceBlob, scope === 'all')
       : []),
   ];
   const replacement = await scanService.replaceScannedSegments(request.params.projectId, scope, segments);
+  await namespaceReviewService.ensureReviewItem(request.params.projectId);
   return {
     ok: true,
     scope,
@@ -1666,6 +1678,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/jobs', asy
   const segmentRows = await db.prepare(`
     SELECT id FROM segments
     WHERE project_id = ? AND included = 1 AND review_status IN ('untranslated', 'rejected')
+      AND path_label <> '$module.namespace'
     ORDER BY sort_order
   `).all(request.params.projectId) as Array<{ id: string }>;
   if (!segmentRows.length) return reply.code(400).send({ error: '没有待翻译的已选段落。' });
@@ -2016,9 +2029,9 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/apply', as
   }
 });
 
-app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/export', async (request, reply) => {
+app.get<{ Params: { projectId: string }; Querystring: { presetBundle?: string } }>('/api/projects/:projectId/export', async (request, reply) => {
   try {
-    const output = await exportService.exportProject(request.params.projectId);
+    const output = await exportService.exportProject(request.params.projectId, { presetBundle: request.query.presetBundle === 'true' });
     return reply
       .header('Content-Type', output.contentType)
       .header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(output.filename)}`)
@@ -2027,6 +2040,173 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/export', as
     return sendWorkflowError(reply, error);
   }
 });
+
+/**
+ * Choose which SillyTavern `prompt_order` block a preset project converts.
+ * `blockIndex: null` restores the automatic (superset) block.
+ */
+app.put<{ Params: { projectId: string }; Body: { blockIndex?: unknown } }>(
+  '/api/projects/:projectId/preset-block',
+  async (request, reply) => {
+    const row = await db.prepare('SELECT source_format AS sourceFormat, original_json AS originalJson FROM projects WHERE id = ?')
+      .get(request.params.projectId) as { sourceFormat?: string; originalJson?: string } | undefined;
+    if (!row) return reply.code(404).send({ error: '项目不存在。' });
+    if (row.sourceFormat !== 'st-preset') return reply.code(409).send({ error: '该项目不是 SillyTavern 预设。' });
+
+    const body = asRecord(request.body);
+    const requested = body.blockIndex;
+    if (requested !== null && requested !== undefined && (!Number.isInteger(requested) || Number(requested) < 0)) {
+      return reply.code(400).send({ error: 'blockIndex 必须是非负整数或 null。' });
+    }
+    const preset = JSON.parse(row.originalJson || '{}') as Record<string, unknown>;
+    const analysis = analyzeStPreset(preset);
+    const blockIndex = requested === null || requested === undefined ? null : Number(requested);
+    if (blockIndex !== null && !analysis.blocks.some((block) => block.index === blockIndex)) {
+      return reply.code(400).send({ error: `预设中不存在 prompt_order 块 ${blockIndex}。` });
+    }
+
+    await db.prepare('UPDATE projects SET preset_block_index = ?, updated_at = ? WHERE id = ?')
+      .run(blockIndex, now(), request.params.projectId);
+    return {
+      ok: true,
+      blockIndex,
+      effectiveBlockIndex: blockIndex ?? analysis.recommendedBlockIndex,
+      blocks: analysis.blocks,
+      recommendedBlockIndex: analysis.recommendedBlockIndex,
+    };
+  },
+);
+
+interface PresetProjectRow {
+  sourceFormat?: string;
+  originalJson?: string;
+  draftJson?: string;
+  presetBlockIndex?: number | null;
+}
+
+async function readPresetProjectRow(projectId: string): Promise<PresetProjectRow | undefined> {
+  return await db.prepare(`
+    SELECT source_format AS sourceFormat, original_json AS originalJson,
+      draft_json AS draftJson, preset_block_index AS presetBlockIndex
+    FROM projects WHERE id = ?
+  `).get(projectId) as PresetProjectRow | undefined;
+}
+
+function presetBlockOption(row: PresetProjectRow): { blockIndex?: number } {
+  return typeof row.presetBlockIndex === 'number' ? { blockIndex: row.presetBlockIndex } : {};
+}
+
+/**
+ * Current conversion state of a preset project: analysis, conversion report and
+ * every prompt with its live draft text. Computed on demand — conversion is a
+ * pure function, so this needs no table of its own.
+ */
+app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/preset-report', async (request, reply) => {
+  const row = await readPresetProjectRow(request.params.projectId);
+  if (!row) return reply.code(404).send({ error: '项目不存在。' });
+  if (row.sourceFormat !== 'st-preset') return reply.code(409).send({ error: '该项目不是 SillyTavern 预设。' });
+  const original = JSON.parse(row.originalJson || '{}') as Record<string, unknown>;
+  const draft = JSON.parse(row.draftJson || row.originalJson || '{}') as Record<string, unknown>;
+  const blockIndex = typeof row.presetBlockIndex === 'number' ? row.presetBlockIndex : null;
+  return buildPresetProjectView(original, draft, blockIndex);
+});
+
+/**
+ * Edit one copy field of a preset project.
+ *
+ * When the edit removes the last always-on `{{setvar::…}}` definition of a
+ * variable that is still read elsewhere, the write is refused with
+ * `SETVAR_DEFINITION_REMOVED` until the caller echoes the variable names back in
+ * `confirmRemovals`. Every reference to a variable with no definition resolves to
+ * an empty string, which silently breaks the preset without breaking the import.
+ */
+app.put<{ Params: { projectId: string }; Body: { path?: unknown; text?: unknown; confirmRemovals?: unknown } }>(
+  '/api/projects/:projectId/preset-prompt',
+  async (request, reply) => {
+    const row = await readPresetProjectRow(request.params.projectId);
+    if (!row) return reply.code(404).send({ error: '项目不存在。' });
+    if (row.sourceFormat !== 'st-preset') return reply.code(409).send({ error: '该项目不是 SillyTavern 预设。' });
+
+    const body = asRecord(request.body);
+    const path = body.path;
+    if (!Array.isArray(path) || !isEditablePresetPath(path as Array<string | number>)) {
+      return reply.code(400).send({ error: '只允许编辑预设名称与提示词的名称/正文。' });
+    }
+    if (typeof body.text !== 'string') return reply.code(400).send({ error: 'text 必须是字符串。' });
+
+    const original = JSON.parse(row.originalJson || '{}') as Record<string, unknown>;
+    const draft = JSON.parse(row.draftJson || row.originalJson || '{}') as Record<string, unknown>;
+
+    let next: Record<string, unknown>;
+    try {
+      next = writePresetPath(draft, path as Array<string | number>, body.text);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+
+    const options = presetBlockOption(row);
+    const impact = analyzePresetEditImpact(draft, next, options);
+    const confirmed = new Set(
+      Array.isArray(body.confirmRemovals)
+        ? body.confirmRemovals.filter((value): value is string => typeof value === 'string')
+        : [],
+    );
+    const unconfirmed = impact.blocking.filter((removal) => !confirmed.has(removal.name));
+    if (unconfirmed.length) {
+      return reply.code(409).send({
+        code: SETVAR_DEFINITION_REMOVED,
+        error: `这次编辑会删除 ${unconfirmed.length} 个仍被引用的变量定义，删除后引用处会变成空字符串。`,
+        removals: unconfirmed.map((removal) => ({
+          name: removal.name,
+          references: removal.references.map((site) => site.item),
+        })),
+      });
+    }
+
+    await db.prepare('UPDATE projects SET draft_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(next), now(), request.params.projectId);
+
+    const view = buildPresetProjectView(original, next, typeof row.presetBlockIndex === 'number' ? row.presetBlockIndex : null);
+    const warnings = [
+      ...validateEditedText(body.text, view.report.toggleKeys),
+      ...impact.noted.map((removal) => `变量 ${removal.name} 已无定义，但当前没有任何地方引用它。`),
+    ];
+    return { ok: true, ...view, warnings, appliedRemovals: impact.blocking.map((removal) => removal.name) };
+  },
+);
+
+/** Restore the whole draft, or a single path, from the untouched original. */
+app.post<{ Params: { projectId: string }; Body: { path?: unknown } }>(
+  '/api/projects/:projectId/preset-reset',
+  async (request, reply) => {
+    const row = await readPresetProjectRow(request.params.projectId);
+    if (!row) return reply.code(404).send({ error: '项目不存在。' });
+    if (row.sourceFormat !== 'st-preset') return reply.code(409).send({ error: '该项目不是 SillyTavern 预设。' });
+
+    const original = JSON.parse(row.originalJson || '{}') as Record<string, unknown>;
+    const body = asRecord(request.body);
+    let next: Record<string, unknown>;
+
+    if (Array.isArray(body.path)) {
+      if (!isEditablePresetPath(body.path as Array<string | number>)) {
+        return reply.code(400).send({ error: '只允许恢复预设名称与提示词的名称/正文。' });
+      }
+      const draft = JSON.parse(row.draftJson || row.originalJson || '{}') as Record<string, unknown>;
+      try {
+        next = writePresetPath(draft, body.path as Array<string | number>, readPresetPath(original, body.path as Array<string | number>));
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+      }
+    } else {
+      next = original;
+    }
+
+    await db.prepare('UPDATE projects SET draft_json = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(next), now(), request.params.projectId);
+    const blockIndex = typeof row.presetBlockIndex === 'number' ? row.presetBlockIndex : null;
+    return { ok: true, ...buildPresetProjectView(original, next, blockIndex) };
+  },
+);
 
 const webRoot = workbenchConfig.paths.webRoot;
 if (existsSync(webRoot)) {

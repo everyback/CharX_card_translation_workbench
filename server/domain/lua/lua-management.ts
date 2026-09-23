@@ -2,6 +2,8 @@ import {
   risuControlReferences,
   scanRisuModule,
   validateRisuControlReferences,
+  collectRisuRuntimeRegexStructuralDrift,
+  collectRisuUnconsumedProtocolTags,
   regexMatchSnippetsInStrings,
   countRegexMatchesInStrings,
   risuRegexControlReferences,
@@ -48,7 +50,7 @@ export interface LuaManagementSegment {
 }
 
 export interface LuaManagementIssue {
-  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router' | 'namespace';
+  kind: 'syntax' | 'template' | 'runtime' | 'control' | 'portrait' | 'router' | 'namespace' | 'regex-drift' | 'protocol-regression';
   pathLabel: string;
   message: string;
   blocking: boolean;
@@ -56,6 +58,9 @@ export interface LuaManagementIssue {
   line?: number;
   column?: number;
   sourceLine?: string;
+  sourceLineNumber?: number;
+  sourceReferenceLine?: number;
+  sourceContextLines?: Array<{ line: number; text: string }>;
   draftLine?: string;
   contextLines?: Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }>;
 }
@@ -439,6 +444,43 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       }
     }
   }
+  // Protocol-regression inputs. The display rules that will actually render are the draft
+  // card's when a draft exists, otherwise the original card's.
+  const cardRoot = (input.originalCard ?? null) as Record<string, unknown> | null;
+  const cardRootDraft = (input.draftCard ?? null) as Record<string, unknown> | null;
+  const protocolRegressionCard = (input.draftCard ?? input.originalCard ?? {}) as Record<string, unknown>;
+  const protocolRegressionSamples = (() => {
+    const collected: Array<{ pathLabel: string; text: string }> = [];
+    const seen = new Set<string>();
+    const push = (label: string, value: unknown) => {
+      const text = typeof value === 'string' ? value : '';
+      if (!text.trim() || seen.has(label)) return;
+      seen.add(label);
+      collected.push({ pathLabel: label, text });
+    };
+    const card = protocolRegressionCard;
+    push('卡片.firstMessage', card.firstMessage);
+    const data = card.data && typeof card.data === 'object' ? card.data as Record<string, unknown> : {};
+    push('卡片.data.first_mes', data.first_mes);
+    const greetings = [card.alternateGreetings, data.alternate_greetings];
+    greetings.forEach((list, index) => {
+      if (!Array.isArray(list)) return;
+      list.slice(0, 2).forEach((value, item) => push(`卡片.alternateGreetings.${index}.${item}`, value));
+    });
+    if (Array.isArray(card.chats)) {
+      // Recent messages only: a card that hides older artwork is working as designed there.
+      for (const chat of card.chats.slice(0, 3)) {
+        if (!chat || typeof chat !== 'object' || Array.isArray(chat)) continue;
+        const messages = (chat as Record<string, unknown>).message;
+        if (!Array.isArray(messages)) continue;
+        messages.slice(-6).forEach((message, index) => {
+          if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+          push(`卡片.chats.${index}.data`, (message as Record<string, unknown>).data);
+        });
+      }
+    }
+    return collected;
+  })();
   if (draftModule) {
     // A parser position addresses the raw Lua code block, not a translated text
     // segment near the same line. Linking it to a nearby segment misdirects the
@@ -449,7 +491,45 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
       validateRisuControlReferences(input.originalCard, input.draftCard, module, draftModule, input.regexValidationOverrides)
         .forEach((issue) => issues.push({ ...issue, kind: 'control', blocking: true, segmentIds: issueSegments(issue.pathLabel, issue.message) }));
     }
+    // Runtime rules (`editdisplay` / `editoutput`) run against generated chat text, so a
+    // changed quantifier, character class, escape or assertion keeps every static card hit
+    // identical while changing what happens at render time. Those findings are advisory:
+    // a runtime rule may legitimately need a new target-language character range, and the
+    // hard block already lives in `applyRisuRegexCoverageProposals`, which refuses
+    // whole-pattern rewrites for these rules outright.
+    collectRisuRuntimeRegexStructuralDrift(module, draftModule)
+      .forEach((drift) => issues.push({
+        kind: 'regex-drift',
+        pathLabel: drift.pathLabel,
+        message: drift.message,
+        blocking: false,
+        segmentIds: [],
+      }));
+    // A plain card keeps its regex rules in `customscript`, which is a separate surface from
+    // the module `regex` array and needs the same advisory check.
+    if (cardRoot && cardRootDraft) {
+      collectRisuRuntimeRegexStructuralDrift(cardRoot, cardRootDraft, '卡片')
+        .forEach((drift) => issues.push({
+          kind: 'regex-drift',
+          pathLabel: drift.pathLabel,
+          message: drift.message,
+          blocking: false,
+          segmentIds: [],
+        }));
+    }
   }
+  // Protocol regression: run the card's own display rules over its opening text and recent
+  // chat history, and report tag kinds that nothing consumed. A broken display rule leaves the
+  // tag visible as literal text, and an intact "hide old assets" rule deletes it silently, so
+  // without this check the failure has no other symptom before the user opens the card.
+  collectRisuUnconsumedProtocolTags(protocolRegressionCard, protocolRegressionSamples)
+    .forEach((finding) => issues.push({
+      kind: 'protocol-regression',
+      pathLabel: finding.pathLabel,
+      message: finding.message,
+      blocking: false,
+      segmentIds: [],
+    }));
   if (input.originalModule) {
     detectRisuRuntimeRisks(module).forEach((issue) => issues.push({ ...issue, kind: 'runtime', blocking: false, segmentIds: issueSegments(issue.pathLabel, issue.message) }));
   }

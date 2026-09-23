@@ -1,4 +1,4 @@
-import { BookOpenText, Braces, CircleAlert, FileArchive, FileImage, FileJson, Gauge, ListChecks, RefreshCw } from 'lucide-react';
+import { BookOpenText, Braces, CircleAlert, FileArchive, FileImage, FileJson, Gauge, ListChecks, RefreshCw, Settings2 } from 'lucide-react';
 import { LoadingMask, Stat } from '@/shared/ui';
 import type { ProjectOverview } from '@/shared/types';
 import { formatBytes } from '@/shared/lib/format';
@@ -41,7 +41,7 @@ export function ProjectOverviewPage({ info, loading, onRefresh, onViewResources 
       {loading && <LoadingMask label="正在更新项目概要" />}
       <div className="tavern-card-overview">
         <div className="tavern-card-cover">
-          {info.previewAvailable ? <img draggable={false} src={`/api/projects/${info.projectId}/cover`} alt={`${info.cardName} 头图`} /> : info.sourceFormat === 'risum' || info.sourceFormat === 'charx' ? <FileArchive size={48} /> : <FileJson size={48} />}
+          {info.previewAvailable ? <img draggable={false} src={`/api/projects/${info.projectId}/cover`} alt={`${info.cardName} 头图`} /> : info.sourceFormat === 'risum' || info.sourceFormat === 'charx' ? <FileArchive size={48} /> : info.sourceFormat === 'st-preset' ? <Settings2 size={48} /> : <FileJson size={48} />}
         </div>
         <div className="tavern-card-heading">
           <span>原始导入内容概要</span>

@@ -17,6 +17,33 @@ function isNamespacePath(pathJson: string): boolean {
 }
 
 export function createNamespaceReviewService({ database, createId, clock }: NamespaceReviewServiceDependencies) {
+  async function ensureReviewItem(projectId: string): Promise<void> {
+    await database.transaction(async () => {
+      const project = await database.prepare('SELECT original_module_json AS originalModuleJson FROM projects WHERE id = ?')
+        .get(projectId) as { originalModuleJson?: string | null } | undefined;
+      if (!project?.originalModuleJson) return;
+      const module = JSON.parse(project.originalModuleJson) as Record<string, unknown>;
+      const namespace = typeof module.namespace === 'string' ? module.namespace.trim() : '';
+      if (!namespace) return;
+      const existing = await database.prepare(`SELECT id FROM segments WHERE project_id = ? AND path_json IN (?, ?) AND source_text = ?`)
+        .get(projectId, JSON.stringify(['$module', 'namespace']), JSON.stringify(['namespace']), namespace);
+      if (existing) {
+        await database.prepare(`UPDATE segments SET path_json = ?, path_label = '$module.namespace',
+          final_text = COALESCE(final_text, source_text), review_status = 'pending', included = 0, updated_at = ?
+          WHERE id = ? AND review_status = 'untranslated'`)
+          .run(JSON.stringify(['$module', 'namespace']), clock(), String(existing.id));
+        return;
+      }
+      await database.prepare(`INSERT INTO segments(
+        id, project_id, path_json, path_label, category, kind, source_text, final_text,
+        risk_level, review_status, included, qa_flags, sort_order, updated_at
+      ) VALUES (?, ?, ?, '$module.namespace', 'name', 'field', ?, ?, 'high', 'pending', 0, ?,
+        (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM segments WHERE project_id = ?), ?)`)
+        .run(createId(), projectId, JSON.stringify(['$module', 'namespace']), namespace, namespace,
+          JSON.stringify(['命名空间人工检查：内部 ID，默认保留原文；请人工确认，不参与机器翻译']), projectId, clock());
+    });
+  }
+
   async function confirm(projectId: string, targetNamespaceInput: string): Promise<{
     ok: true;
     sourceNamespace: string;
@@ -108,5 +135,5 @@ export function createNamespaceReviewService({ database, createId, clock }: Name
     return { ok: true, sourceNamespace, targetNamespace, segmentId };
   }
 
-  return { confirm };
+  return { confirm, ensureReviewItem };
 }

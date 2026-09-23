@@ -60,7 +60,7 @@ export function createTranslationJobService(
 
   async function existingProjectSegmentIds(projectId: string, requestedIds: readonly string[]): Promise<string[]> {
     const requested = new Set(requestedIds);
-    return (await database.prepare('SELECT id FROM segments WHERE project_id = ? ORDER BY sort_order').all(projectId) as Array<{ id: string }>)
+    return (await database.prepare("SELECT id FROM segments WHERE project_id = ? AND path_label <> '$module.namespace' ORDER BY sort_order").all(projectId) as Array<{ id: string }>)
       .map((row) => row.id)
       .filter((segmentId) => requested.has(segmentId));
   }

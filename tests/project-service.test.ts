@@ -27,6 +27,7 @@ async function createProjectDatabase(): Promise<{ database: AsyncDatabase; direc
       source_filename TEXT,
       source_blob BLOB,
       source_metadata_keys TEXT NOT NULL,
+      preset_block_index INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );

@@ -107,6 +107,83 @@ test('Lua management extracts regex rules even before a draft module exists', ()
   assert.equal(report.regexRules[0]?.runtimePostprocess, true);
 });
 
+test('Lua management surfaces runtime regex structural drift as a non-blocking warning', () => {
+  const runtimePattern = '([”"」])[ \\t]+(?=[“"「『]?[0-9A-Za-z])';
+  const module = {
+    regex: [{ in: runtimePattern, out: '$1\n', type: 'editdisplay' }],
+  };
+  const loosened = {
+    regex: [{ in: runtimePattern.replace('[ \\t]+', '[ \\t]*'), out: '$1\n', type: 'editdisplay' }],
+  };
+  const report = buildLuaManagementReport({
+    originalCard: { firstMessage: '"안녕" 다음' },
+    draftCard: { firstMessage: '"你好" 下一幕' },
+    originalModule: module,
+    draftModule: loosened,
+  });
+
+  const drift = report.issues.filter((issue) => issue.kind === 'regex-drift');
+  assert.equal(drift.length, 1);
+  assert.equal(drift[0]?.blocking, false);
+  assert.equal(drift[0]?.pathLabel, '模块.regex.0.in');
+  assert.match(drift[0]?.message ?? '', /量词发生变化/u);
+  // Advisory only: the rule stays exportable and no blocker is added for it.
+  assert.equal(report.issues.some((issue) => issue.kind === 'regex-drift' && issue.blocking), false);
+  assert.equal(report.blockerCount, 0);
+  assert.ok(report.warningCount >= 1);
+
+  // A clean draft produces no drift finding at all.
+  const clean = buildLuaManagementReport({
+    originalCard: { firstMessage: '"안녕" 다음' },
+    draftCard: { firstMessage: '"你好" 下一幕' },
+    originalModule: module,
+    draftModule: structuredClone(module),
+  });
+  assert.deepEqual(clean.issues.filter((issue) => issue.kind === 'regex-drift'), []);
+
+  // Non-runtime rules keep their full-pattern adaptation freedom and report no drift.
+  const plain = buildLuaManagementReport({
+    originalCard: { firstMessage: '"안녕" 다음' },
+    draftCard: { firstMessage: '"你好" 下一幕' },
+    originalModule: { regex: [{ in: runtimePattern, out: '$1' }] },
+    draftModule: { regex: [{ in: runtimePattern.replace('[ \\t]+', '[ \\t]*'), out: '$1' }] },
+  });
+  assert.deepEqual(plain.issues.filter((issue) => issue.kind === 'regex-drift'), []);
+});
+
+test('Lua management runs a protocol regression over greetings and recent chat text', () => {
+  // A card whose display rule no longer matches the artwork tags it emits: the tags survive
+  // and would render as literal text. Nothing else in the report can see this.
+  const card = {
+    firstMessage: '<bg="room">\n\n<img="kyoko_normal_smug">',
+    customscript: [
+      { type: 'editdisplay', flag: 'g', in: '<bg="([^"]+)">', out: '<section data-bg="$1">背景</section>' },
+      { type: 'editdisplay', flag: 'g', in: '<img src="([^"]+)">', out: '<img src="$1">' },
+    ],
+  };
+  const report = buildLuaManagementReport({
+    originalCard: card,
+    originalModule: { trigger: [{ effect: [{ code: 'return 1' }] }] },
+  });
+
+  const regression = report.issues.filter((issue) => issue.kind === 'protocol-regression');
+  assert.equal(regression.length, 1);
+  assert.equal(regression[0]?.blocking, false);
+  assert.equal(regression[0]?.pathLabel, '卡片.firstMessage');
+  assert.match(regression[0]?.message ?? '', /以标签形式残留/u);
+  assert.equal(report.blockerCount, 0);
+
+  // A card whose display rules cover every emitted tag reports nothing.
+  const healthy = buildLuaManagementReport({
+    originalCard: {
+      firstMessage: '<img="kyoko_normal_smug">',
+      customscript: [{ type: 'editdisplay', flag: 'g', in: '<img="([^"]+)">', out: '<img src="{{raw::$1}}">' }],
+    },
+    originalModule: { trigger: [{ effect: [{ code: 'return 1' }] }] },
+  });
+  assert.deepEqual(healthy.issues.filter((issue) => issue.kind === 'protocol-regression'), []);
+});
+
 test('Lua management exposes a module namespace for an explicit human decision', () => {
   const report = buildLuaManagementReport({
     originalCard: {},

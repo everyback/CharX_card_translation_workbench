@@ -23,6 +23,7 @@ export function containerFormatLabel(sourceFormat: string): string {
     case 'json': return 'JSON 文档';
     case 'charx': return 'CHARX 资源容器';
     case 'risum': return 'RISUM 模块容器';
+    case 'st-preset': return 'SillyTavern 预设（导出为 RisuAI .risup）';
     default: return sourceFormat ? `${sourceFormat.toUpperCase()} 文件` : '未知文件容器';
   }
 }

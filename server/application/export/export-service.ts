@@ -1,9 +1,10 @@
+import { buildReviewedDraft } from './reviewed-draft.js';
 import type { AsyncDatabase } from '../../async-db.js';
 import {
-  applyApprovedSegments,
   bilingualModuleName,
   cardExportName,
   findRisuRegexAffectedSegmentIds,
+  staleProtectedDraftPaths,
   type ApplicableSegment,
   type RisuRegexValidationOverrides,
   validateRisuControlReferences,
@@ -11,11 +12,8 @@ import {
 import { synchronizeRisuModuleLorebook, writeCardCharx } from '../../domain/card/charx.js';
 import { writeCardPng } from '../../domain/card/png.js';
 import { writeRisuModule } from '../../domain/card/risum.js';
+import { buildStPresetArtifacts, encodeStPresetBundle } from '../../domain/card/st-preset-artifacts.js';
 import {
-  applyRisuModuleSegments,
-  collectRuntimeAliasCandidates,
-  collectRuntimeAliasTranslationCandidates,
-  detectRisuPortraitRouting,
   staleRisuModuleNamespaceProtocolPaths,
   validateRisuLuaChanges,
 } from '../../domain/lua/risu-lua.js';
@@ -37,8 +35,6 @@ export interface ExportServiceDependencies {
   clock: () => string;
   targetLanguage: () => string;
   review: ReviewValidationService;
-  segmentRuntimeNames?: (input: Array<{ ownerId: string; name: string }>) => Promise<Record<string, string[]>>;
-  translateRuntimeAliases?: (input: Array<{ ownerId: string; aliases: string[] }>, targetLanguage: string) => Promise<Record<string, string[]>>;
 }
 
 export class ProjectWorkflowError extends Error {
@@ -55,17 +51,6 @@ export interface ExportPayload {
   contentType: string;
   filename: string;
   body: Uint8Array | string;
-}
-
-function isModuleNamespaceSegment(
-  segment: ApplicableSegment,
-  path: Array<string | number>,
-  originalModule: Record<string, unknown> | null,
-): boolean {
-  return path.length === 1
-    && path[0] === 'namespace'
-    && typeof originalModule?.namespace === 'string'
-    && segment.sourceText === originalModule.namespace;
 }
 
 function findModuleNamespaceSegment(
@@ -159,11 +144,13 @@ function parseRegexValidationOverrides(value: string | null | undefined): RisuRe
   }
 }
 
-export function createExportService({ database, clock, targetLanguage, review, segmentRuntimeNames, translateRuntimeAliases }: ExportServiceDependencies) {
+export function createExportService({ database, clock, targetLanguage, review }: ExportServiceDependencies) {
   async function applyProject(projectId: string): Promise<{
     ok: true;
     approvedCount: number;
     ignoredLuaSegments: number;
+    ignoredProtectedSegments: number;
+    ignoredProtectedPaths: string[];
     runtimeAliasAdditions: number;
     runtimeAliasTranslationError?: string;
     runtimeAliasSegmentationError?: string;
@@ -200,19 +187,9 @@ export function createExportService({ database, clock, targetLanguage, review, s
     const existingDraftModule = project.draftModuleJson
       ? JSON.parse(project.draftModuleJson) as Record<string, unknown>
       : null;
-    const cardSegments: ApplicableSegment[] = [];
-    const moduleSegments: ApplicableSegment[] = [];
-    const resourceSegments: ApplicableSegment[] = [];
-    for (const segment of segments) {
-      const path = JSON.parse(segment.pathJson) as Array<string | number>;
-      if (path[0] === '$resource') resourceSegments.push(segment);
-      else if (path[0] === '$module' || isModuleNamespaceSegment(segment, path, originalModule)) {
-        moduleSegments.push({ ...segment, pathJson: JSON.stringify(path[0] === '$module' ? path.slice(1) : path) });
-      }
-      else cardSegments.push(segment);
-    }
-
-    const draft = applyApprovedSegments(JSON.parse(project.original_json), cardSegments);
+    const { draftCard: draft, draftModule, moduleResult, cardSegments, moduleSegments, resourceSegments, ignoredProtectedPaths } = buildReviewedDraft(
+      JSON.parse(project.original_json), originalModule, existingDraftModule, segments, project.sourceFormat,
+    );
     // Keep the large original archive out of SQLite when only card/module text
     // changed. Export falls back to source_blob in that case.
     const confirmedReplacements = await confirmedImageReplacements(projectId);
@@ -237,47 +214,6 @@ export function createExportService({ database, clock, targetLanguage, review, s
     if (moduleSegments.length && !originalModule) {
       throw new ProjectWorkflowError('项目缺少原始 Risu 模块，无法应用模块译文。请重新扫描项目。', 409);
     }
-    const currentTargetLanguage = targetLanguage();
-    let runtimeAliases: Record<string, string[]> = {};
-    let runtimeAliasTranslationError: string | undefined;
-    let runtimeAliasSegmentationError: string | undefined;
-    const portraitFeatureDetected = originalModule ? detectRisuPortraitRouting(originalModule).detected : false;
-    if (originalModule && portraitFeatureDetected && /zh|中文|简体|繁体/iu.test(currentTargetLanguage)) {
-      if (translateRuntimeAliases) {
-        try {
-          runtimeAliases = await translateRuntimeAliases(
-            collectRuntimeAliasTranslationCandidates(existingDraftModule || originalModule, currentTargetLanguage),
-            currentTargetLanguage,
-          );
-        } catch (error) {
-          runtimeAliasTranslationError = error instanceof Error ? error.message : String(error);
-        }
-      }
-      const candidates = [
-        ...collectRuntimeAliasCandidates(originalModule, currentTargetLanguage, draft),
-        ...Object.entries(runtimeAliases).flatMap(([ownerId, names]) => names.map((name) => ({ ownerId, name }))),
-      ]
-        .filter((candidate, index, all) => /[\u3400-\u9fff]/u.test(candidate.name) && candidate.name.length >= 4
-          && all.findIndex((item) => item.ownerId === candidate.ownerId && item.name === candidate.name) === index)
-        .slice(0, 80);
-      try {
-        const segments = segmentRuntimeNames ? await segmentRuntimeNames(candidates) : {};
-        runtimeAliases = mergeRuntimeAliases(runtimeAliases, segments);
-      } catch (error) {
-        runtimeAliasSegmentationError = error instanceof Error ? error.message : String(error);
-      }
-    }
-    // Stage 2 (Lua regex/keyword adaptation) writes additive changes directly
-    // to draft_module_json. Rebuild from that draft so applying reviewed text
-    // does not silently discard those changes.
-    const moduleBase = existingDraftModule || originalModule;
-    const moduleResult = moduleBase ? applyRisuModuleSegments(
-      moduleBase,
-      moduleSegments,
-      portraitFeatureDetected ? currentTargetLanguage : '',
-      portraitFeatureDetected ? draft : undefined,
-      runtimeAliases,
-    ) : null;
     if (moduleResult?.syntaxIssues.length) {
       const issue = moduleResult.syntaxIssues[0];
       throw new ProjectWorkflowError(`Risu Lua 语法校验失败：${issue.pathLabel} ${issue.message}`, 409, {
@@ -294,10 +230,6 @@ export function createExportService({ database, clock, targetLanguage, review, s
         fixSuggestion: '请打开 脚本管理页，展开这条语法错误，按行号和列号人工检查当前稿错误行；只修改确认后的整行，保留 Lua 代码、引号、括号和字段分隔符，再保存并重新校验。系统不会自动改写这行。',
       });
     }
-    const appliedModule = moduleResult?.draft ?? null;
-    const draftModule = appliedModule && project.sourceFormat === 'charx'
-      ? synchronizeRisuModuleLorebook(draft, appliedModule)
-      : appliedModule;
     assertRisuModuleNamespaceIntegrity(originalModule, draftModule, segments, false);
     assertRisuIntegrity(
       JSON.parse(project.original_json) as Record<string, unknown>,
@@ -349,19 +281,21 @@ export function createExportService({ database, clock, targetLanguage, review, s
       ok: true,
       approvedCount: segments.filter((segment) => segment.reviewStatus === 'approved').length,
       ignoredLuaSegments: moduleResult?.ignoredLuaSegments ?? 0,
+      ignoredProtectedSegments: ignoredProtectedPaths.length,
+      ignoredProtectedPaths: ignoredProtectedPaths.slice(0, 10),
       runtimeAliasAdditions: moduleResult?.runtimeAliasAdditions ?? 0,
-      ...(runtimeAliasTranslationError ? { runtimeAliasTranslationError } : {}),
-      ...(runtimeAliasSegmentationError ? { runtimeAliasSegmentationError } : {}),
+
     };
   }
 
-  async function exportProject(projectId: string): Promise<ExportPayload> {
+  async function exportProject(projectId: string, options: { presetBundle?: boolean } = {}): Promise<ExportPayload> {
     const project = await database.prepare(`
       SELECT p.name, p.source_format AS sourceFormat, p.source_filename AS sourceFilename, p.source_blob AS sourceBlob,
         p.source_storage_path AS sourceStoragePath, p.source_storage_bytes AS sourceBytes,
         source_metadata_keys AS sourceMetadataKeys, original_json AS originalJson, draft_json AS draftJson,
         original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
         regex_validation_overrides AS regexValidationOverrides,
+        preset_block_index AS presetBlockIndex,
         draft_source_blob AS draftSourceBlob, p.draft_storage_path AS draftStoragePath,
         ${PROJECT_TITLE_COLUMNS}
       FROM projects p WHERE p.id = ?
@@ -378,6 +312,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
       originalModuleJson?: string | null;
       draftModuleJson?: string | null;
       regexValidationOverrides?: string | null;
+      presetBlockIndex?: number | null;
       draftSourceBlob?: Uint8Array | null;
       draftStoragePath?: string | null;
       originalName?: string | null;
@@ -385,6 +320,7 @@ export function createExportService({ database, clock, targetLanguage, review, s
     } | undefined;
     if (!project) throw new ProjectWorkflowError('项目不存在。', 404);
 
+    const presetBlockIndex = typeof project.presetBlockIndex === 'number' ? project.presetBlockIndex : null;
     await assertProjectCanApply(projectId, true);
     const draft = JSON.parse(project.draftJson || '{}') as Record<string, unknown>;
     const originalModule = project.originalModuleJson
@@ -410,7 +346,10 @@ export function createExportService({ database, clock, targetLanguage, review, s
     assertRisuModuleNamespaceIntegrity(originalModule, draftModule, namespaceSegments, true);
     const exportCard = project.sourceFormat === 'risum' && draftModule
       ? { name: text(draftModule.name) || project.name || '' }
-      : draft;
+      : project.sourceFormat === 'st-preset'
+        // A preset has no `data.name`; `cardName` would fall back to a placeholder.
+        ? { name: text(draft.name) || project.originalName || project.name || '' }
+        : draft;
     const exportName = sanitizeFilename(cardExportName(
       exportCard,
       project.originalName || project.name || '',
@@ -455,6 +394,28 @@ export function createExportService({ database, clock, targetLanguage, review, s
         body: writeRisuModule(resourceSource, exportModule),
       };
     }
+    if (project.sourceFormat === 'st-preset') {
+      // The draft holds the translated SillyTavern preset; the `.risup` container
+      // is derived from it here so the translated text lands in the preset.
+      const original = JSON.parse(project.originalJson || '{}') as Record<string, unknown>;
+      const artifacts = buildStPresetArtifacts(original, draft, {
+        ...(presetBlockIndex == null ? {} : { blockIndex: presetBlockIndex }),
+        name: exportName,
+      });
+      if (options.presetBundle) return {
+        contentType: 'application/zip',
+        filename: `${exportName}.conversion.zip`,
+        body: encodeStPresetBundle(original, draft, artifacts),
+      };
+      if (!artifacts.risup) throw new ProjectWorkflowError('预设包含尚未迁移的运行行为，请查看转换报告或下载完整存档包。', 409, {
+        code: 'PRESET_CONVERSION_UNSUPPORTED', issues: artifacts.report.issues,
+      });
+      return {
+        contentType: 'application/octet-stream',
+        filename: `${exportName}.${exportLanguage}.risup`,
+        body: artifacts.risup,
+      };
+    }
     return {
       contentType: 'application/json; charset=utf-8',
       filename: `${exportName}.${exportLanguage}.json`,
@@ -462,7 +423,53 @@ export function createExportService({ database, clock, targetLanguage, review, s
     };
   }
 
+  /**
+   * Refuse to export a draft that still carries a translation written into a
+   * field the scanner now protects. The row itself is ignored from now on, but a
+   * draft saved before the protection list grew keeps the stale value, and the
+   * export path packages the stored draft as-is. Saving rebuilds the draft from
+   * the original plus the rows that are still translatable, so the fix is one
+   * click; re-scanning removes the rows entirely.
+   */
+  async function assertNoStaleProtectedDraftWrite(projectId: string): Promise<void> {
+    const project = await database.prepare(`
+      SELECT original_json AS originalJson, draft_json AS draftJson,
+        original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson
+      FROM projects WHERE id = ?
+    `).get(projectId) as {
+      originalJson?: string; draftJson?: string; originalModuleJson?: string; draftModuleJson?: string;
+    } | undefined;
+    if (!project?.originalJson || !project.draftJson) return;
+    const rows = await database.prepare(`
+      SELECT path_json AS pathJson, path_label AS pathLabel, kind, review_status AS reviewStatus
+      FROM segments
+      WHERE project_id = ? AND review_status = 'approved'
+    `).all(projectId) as Array<Pick<ApplicableSegment, 'pathJson' | 'pathLabel' | 'kind' | 'reviewStatus'>>;
+    if (!rows.length) return;
+    const stale = staleProtectedDraftPaths(
+      JSON.parse(project.originalJson) as Record<string, unknown>,
+      JSON.parse(project.draftJson) as Record<string, unknown>,
+      rows,
+    );
+    if (project.originalModuleJson && project.draftModuleJson) {
+      const moduleRows = rows.filter((row) => JSON.parse(row.pathJson)[0] === '$module')
+        .map((row) => ({ ...row, pathJson: JSON.stringify(JSON.parse(row.pathJson).slice(1)) }));
+      stale.push(...staleProtectedDraftPaths(
+        JSON.parse(project.originalModuleJson) as Record<string, unknown>,
+        JSON.parse(project.draftModuleJson) as Record<string, unknown>,
+        moduleRows,
+      ));
+    }
+    if (!stale.length) return;
+    throw new ProjectWorkflowError(
+      `拒绝导出：草稿里还有 ${stale.length} 处旧扫描写入的受保护字段（例如 ${stale[0]}）。这些字段的保护规则已更新，请先点击“保存”重建草稿，或重新扫描项目删除这些段落后再导出。`,
+      409,
+      { code: 'PROTECTED_PATH_STALE_DRAFT', pathLabel: stale[0], stalePaths: stale.slice(0, 10) },
+    );
+  }
+
   async function assertProjectCanApply(projectId: string, exporting: boolean): Promise<void> {
+    if (exporting) await assertNoStaleProtectedDraftWrite(projectId);
     const languageIssue = await review.projectLanguageBehaviorIssue(projectId);
     if (languageIssue) throw new ProjectWorkflowError(languageIssue, 409);
     const approvedProtectionIssue = await review.approvedSegmentProtectionIssue(projectId);
@@ -600,21 +607,6 @@ export function createExportService({ database, clock, targetLanguage, review, s
   }
 
   return { applyProject, exportProject };
-}
-
-function mergeRuntimeAliases(
-  primary: Record<string, string[]>,
-  secondary: Record<string, string[]>,
-): Record<string, string[]> {
-  const merged: Record<string, string[]> = {};
-  for (const [ownerId, aliases] of [...Object.entries(primary), ...Object.entries(secondary)]) {
-    const current = merged[ownerId] ?? [];
-    for (const alias of aliases) {
-      if (!current.some((item) => item.toLocaleLowerCase() === alias.toLocaleLowerCase())) current.push(alias);
-    }
-    merged[ownerId] = current;
-  }
-  return merged;
 }
 
 function sanitizeFilename(value: string): string {

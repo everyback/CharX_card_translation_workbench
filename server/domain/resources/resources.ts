@@ -325,6 +325,22 @@ function isProtectedResourceJsonKey(key: string): boolean {
   return /^(?:id|uuid|guid|key|code|type|enum|state|mode|class|className|style|path|file|filename|asset|url|src|href|regex|pattern|script|lua|css|html|version|hash|sha|mime|extension)$/iu.test(key);
 }
 
+/**
+ * Re-apply the resource-JSON scan rules to a stored row.
+ *
+ * Resource JSON is walked with the same allowlist while scanning, so a row
+ * stored before those rules changed stays approved and would be written back by
+ * `applyApprovedResourceJson()`. Apply/export re-checks it instead.
+ */
+export function isProtectedResourceJsonSegment(
+  kind: string | undefined,
+  path: Array<string | number>,
+  sourceText: string | undefined,
+): boolean {
+  if (String(kind) !== 'resource-json') return false;
+  return !resourceJsonTextNeedsTranslation(String(sourceText ?? ''), path);
+}
+
 function summarize(sourceFormat: string, sourceFilename: string | null, resources: ResourceItem[]): ResourceInspection {
   return {
     sourceFormat,

@@ -371,6 +371,7 @@ export function WorkbenchPage() {
             onScanProject={scanImportedProject}
             onScanAll={scanAllImportedProjects}
             onClose={() => setImportResults(null)}
+            conversionFormats={['st-preset']}
           />
         )}
         <ProjectLoadingMask loading={projectLoading} progress={projectLoadProgress} />
@@ -515,7 +516,8 @@ export function WorkbenchPage() {
                 onPreviewError: showError,
                 onSaveLuaSyntaxLine: async (pathJson, line, replacement, expectedLine) => {
                   const result = await saveLuaSyntaxLine(project.id, pathJson, line, replacement, expectedLine);
-                  await loadLuaReport(project.id, true);
+                  setReviewFocus(null);
+                  void loadLuaReport(project.id, true);
                   return result;
                 },
                 onOpenExport: () => void saveLuaAndExport(),
@@ -554,6 +556,11 @@ export function WorkbenchPage() {
               },
             }}
             onTabChange={setTab}
+            preset={{
+              onError: showError,
+              onNotice: setNotice,
+              confirm: showUiConfirm,
+            }}
           />
         )}
       </main>

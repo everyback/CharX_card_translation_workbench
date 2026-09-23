@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>鹈鹕骑自行车</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; overflow: hidden; background: #182a38; font-family: system-ui, sans-serif; }
+    .scene { position: relative; width: 100vw; height: 100vh; min-height: 420px; isolation: isolate; }
+    .sky { position: absolute; inset: 0; background: linear-gradient(#9bd6e5 0%, #dff1df 67%, #7ebd89 67%, #4d9866 100%); }
+    .sun { position: absolute; width: 10rem; aspect-ratio: 1; top: 9%; right: 12%; border-radius: 50%; background: #ffe29b; box-shadow: 0 0 0 1.8rem #ffe29b38, 0 0 4rem #ffe29b99; }
+    .cloud { position: absolute; height: 2.6rem; width: 13rem; border-radius: 2rem; background: #ffffffa8; filter: blur(.2px); animation: drift 24s linear infinite; }
+    .cloud::before, .cloud::after { content: ""; position: absolute; border-radius: 50%; background: inherit; }
+    .cloud::before { width: 4.5rem; height: 4.5rem; left: 2rem; bottom: .2rem; }
+    .cloud::after { width: 3.4rem; height: 3.4rem; right: 2rem; bottom: .1rem; }
+    .cloud.one { top: 18%; left: -15rem; }
+    .cloud.two { top: 32%; left: -25rem; transform: scale(.7); animation-delay: -11s; }
+    @keyframes drift { to { transform: translateX(125vw); } }
+    .ground-line { position: absolute; left: 0; right: 0; bottom: 27%; height: .35rem; background: #2f6c51; }
+    svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .bike { transform-origin: 50% 65%; animation: ride 3s ease-in-out infinite; }
+    @keyframes ride { 0%,100% { transform: translateY(0) rotate(-.4deg); } 50% { transform: translateY(-.45rem) rotate(.4deg); } }
+    .wheel { fill: none; stroke: #263746; stroke-width: 8; }
+    .spokes { fill: none; stroke: #78909a; stroke-width: 2; transform-origin: center; animation: spin 1.6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .leg { transform-box: fill-box; transform-origin: top center; animation: pedal 1.6s ease-in-out infinite; }
+    .leg.alt { animation-delay: -.8s; }
+    @keyframes pedal { 0%,100% { transform: rotate(27deg); } 50% { transform: rotate(-27deg); } }
+    .wing { transform-box: fill-box; transform-origin: 80% 20%; animation: flap 1.2s ease-in-out infinite; }
+    @keyframes flap { 0%,100% { transform: rotate(0); } 50% { transform: rotate(-13deg); } }
+    .title { position: absolute; top: 7%; left: 7%; color: #234152; letter-spacing: .08em; }
+    h1 { margin: 0; font-size: clamp(1.5rem, 4vw, 3.4rem); font-weight: 800; }
+    p { margin: .55rem 0 0; color: #386473; font-size: clamp(.8rem, 1.6vw, 1rem); }
+    .caption { position: absolute; bottom: 7%; left: 50%; transform: translateX(-50%); color: #e9f5df; font-size: .85rem; opacity: .8; }
+  </style>
+</head>
+<body>
+  <main class="scene" aria-label="一只鹈鹕骑着自行车穿过草地的动画">
+    <div class="sky"></div><div class="sun"></div><div class="cloud one"></div><div class="cloud two"></div><div class="ground-line"></div>
+    <div class="title"><h1>鹈鹕出发</h1><p>风从湖面吹来，今天也要骑得很远。</p></div>
+    <svg viewBox="0 0 1000 600" role="img" aria-label="鹈鹕骑自行车">
+      <g class="bike">
+        <g transform="translate(270 432)"><circle class="wheel" r="73"/><g class="spokes"><path d="M0-69V69M-69 0H69M-49-49l98 98M49-49l-98 98"/></g></g>
+        <g transform="translate(690 432)"><circle class="wheel" r="73"/><g class="spokes"><path d="M0-69V69M-69 0H69M-49-49l98 98M49-49l-98 98"/></g></g>
+        <path d="M270 432L405 302 520 432 690 432 405 302 345 432" fill="none" stroke="#d05b42" stroke-width="10" stroke-linejoin="round"/>
+        <path d="M520 432l-10 32M345 432l-22 32M500 464h38M306 464h38" stroke="#263746" stroke-width="8" stroke-linecap="round"/>
+        <path d="M403 304l-20-49M383 255h66" stroke="#263746" stroke-width="8" stroke-linecap="round"/>
+        <g class="leg"><path d="M463 292l-22 86 48 43" fill="none" stroke="#d28a50" stroke-width="18" stroke-linecap="round"/><circle cx="489" cy="421" r="9" fill="#263746"/></g>
+        <g class="leg alt"><path d="M493 294l36 67-26 54" fill="none" stroke="#c87945" stroke-width="18" stroke-linecap="round"/><circle cx="497" cy="415" r="9" fill="#263746"/></g>
+        <ellipse cx="464" cy="224" rx="85" ry="96" fill="#f5f0df" stroke="#263746" stroke-width="7"/>
+        <path class="wing" d="M430 214q-66 20-52 93 44 10 78-54z" fill="#dce1d5" stroke="#263746" stroke-width="7"/>
+        <path d="M480 150q22-50 67-40 48 10 78 48l-39 21-42-16-16 54-35-18z" fill="#f5f0df" stroke="#263746" stroke-width="7"/>
+        <path d="M606 156l109 29-9 25-112-8z" fill="#e37c55" stroke="#263746" stroke-width="7"/>
+        <circle cx="573" cy="139" r="7" fill="#263746"/><path d="M560 118q25-25 50 0" fill="none" stroke="#263746" stroke-width="5" stroke-linecap="round"/>
+        <path d="M538 115q-17-36 5-62 14 30 0 57" fill="#e9c75f" stroke="#263746" stroke-width="6"/>
+        <path d="M603 190q-31 15-51 7" fill="none" stroke="#263746" stroke-width="5" stroke-linecap="round"/>
+      </g>
+    </svg>
+    <div class="caption">SVG MOTION STUDY · 02</div>
+  </main>
+</body>
+</html>

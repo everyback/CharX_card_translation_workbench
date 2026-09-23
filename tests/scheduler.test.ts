@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldSplitTranslationBatch } from '../server/domain/translation/translation-errors.js';
-import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments } from '../server/domain/card/card.js';
+import { localTranslationControlFragments, protectText, unchangedCodeSpanFragments, unchangedFilePathFragments, applyCardCustomscriptRegexAlternatives } from '../server/domain/card/card.js';
 import {
   chatCompletionsEndpoint,
   modelsEndpoint,
   readStreamingMessageContent,
   buildRegexWhitespaceProbe,
+  collectCardCustomscriptRegexEntries,
   collectRegexSamplePairs,
   collectRegexCoveragePairs,
   collectRegexLanguageEntries,
@@ -338,6 +339,109 @@ test('stage 2 uses complete match counts even when its evidence is bounded', () 
   assert.equal(entries[0].sourceMatchCount, 250);
   assert.equal(entries[0].draftMatchCount, 250);
   assert.equal(entries[0].coverageRecords?.[0]?.sourceMatches.length, 200);
+});
+
+test('stage 2 collects card customscript regex rules with a distinct path label', () => {
+  const cardRule = { type: 'editdisplay', in: '([”"」])[ \\t]+(?!(?:하고|하는|라고|と|って)(?![가-힣]))', out: '$1\n', ableFlag: false, flag: 'g' };
+  const card = { customscript: [cardRule, { type: 'editprocess', in: '[ \\t]*<(?:img|image)\\s*=', out: '$&' }] };
+  const draftCard = structuredClone(card);
+
+  const entries = collectCardCustomscriptRegexEntries(card, draftCard);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].pathLabel, '卡片.customscript.0.in');
+  assert.equal(entries[0].origin, 'card');
+  assert.equal(entries[0].dynamicDisplay, true);
+  assert.equal(entries[0].runtimePostprocess, false);
+  // Runtime rules carry no static-card samples, exactly like the module surface.
+  assert.deepEqual(entries[0].sourceSamples, []);
+  assert.deepEqual(entries[0].coverageRecords, []);
+  assert.equal(entries[1].pathLabel, '卡片.customscript.1.in');
+  assert.equal(entries[1].dynamicDisplay, false);
+
+  // A card without customscript contributes nothing and must not throw.
+  assert.deepEqual(collectCardCustomscriptRegexEntries({}, {}), []);
+  assert.deepEqual(collectCardCustomscriptRegexEntries({ customscript: [] }, {}), []);
+
+  // A rule already edited by hand is left alone: stage 2 must not build on an unknown draft.
+  const handEdited = structuredClone(card);
+  handEdited.customscript[0].in = '([”"」])[ \\t]*';
+  assert.deepEqual(collectCardCustomscriptRegexEntries(card, handEdited).map((entry) => entry.pathLabel), ['卡片.customscript.1.in']);
+});
+
+test('card customscript adaptation only appends literal alternatives', () => {
+  const pattern = '([”"」])[ \\t]+(?!(?:하고|하는|라고|と|って)(?![가-힣]))(?![A-Za-z-]+=)(?=[“"「『]?[0-9A-Za-z가-힣])';
+  const card = { customscript: [{ type: 'editdisplay', in: pattern, out: '$1\n', flag: 'g', ableFlag: false }] };
+
+  const changes = applyCardCustomscriptRegexAlternatives(card, [{
+    pathLabel: '卡片.customscript.0.in',
+    anchorAlternatives: ['하고', 'と'],
+    additions: ['说', '说道', 'bad|syntax'],
+  }]);
+  assert.deepEqual(changes, [{ pathLabel: '卡片.customscript.0.in', addedAlternatives: ['说', '说道'] }]);
+  const next = String(card.customscript[0].in);
+  assert.match(next, /하고\|하는\|라고\|と\|って\|说\|说道\)/u);
+  // The quantifier, the lookaheads and the output template are byte-for-byte untouched.
+  assert.match(next, /\[ \\t\]\+/u);
+  assert.doesNotMatch(next, /\[ \\t\]\*/u);
+  assert.equal(card.customscript[0].out, '$1\n');
+
+  // Unknown paths and empty additions are ignored rather than throwing.
+  assert.deepEqual(applyCardCustomscriptRegexAlternatives(card, [{
+    pathLabel: '卡片.customscript.9.in', anchorAlternatives: ['하고'], additions: ['x'],
+  }]), []);
+  assert.deepEqual(applyCardCustomscriptRegexAlternatives({ customscript: [] }, [{
+    pathLabel: '卡片.customscript.0.in', anchorAlternatives: ['하고'], additions: ['x'],
+  }]), []);
+  assert.deepEqual(applyCardCustomscriptRegexAlternatives(card, []), []);
+});
+
+test('card customscript regex entries stay additive in the model payload', () => {
+  const cardRule = { type: 'editdisplay', in: '([”"」])[ \\t]+(?=[“"「『]?[0-9])', out: '$1\n', flag: 'g' };
+  const card = { customscript: [cardRule] };
+  const [entry] = collectCardCustomscriptRegexEntries(card, structuredClone(card));
+  const payload = regexLanguagePayloadEntry(entry);
+  assert.equal(payload.pathLabel, '卡片.customscript.0.in');
+  assert.equal(payload.dynamicDisplay, true);
+  assert.equal(Object.hasOwn(payload, 'samples'), false);
+  assert.equal(Object.hasOwn(payload, 'fullCoverage'), false);
+  // The runtime requirement must warn the model off whole-pattern rewrites.
+  assert.match(String(payload.runtimeRequirement), /不得返回完整 pattern/u);
+});
+
+test('card customscript adaptation refuses ambiguous anchor groups instead of guessing', () => {
+  const makeCard = (pattern: string) => ({ customscript: [{ type: 'editdisplay', in: pattern, out: '$1\n', flag: 'g' }] });
+  const propose = (card: { customscript: Array<{ in: string }> }, anchors: string[]) => applyCardCustomscriptRegexAlternatives(card, [{
+    pathLabel: '卡片.customscript.0.in', anchorAlternatives: anchors, additions: ['新增'],
+  }]);
+
+  // Unambiguous: a single literal group receives the new alternative.
+  const plain = makeCard('(?:하고|하는|라고)');
+  assert.deepEqual(propose(plain, ['하고']), [{ pathLabel: '卡片.customscript.0.in', addedAlternatives: ['新增'] }]);
+  assert.equal(plain.customscript[0].in, '(?:하고|하는|라고|新增)');
+
+  // Two literal groups both containing the anchor: refused, nothing changes.
+  const twoGroups = makeCard('(?:하고|하는)(?:x|하고)');
+  assert.deepEqual(propose(twoGroups, ['하고']), []);
+  assert.equal(twoGroups.customscript[0].in, '(?:하고|하는)(?:x|하고)');
+
+  // A nested alternation is a legitimate target: the innermost group that actually lists the
+  // anchor is the one extended, and the extension lands there.
+  const nested = makeCard('^(?:a|(?:하고|하는))$');
+  assert.deepEqual(propose(nested, ['하고']), [{ pathLabel: '卡片.customscript.0.in', addedAlternatives: ['新增'] }]);
+  assert.equal(nested.customscript[0].in, '^(?:a|(?:하고|하는|新增))$');
+
+  // A strict prefix of a sibling alternative would silently narrow matching: refused.
+  const prefix = makeCard('(?:说|说道|하고)');
+  assert.deepEqual(propose(prefix, ['说']), []);
+  assert.equal(prefix.customscript[0].in, '(?:说|说道|하고)');
+
+  // An anchor the model invented is ignored, and non-alternation patterns stay untouched.
+  const unknown = makeCard('(?:하고|하는)');
+  assert.deepEqual(propose(unknown, ['ないた']), []);
+  assert.equal(unknown.customscript[0].in, '(?:하고|하는)');
+  const noGroup = makeCard('하고');
+  assert.deepEqual(propose(noGroup, ['하고']), []);
+  assert.equal(noGroup.customscript[0].in, '하고');
 });
 
 test('stage 2 skips zero-width display rules that cannot have a stable cardinality', () => {

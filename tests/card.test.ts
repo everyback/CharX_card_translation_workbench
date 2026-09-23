@@ -6,16 +6,21 @@ import {
   applyRisuRegexCoverageProposals,
   bilingualModuleName,
   cardExportName,
+  collectRisuRuntimeRegexStructuralDrift,
+  collectRisuUnconsumedProtocolTags,
   controlReferencesInText,
   countRegexMatchesInStrings,
   findRisuRegexAffectedSegmentIds,
   isRegexValidationOverrideActive,
   isRisuDisplayFormattingRegexRule,
   isRisuOutputPostprocessRegexRule,
+  isRisuTriggerEffectFieldPath,
+  isRuntimeScopeRegexRule,
   missingProtectionTokens,
   missingProtectedFragments,
   protectText,
   localTranslationControlFragments,
+  regexStructureFingerprint,
   risuControlLiterals,
   risuControlReferences,
   risuRegexControlLiterals,
@@ -626,6 +631,128 @@ test('coverage regex adaptation keeps aliases added during stage 2', () => {
   assert.equal(module.regex[0].in, current);
 });
 
+test('runtime regex rules refuse a whole-pattern rewrite that only loosens a quantifier', () => {
+  // Regression for the Madoka Magica card: `[ \t]+` -> `[ \t]*` keeps every static
+  // hit but starts swallowing the quote inside <img="...">, breaking every later
+  // asset-display rule at render time. A full-pattern proposal must be refused here.
+  const original = '([”"」])[ \\t]+(?!(?:하고|하는|라고)(?![가-힣]))(?![A-Za-z-]+=)(?=[“"「『]?[0-9A-Za-z가-힣])';
+  const loosened = '([”"」])[ \\t]*(?!(?:하고|하는|라고)(?![가-힣]))(?![A-Za-z-]+=)(?=[“"「『]?[0-9A-Za-z가-힣])';
+  for (const rule of [
+    { type: 'editdisplay', in: original, out: '$1\n' },
+    { type: 'editoutput', in: original, out: '' },
+  ]) {
+    const module = { regex: [structuredClone(rule)] };
+    const changes = applyRisuRegexCoverageProposals(module, [{
+      pathLabel: '模块.regex.0.in', anchorAlternatives: [], additions: [], pattern: loosened,
+    }], { data: { first_mes: '"안녕" 다음' } });
+    assert.deepEqual(changes, [], `${rule.type} must not accept a whole-pattern rewrite`);
+    assert.equal(module.regex[0].in, original);
+  }
+});
+
+test('runtime regex rules keep gaining additive literal alternatives', () => {
+  // The guard must not remove the Chinese-trigger-word capability: additive `|literal`
+  // alternatives stay available for runtime rules, only the whole-pattern rewrite is refused.
+  const original = '([”"」])[ \\t]+(?!(?:하고|하는|라고|と|って)(?![가-힣]))';
+  for (const rule of [
+    { type: 'editdisplay', in: original, out: '$1\n' },
+    { type: 'editoutput', in: original, out: '' },
+  ]) {
+    const module = { regex: [structuredClone(rule)] };
+    const refused = applyRisuRegexCoverageProposals(module, [{
+      pathLabel: '模块.regex.0.in', anchorAlternatives: [], additions: [], pattern: `${original}|x`,
+    }], { data: { first_mes: '"안녕" 다음' } });
+    assert.deepEqual(refused, []);
+    assert.equal(module.regex[0].in, original);
+
+    const additive = applyRisuRegexAlternativeProposals(module, [{
+      pathLabel: '模块.regex.0.in',
+      anchorAlternatives: ['하고', 'と'],
+      additions: ['说', '说道', 'bad|syntax'],
+    }]);
+    assert.deepEqual(additive, [{ pathLabel: '模块.regex.0.in', addedAlternatives: ['说', '说道'] }]);
+    assert.match(module.regex[0].in, /하고\|하는\|라고\|と\|って\|说\|说道\)/u);
+    assert.doesNotMatch(module.regex[0].in, /\[ \\t\]\*/u);
+    assert.equal(isRuntimeScopeRegexRule(rule), true);
+  }
+});
+
+test('non-runtime rules still accept a valid full-coverage pattern', () => {
+  // The guard is scoped to runtime rules only. Plain rules keep the existing capability,
+  // including the documented spacing adaptation for Chinese no-space writing.
+  const original = '([”"」])[ \\t]+(?=[“"「『]?[0-9A-Za-z가-힣])';
+  const module = { regex: [{ in: original, out: '$1' }] };
+  const candidate = '([”"」])[ \\t]*(?=[“"「『]?[0-9A-Za-z가-힣一-鿿])';
+  const changes = applyRisuRegexCoverageProposals(module, [{
+    pathLabel: '模块.regex.0.in', anchorAlternatives: [], additions: [], pattern: candidate,
+  }], { data: { first_mes: '"안녕" 다음' } });
+  assert.equal(changes.length, 1);
+  assert.equal(module.regex[0].in, candidate);
+  assert.equal(isRuntimeScopeRegexRule(module.regex[0]), false);
+});
+
+test('regex structure fingerprint separates quantifiers, classes, escapes and assertions', () => {
+  const pattern = '([”"」])[ \\t]+(?!(?:하고|と)(?![가-힣]))(?![A-Za-z-]+=)(?=[“"「『]?[0-9])';
+  const fingerprint = regexStructureFingerprint(pattern);
+  // One entry per quantified atom, so a loosened quantifier cannot hide behind another.
+  assert.deepEqual(fingerprint.quantifiers.sort(), ['[ \\t]+', '[A-Za-z-]+', '[“"「『]?'].sort());
+  assert.ok(fingerprint.characterClasses.includes('[ \\t]'));
+  assert.ok(fingerprint.characterClasses.includes('[”"」]'));
+  assert.ok(fingerprint.characterClasses.includes('[가-힣]'));
+  assert.ok(fingerprint.characterClasses.includes('[0-9]'));
+  // Escapes inside a character class belong to that class; standalone escapes are tracked separately.
+  assert.deepEqual(fingerprint.escapes, []);
+  assert.deepEqual(regexStructureFingerprint('[\\t]\\s\\d').escapes.sort(), ['\\d', '\\s'].sort());
+  assert.deepEqual(regexStructureFingerprint('[\\t]\\s\\d').characterClasses, ['[\\t]']);
+  assert.deepEqual(fingerprint.assertions.sort(), ['(?=', '(?!'].sort());
+
+  // Quantifier-only loosening: the class list and escapes stay identical.
+  const loosened = regexStructureFingerprint(pattern.replace('[ \\t]+', '[ \\t]*'));
+  assert.deepEqual(loosened.characterClasses, fingerprint.characterClasses);
+  assert.deepEqual(loosened.escapes, fingerprint.escapes);
+  assert.deepEqual(loosened.assertions, fingerprint.assertions);
+  assert.notDeepEqual(loosened.quantifiers, fingerprint.quantifiers);
+  // The fingerprint is stable for a character class that merely gains ranges.
+  assert.deepEqual(regexStructureFingerprint('a{2,3}').quantifiers, ['a{2,3}']);
+});
+
+test('runtime regex structural drift warns on quantifier and assertion changes only', () => {
+  const original = '([”"」])[ \\t]+(?=[“"「『]?[0-9A-Za-z])';
+  const originalModule = { regex: [{ type: 'editdisplay', in: original, out: '$1\n' }] };
+
+  // The Madoka regression: quantifier loosened, everything else untouched.
+  const loosened = { regex: [{ type: 'editdisplay', in: original.replace('[ \\t]+', '[ \\t]*'), out: '$1\n' }] };
+  const drift = collectRisuRuntimeRegexStructuralDrift(originalModule, loosened);
+  assert.equal(drift.length, 1);
+  assert.equal(drift[0].kind, 'quantifier');
+  assert.deepEqual(drift[0].removed, ['[ \\t]+']);
+  assert.deepEqual(drift[0].added, ['[ \\t]*']);
+  assert.match(drift[0].message, /量词发生变化/);
+  assert.equal(drift[0].pathLabel, '模块.regex.0.in');
+
+  // A pure target-language character-range extension is still reported (advisory), and
+  // is reported as a character-class change rather than a quantifier change.
+  const extended = { regex: [{ type: 'editdisplay', in: '([”"」])[ \\t]+(?=[“"「『]?[0-9A-Za-z一-鿿])', out: '$1\n' }] };
+  const extendedDrift = collectRisuRuntimeRegexStructuralDrift(originalModule, extended);
+  assert.equal(extendedDrift.length, 1);
+  assert.equal(extendedDrift[0].kind, 'character-class');
+  assert.ok(extendedDrift[0].added.includes('[0-9A-Za-z一-鿿]'));
+  assert.deepEqual(extendedDrift[0].removed, ['[0-9A-Za-z]']);
+
+  // Additive alternatives are not structural drift.
+  const additive = { regex: [{ type: 'editdisplay', in: original.replace('(?=[“"「『]?[0-9A-Za-z])', '(?=[“"「『]?[0-9A-Za-z])'), out: '$1\n' }] };
+  assert.deepEqual(collectRisuRuntimeRegexStructuralDrift(originalModule, additive), []);
+
+  // Non-runtime rules are out of scope: plain rules keep their adaptation freedom.
+  const plainOriginal = { regex: [{ in: original, out: '$1' }] };
+  const plainDraft = { regex: [{ in: original.replace('[ \\t]+', '[ \\t]*'), out: '$1' }] };
+  assert.deepEqual(collectRisuRuntimeRegexStructuralDrift(plainOriginal, plainDraft), []);
+
+  // A missing or unchanged draft module produces nothing.
+  assert.deepEqual(collectRisuRuntimeRegexStructuralDrift(originalModule, null), []);
+  assert.deepEqual(collectRisuRuntimeRegexStructuralDrift(originalModule, originalModule), []);
+});
+
 test('Risu control validation allows additive aliases with zero-width UI render rules', () => {
   const originalCard = {
     data: {
@@ -651,6 +778,84 @@ test('Risu control validation allows additive aliases with zero-width UI render 
   assert.match(validateRisuControlReferences(
     originalCard, draftCard, originalModule, changedModule,
   )[0].message, /正则输入模式已改动/);
+});
+
+test('unconsumed protocol tags are reported only when other tags prove the simulation ran', () => {
+  // Working card: the display rule rewrites every <img="..."> so nothing is reported.
+  const workingDisplay = { type: 'editdisplay', flag: 'g', in: '<img="([^"]+)">', out: '<img src="{{raw::$1}}">' };
+  const working = { customscript: [workingDisplay] };
+  assert.deepEqual(collectRisuUnconsumedProtocolTags(working, [{ pathLabel: '卡片.firstMessage', text: '<img="kyoko_normal_smug">' }]), []);
+
+  // Broken display rule (the Madoka shape: a display rule the card relies on no longer matches
+  // the emitted tag). One tag is consumed, proving the simulation ran; the other survives and
+  // must be reported.
+  const consumedRule = { type: 'editdisplay', flag: 'g', in: '<bg="([^"]+)">', out: '<section data-bg="$1">背景</section>' };
+  const brokenDisplay = {
+    type: 'editdisplay', flag: 'g', ableFlag: false,
+    // No longer spans the asset-name shape the card emits, mirroring the live card.
+    in: '<img="(kyoko_[^"\n<>]+)">', out: '<img src="{{raw::$1}}">',
+  };
+  const broken = { customscript: [consumedRule, brokenDisplay] };
+  const findings = collectRisuUnconsumedProtocolTags(broken, [
+    { pathLabel: '卡片.firstMessage', text: '<bg="room">\n\n<img="kyoko_normal_smug">\n\n<img="madoka_normal_smug">' },
+  ]);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].pathLabel, '卡片.firstMessage');
+  assert.equal(findings[0].count, 3);
+  assert.equal(findings[0].unconsumed, 1);
+  assert.equal(findings[0].tag, '<img="madoka_normal_smug">');
+  assert.match(findings[0].message, /仍有 1 个以标签形式残留/u);
+
+  // A rule that fires on ordinary prose elsewhere in the sample is not a protocol finding: it
+  // consumes no tag, so nothing survives as a tag and nothing is reported. This is also the
+  // documented limitation — a rule that mangles a tag *inside itself* would be reported as a
+  // mangled survivor, which is why the report names the surviving text instead of guessing.
+  const proseOnly = { type: 'editdisplay', flag: 'g', ableFlag: false, in: '前置文本', out: '前景文字' };
+  assert.deepEqual(collectRisuUnconsumedProtocolTags({ customscript: [proseOnly, workingDisplay] }, [
+    { pathLabel: '卡片.firstMessage', text: '前置文本\n\n<img="kyoko_normal_smug">' },
+  ]), []);
+
+  // A mangled survivor is reported with its actual shape, not the original tag.
+  const mangler = { type: 'editdisplay', flag: 'g', ableFlag: false, in: '(")', out: '$1\n' };
+  const mangled = collectRisuUnconsumedProtocolTags({ customscript: [mangler, workingDisplay] }, [
+    { pathLabel: '卡片.firstMessage', text: '前置文本\n\n<img="kyoko_normal_smug">' },
+  ]);
+  assert.equal(mangled.length, 1);
+  assert.equal(mangled[0].unconsumed, 1);
+  assert.match(mangled[0].tag, /^<img="/u);
+
+  // A card whose only display rule already handles the tag reports nothing.
+  assert.deepEqual(collectRisuUnconsumedProtocolTags(working, [
+    { pathLabel: '卡片.firstMessage', text: '前置文本\n\n<img="kyoko_normal_smug">' },
+  ]), []);
+
+  // A simulation that consumed nothing at all must stay silent: the rules may need CBS
+  // expansion or a different input shape, and silence is safer than noise.
+  const noEvidence = { customscript: [{ type: 'editdisplay', flag: 'g', in: '<unrelated ([^>]+)>', out: '' }] };
+  assert.deepEqual(collectRisuUnconsumedProtocolTags(noEvidence, [{ pathLabel: 's', text: '<img="a">' }]), []);
+
+  // Only `editdisplay` participates: an `editprocess` rule cannot make a tag render.
+  const processOnly = { customscript: [{ type: 'editprocess', flag: 'g', in: '<img="([^"]+)">', out: '' }] };
+  assert.deepEqual(collectRisuUnconsumedProtocolTags(processOnly, [{ pathLabel: 's', text: '<img="a">' }]), []);
+
+  // Cards without display rules, and empty samples, produce nothing.
+  assert.deepEqual(collectRisuUnconsumedProtocolTags({}, [{ pathLabel: 's', text: '<img="a">' }]), []);
+  assert.deepEqual(collectRisuUnconsumedProtocolTags(working, []), []);
+  assert.deepEqual(collectRisuUnconsumedProtocolTags(working, [{ pathLabel: 's', text: 'no tags here' }]), []);
+
+  // A rule without the `g` flag still counts as consumption for its single match.
+  const single = { customscript: [{ type: 'editdisplay', flag: '', ableFlag: false, in: '<img="([^"]+)">', out: '<img src="$1">' }] };
+  assert.deepEqual(collectRisuUnconsumedProtocolTags(single, [{ pathLabel: 's', text: '<img="a">' }]), []);
+});
+
+test('protocol regression ignores CBS-dependent and directive rules instead of guessing', () => {
+  const samples = [{ pathLabel: '卡片.firstMessage', text: '<img="a">' }];
+  // `<cbs>` patterns are expanded by Risu before the rule runs, so the raw regex cannot match.
+  const cbsRule = { type: 'editdisplay', flag: '<cbs><order -100>', ableFlag: true, in: '{{#if {{equal::1::1}}}}<img="([^"]+)">{{/if}}', out: '' };
+  assert.deepEqual(collectRisuUnconsumedProtocolTags({ customscript: [cbsRule] }, samples), []);
+  // Directive replacements are control instructions, not display output.
+  const directiveRule = { type: 'editdisplay', flag: 'g', in: '<img="([^"]+)">', out: '@@emo test' };
+  assert.deepEqual(collectRisuUnconsumedProtocolTags({ customscript: [directiveRule] }, samples), []);
 });
 
 test('approved replacements preserve protocol shells while translating slots', () => {
@@ -814,6 +1019,218 @@ test('Risu module namespace stays out of ordinary translation candidates', () =>
   const namespace = segments.find((segment) => segment.path.at(-1) === 'namespace');
   assert.equal(namespace, undefined);
   assert.equal(segments.some((segment) => segment.sourceText === 'Translatable metadata'), true);
+});
+
+test('Risu trigger copies are scanned instead of being dropped as script paths', () => {
+  const module = {
+    trigger: [
+      { comment: '', type: 'manual', effect: [{ type: 'v2Header', code: '' }] },
+      {
+        comment: 'A',
+        type: 'manual',
+        effect: [{ type: 'v2Impersonate', role: 'user', value: '🕊️ 학교의 평범한 모범생을 선택했습니다.', valueType: 'value' }],
+      },
+    ],
+  };
+
+  // `trigger` sits on the generic protected-path list, and the message is plain
+  // prose rather than markup, so it used to vanish at every scope even though the
+  // chat posts it verbatim.
+  assert.deepEqual(scanRisuModule(module, 'standard'), []);
+  assert.deepEqual(scanRisuModule(module, 'lua-only'), []);
+
+  for (const scope of ['visible-scripts', 'all-visible', 'all'] as const) {
+    const segment = scanRisuModule(module, scope).find((entry) => entry.sourceText.startsWith('🕊️'));
+    assert.ok(segment, `expected a trigger segment at scope ${scope}`);
+    assert.deepEqual(segment.path, ['$module', 'trigger', 1, 'effect', 0, 'value']);
+    assert.equal(segment.category, 'script-ui');
+    assert.equal(segment.kind, 'field');
+    assert.equal(segment.start, null);
+  }
+});
+
+test('Risu trigger condition operands stay protected while effect copy translates', () => {
+  const module = {
+    trigger: [{
+      conditions: [{ type: 'var', value: '체력' }],
+      effect: [{ type: 'v2Impersonate', role: 'user', value: '체력이 부족합니다.' }],
+    }],
+  };
+
+  const segments = scanRisuModule(module, 'all');
+  assert.equal(segments.some((segment) => segment.sourceText === '체력'), false);
+  assert.ok(segments.some((segment) => segment.sourceText === '체력이 부족합니다.'));
+
+  // Only the `effect` slot is copy; condition operands are runtime comparisons.
+  assert.equal(isRisuTriggerEffectFieldPath(['$module', 'trigger', 0, 'conditions', 0, 'value']), false);
+  assert.equal(isRisuTriggerEffectFieldPath(['$module', 'trigger', 0, 'effect', 0, 'value']), true);
+  assert.equal(isRisuTriggerEffectFieldPath(['trigger', 0, 'effect', 0, 'value']), true);
+  assert.equal(isRisuTriggerEffectFieldPath(['$module', 'trigger', 0, 'effect', 0, 'valueType']), true);
+});
+
+/**
+ * The scanner must not offer runtime data to the translator. These shapes are the
+ * reason trigger scanning is gated by effect type instead of by the field name
+ * `value`: translating any of them changes behaviour with no error anywhere.
+ */
+test('Risu trigger runtime data never becomes a translation candidate', () => {
+  const effects: Array<Record<string, unknown>> = [
+    // `if (value === 'user' || …)` decides the request role.
+    { type: 'v2SetRequestStateRole', value: 'user', valueType: 'value', index: '0', indexType: 'value' },
+    // `valueType: 'var'` makes `value` a variable *name* resolved by getVar().
+    { type: 'v2SetVar', operator: '=', var: 'hp', value: '체력', valueType: 'var' },
+    // Variable name even on an allowlisted type.
+    { type: 'v2Impersonate', role: 'user', value: '선택메시지', valueType: 'var' },
+    // Risu command syntax.
+    { type: 'v2Command', value: '/setvar 체력 10', valueType: 'value' },
+    // The selected entry of this list is stored as the trigger result.
+    { type: 'v2GetAlertSelect', display: '고르세요', displayType: 'var', value: '평범한 모범생|최적화 몸매', valueType: 'value' },
+    // v1 spellings of effects that carry runtime data rather than copy.
+    { type: 'setvar', operator: '=', var: 'hp', value: '체력수치' },
+    { type: 'command', value: '/setvar 체력 10' },
+    { type: 'runtrigger', value: '체력트리거' },
+  ];
+  const module = { trigger: effects.map((effect) => ({ comment: 'x', type: 'manual', effect: [effect] })) };
+
+  assert.deepEqual(scanRisuModule(module, 'all'), []);
+});
+
+test('Risu trigger copy allowlist covers player-visible fields only', () => {
+  const cases: Array<{ effect: Record<string, unknown>; text: string }> = [
+    { effect: { type: 'v2Impersonate', role: 'user', value: '메시지 본문', valueType: 'value' }, text: '메시지 본문' },
+    { effect: { type: 'v2SystemPrompt', location: 'start', value: '시스템 프롬프트', valueType: 'value' }, text: '시스템 프롬프트' },
+    { effect: { type: 'v2ShowAlert', value: '경고 문구', valueType: 'value' }, text: '경고 문구' },
+    { effect: { type: 'v2SetAuthorNote', value: '작가 노트', valueType: 'value' }, text: '작가 노트' },
+    { effect: { type: 'v2SetReplaceGlobalNote', value: '전역 노트', valueType: 'value' }, text: '전역 노트' },
+    // alertSelect keeps its prompt in `display`; `value` is the option payload.
+    { effect: { type: 'v2GetAlertSelect', display: '무엇을 고르시겠습니까', displayType: 'value', value: 'A|B', valueType: 'value' }, text: '무엇을 고르시겠습니까' },
+    // RisuAI still ships the v1 effect union, and older cards use it.
+    { effect: { type: 'impersonate', role: 'user', value: '브라우저 메시지' }, text: '브라우저 메시지' },
+    { effect: { type: 'systemprompt', location: 'start', value: '시스템 지시문' }, text: '시스템 지시문' },
+    { effect: { type: 'showAlert', alertType: 'text', value: '경고 문구', inputVar: '' }, text: '경고 문구' },
+  ];
+
+  for (const item of cases) {
+    const segments = scanRisuModule({ trigger: [{ effect: [item.effect] }] }, 'all');
+    assert.ok(
+      segments.some((segment) => segment.sourceText === item.text),
+      `expected ${String(item.effect.type)} to expose copy`,
+    );
+  }
+
+  // Author comments are not shown to the player, so they are deliberately out.
+  assert.deepEqual(scanRisuModule({ trigger: [{ effect: [{ type: 'v2Comment', value: '설명 주석' }] }] }, 'all'), []);
+});
+
+test('markup-bearing trigger copy keeps script text extraction', () => {
+  const module = {
+    trigger: [{
+      effect: [{ type: 'v2Impersonate', role: 'user', value: '<b>학교의 모범생</b>을 선택했습니다.' }],
+    }],
+  };
+
+  // Values that already carry markup keep the HTML extractor's text nodes; the
+  // raw tag soup is never offered to the model as one field.
+  const segments = scanRisuModule(module, 'visible-scripts');
+  assert.ok(segments.some((segment) => segment.kind === 'text-node' && segment.sourceText === '학교의 모범생'));
+  assert.equal(segments.some((segment) => segment.kind === 'field'), false);
+});
+
+test('trigger input prompts translate while HTML-shaped variable names and runtime data stay protected', () => {
+  const module = { trigger: [{ effect: [
+    { type: 'v2GetAlertInput', display: '이름을 입력하세요.', displayType: 'value' },
+    { type: 'v2GetAlertInput', display: '<b>변수 이름</b>', displayType: 'var' },
+    { type: 'v2Impersonate', value: '<b>변수 이름</b>', valueType: 'var' },
+    { type: 'v2SetVar', value: '{{button::선택::go}}', valueType: 'value' },
+    { type: 'v2GetAlertSelect', display: '{{button::변수 이름::go}}', displayType: 'var', value: '<b>선택 목록</b>' },
+  ] }] };
+  for (const scope of ['visible-scripts', 'all-visible', 'all'] as const) {
+    const segments = scanRisuModule(module, scope);
+    assert.deepEqual(segments.map((segment) => segment.sourceText), ['이름을 입력하세요.']);
+    const draft = applyRisuModuleSegments(module, segments.map((segment) => ({
+      ...segment, pathJson: JSON.stringify(segment.path), translatedText: '请输入姓名。', reviewStatus: 'approved',
+    }))).draft;
+    const expected = structuredClone(module);
+    expected.trigger[0].effect[0].display = '请输入姓名。';
+    assert.deepEqual(draft, expected);
+  }
+});
+
+test('trigger prose around buttons and nested macros survives scan and reviewed writeback', () => {
+  const source = '안녕하세요 {{button::선택하기::go}} {{#if {{equal::{{getvar::state}}::준비}}}}계속하세요{{/if}}';
+  const module = { trigger: [{ effect: [{ type: 'v2Impersonate', value: source, valueType: 'value' }] }] };
+  const segments = scanRisuModule(module, 'all');
+  assert.deepEqual(segments.map((segment) => segment.sourceText).sort(), ['안녕하세요', '선택하기', '계속하세요'].sort());
+  const translations: Record<string, string> = { '안녕하세요': '你好', '선택하기': '选择', '계속하세요': '请继续' };
+  const rows = segments.map((segment) => ({
+    ...segment, pathJson: JSON.stringify(segment.path), translatedText: translations[segment.sourceText], reviewStatus: 'approved',
+  }));
+  const result = applyRisuModuleSegments(module, rows).draft as typeof module;
+  assert.equal(result.trigger[0].effect[0].value,
+    '你好 {{button::选择::go}} {{#if {{equal::{{getvar::state}}::준비}}}}请继续{{/if}}');
+  assert.deepEqual(applyRisuModuleSegments(module, rows.map((row) => ({ ...row, reviewStatus: 'pending' }))).draft, module);
+});
+
+test('trigger buttons inside macro operands stay protected while conditional body buttons translate', () => {
+  const condition = '{{#if {{equal::{{getvar::state}}::{{button::조건 선택::hidden}}}}}}';
+  for (const html of [false, true]) {
+    const body = '안녕하세요 {{button::선택하기::go}}';
+    const value = condition + (html ? `<div>${body}</div>` : body) + '{{/if}}';
+    const module = { trigger: [{ effect: [{ type: 'v2Impersonate', value, valueType: 'value' }] }] };
+    for (const scope of ['visible-scripts', 'all-visible', 'all'] as const) {
+      const segments = scanRisuModule(module, scope);
+      assert.deepEqual(segments.map((segment) => segment.sourceText).sort(), ['안녕하세요', '선택하기'].sort());
+      const rows = segments.map((segment) => ({
+        ...segment, pathJson: JSON.stringify(segment.path),
+        translatedText: segment.kind === 'button' ? '选择' : '你好', reviewStatus: 'approved',
+      }));
+      const draft = applyRisuModuleSegments(module, rows).draft as typeof module;
+      assert.equal(draft.trigger[0].effect[0].value,
+        condition + (html ? '<div>你好 {{button::选择::go}}</div>' : '你好 {{button::选择::go}}') + '{{/if}}');
+    }
+  }
+});
+
+test('unclosed trigger macros protect their entire tail including button and HTML candidates', () => {
+  for (const tail of [
+    '{{getvar::name {{button::선택하기::go}}',
+    '{{getvar::name <b>숨겨진 문구</b> {{button::선택하기::go}}',
+    '{{button::미완성 버튼::go',
+  ]) {
+    const module = { trigger: [{ effect: [{ type: 'v2Impersonate', value: tail, valueType: 'value' }] }] };
+    assert.deepEqual(scanRisuModule(module, 'all'), []);
+  }
+  const tail = '{{getvar::name {{button::선택하기::go}}';
+  const module = { trigger: [{ effect: [{ type: 'v2Impersonate', value: `안녕하세요 ${tail}`, valueType: 'value' }] }] };
+  const segments = scanRisuModule(module, 'all');
+  assert.deepEqual(segments.map((segment) => segment.sourceText), ['안녕하세요']);
+  const draft = applyRisuModuleSegments(module, segments.map((segment) => ({
+    ...segment, pathJson: JSON.stringify(segment.path), translatedText: '你好', reviewStatus: 'approved',
+  }))).draft as typeof module;
+  assert.equal(draft.trigger[0].effect[0].value, `你好 ${tail}`);
+});
+
+test('unknown and inherited trigger types are ignored without aborting valid copy scanning', () => {
+  for (const type of ['constructor', 'toString', '__proto__', 'unknownEffect']) {
+    const module = { trigger: [{ effect: [
+      { type, value: '<b>실행 데이터</b>' },
+      { type: 'v2Impersonate', value: '메시지 본문', valueType: 'value' },
+    ] }] };
+    assert.deepEqual(scanRisuModule(module, 'all').map((segment) => segment.sourceText), ['메시지 본문']);
+  }
+});
+
+test('module writeback rejects stored runtime fields and variable references including ranged rows', () => {
+  const module = { trigger: [{ effect: [{ type: 'v2Impersonate', role: 'user', value: '<b>변수 이름</b>', valueType: 'var' }] }] };
+  const rows = ['type', 'role', 'valueType', 'value'].map((field) => ({
+    pathJson: JSON.stringify(['$module', 'trigger', 0, 'effect', 0, field]),
+    pathLabel: field, kind: 'field' as const, start: null, end: null,
+    translatedText: '错误译文', reviewStatus: 'approved',
+  }));
+  assert.deepEqual(applyRisuModuleSegments(module, rows).draft, module);
+  assert.deepEqual(applyRisuModuleSegments(module, [{
+    ...rows[3], kind: 'text-node', sourceText: '변수 이름', start: 3, end: 8,
+  }]).draft, module);
 });
 
 test('Risu module runtime prompts are opt-in script segments', () => {
@@ -993,6 +1410,32 @@ test('Risu module application accepts scanner-owned module paths', () => {
   }]);
 
   assert.equal(result.draft.name, '翻译后的模块名');
+});
+
+test('approved trigger copy is written back into the module', () => {
+  const module = {
+    trigger: [{
+      comment: 'A',
+      type: 'manual',
+      effect: [{ type: 'v2Impersonate', role: 'user', value: '🕊️ 학교의 평범한 모범생을 선택했습니다.', valueType: 'value' }],
+    }],
+  };
+  const result = applyRisuModuleSegments(module, [{
+    pathJson: JSON.stringify(['trigger', 0, 'effect', 0, 'value']),
+    sourceText: '🕊️ 학교의 평범한 모범생을 선택했습니다.',
+    start: null,
+    end: null,
+    translatedText: '🕊️ 已选择学校里平凡的模范生。',
+    finalText: null,
+    reviewStatus: 'approved',
+  }]);
+  const effect = (result.draft.trigger as Array<{ effect: Array<Record<string, unknown>> }>)[0].effect[0];
+
+  assert.equal(effect.value, '🕊️ 已选择学校里平凡的模范生。');
+  // The impersonation role and effect type are runtime structure, not copy.
+  assert.equal(effect.role, 'user');
+  assert.equal(effect.type, 'v2Impersonate');
+  assert.deepEqual(result.syntaxIssues, []);
 });
 
 test('Risu module application translates namespace and synchronizes internal asset protocols', () => {

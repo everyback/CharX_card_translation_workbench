@@ -1,4 +1,5 @@
 import { parse } from 'luaparse';
+import { locateLuaSourceLine, luaSourceReference } from './syntax-context.js';
 import {
   applyApprovedSegments,
   isLuaModuleCodePath,
@@ -13,6 +14,9 @@ export interface LuaSyntaxIssue {
   line?: number;
   column?: number;
   sourceLine?: string;
+  sourceLineNumber?: number;
+  sourceReferenceLine?: number;
+  sourceContextLines?: Array<{ line: number; text: string }>;
   draftLine?: string;
   /** Raw code surrounding the parser location, never inferred from translation segments. */
   contextLines?: Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }>;
@@ -946,8 +950,11 @@ export function validateRisuLuaChanges(
       const column = typeof diagnostic.column === 'number' ? diagnostic.column : undefined;
       const sourceLines = source.replace(/\r\n/gu, '\n').split('\n');
       const draftLines = candidate.replace(/\r\n/gu, '\n').split('\n');
+      const sourceLineNumber = line ? locateLuaSourceLine(sourceLines, draftLines, line) : undefined;
+      const sourceReferenceLine = line ? sourceLineNumber ?? luaSourceReference(sourceLines, draftLines, line) : undefined;
+      const sourceContextLines = sourceReferenceLine ? sourceLines.slice(Math.max(0, sourceReferenceLine - 6), sourceReferenceLine + 5).map((text, index) => ({ line: Math.max(1, sourceReferenceLine - 5) + index, text })) : undefined;
       const contextLines = line
-        ? buildLuaSyntaxContext(sourceLines, draftLines, line)
+        ? buildLuaSyntaxContext(sourceLines, draftLines, line, sourceLineNumber)
         : undefined;
       issues.push({
         pathJson,
@@ -955,7 +962,10 @@ export function validateRisuLuaChanges(
         message: error instanceof Error ? error.message : String(error),
         line,
         column,
-        sourceLine: line ? sourceLines[line - 1] : undefined,
+        sourceLine: sourceLineNumber ? sourceLines[sourceLineNumber - 1] : undefined,
+        sourceLineNumber,
+        sourceReferenceLine,
+        sourceContextLines,
         draftLine: line ? draftLines[line - 1] : undefined,
         contextLines,
       });
@@ -968,6 +978,7 @@ function buildLuaSyntaxContext(
   sourceLines: string[],
   draftLines: string[],
   errorLine: number,
+  sourceLineNumber?: number,
 ): Array<{ line: number; sourceLine: string; draftLine: string; errorLine: boolean }> {
   // Keep the response bounded while giving the editor enough nearby code for
   // cases where the parser points at a symptom several lines after the cause.
@@ -978,7 +989,7 @@ function buildLuaSyntaxContext(
   for (let line = start; line <= end; line += 1) {
     result.push({
       line,
-      sourceLine: sourceLines[line - 1] ?? '',
+      sourceLine: sourceLineNumber ? sourceLines[sourceLineNumber - 1 + line - errorLine] ?? '' : '',
       draftLine: draftLines[line - 1] ?? '',
       errorLine: line === errorLine,
     });
