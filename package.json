@@ -1,6 +1,6 @@
 {
   "name": "card-translation-workbench",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -72,6 +72,7 @@
       "dist-electron/**/*",
       "dist/**/*",
       "dist-server/**/*",
+      "patches/risuai/**/*",
       "package.json",
       "!**/*.map",
       "!tests/**",
