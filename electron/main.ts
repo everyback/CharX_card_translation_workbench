@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -22,6 +22,15 @@ let loadingWindow: BrowserWindow | null = null;
 let server: WorkbenchServerModule | null = null;
 let serverPort: number | null = null;
 let shuttingDown = false;
+
+ipcMain.handle('cardloom:select-patch-root', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 RisuAI 安装目录',
+    properties: ['openDirectory'],
+  });
+  return result.canceled ? null : result.filePaths[0] ?? null;
+});
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -75,10 +84,13 @@ async function boot(): Promise<void> {
   });
 
   process.env.WORKBENCH_EMBEDDED = '1';
+  process.env.WORKBENCH_PATCH_AGENT = '1';
+  process.env.WORKBENCH_PATCH_ALLOW_RUNTIME_ROOTS = '1';
   process.env.WORKBENCH_HOST = '127.0.0.1';
   process.env.WORKBENCH_DATA_DIR = data;
   process.env.WORKBENCH_WEB_DIR = webRoot;
   process.env.WORKBENCH_NODE_MODULES_DIR = nodeModulesRoot;
+  process.env.WORKBENCH_PATCH_INSTALLER_PATH = path.join(root, 'patches', 'risuai', 'install.mjs');
 
   await loadingStage(16, 48, '初始化本地数据库', async () => {
     server = await import(pathToFileURL(serverEntry).href) as WorkbenchServerModule;
@@ -113,6 +125,7 @@ async function boot(): Promise<void> {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(root, 'dist-electron', 'preload.js'),
     },
   });
   mainWindow.on('closed', () => { mainWindow = null; });

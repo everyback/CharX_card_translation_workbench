@@ -1,0 +1,77 @@
+.patch-console { width: min(1240px, 100%); padding: 24px 28px 48px; }
+.patch-console [hidden] { display: none !important; }
+.patch-console button { cursor: pointer; }
+.patch-console button:disabled { cursor: not-allowed; opacity: .5; }
+.patch-console button:focus-visible, .patch-console summary:focus-visible { outline: 2px solid #176b62; outline-offset: 3px; }
+.patch-page-tabs { display: flex; gap: 24px; border-bottom: 1px solid #d5ddda; margin: 22px 0; overflow-x: auto; }
+.patch-page-tabs button { flex: 0 0 auto; border: 0; border-bottom: 3px solid transparent; background: none; padding: 12px 0; font-size: 13px; color: #697571; }
+.patch-page-tabs button[aria-current] { color: #176b62; border-bottom-color: #176b62; font-weight: 650; }
+.patch-location { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 20px; }
+.patch-location button { display: inline-flex; gap: 7px; align-items: center; border: 1px solid #d4ddda; border-radius: 4px; background: #fff; padding: 8px 12px; font-size: 12px; }
+.patch-location button[aria-pressed=true] { background: #263d37; border-color: #263d37; color: #fff; }
+.patch-console .remote-patch-workspace { margin: 0; border: 0; padding: 0; }
+.patch-console .remote-connected { background: #edf3f0; padding: 12px; margin-top: 14px; }
+.patch-console .remote-connected button { white-space: nowrap; }
+.patch-identity { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 18px; font-size: 12px; color: #63736c; overflow-wrap: anywhere; }
+.patch-identity code { min-width: 0; overflow-wrap: anywhere; }
+.patch-subtabs { display: flex; gap: 24px; border-bottom: 1px solid #d9e1dd; margin: 22px 0 0; }
+.patch-subtabs button { border: 0; border-bottom: 2px solid transparent; padding: 10px 0; background: transparent; font-size: 13px; color: #63736c; }
+.patch-subtabs button[aria-selected=true] { color: #1d4c41; border-bottom-color: #176b62; font-weight: 650; }
+.patch-editor-layout { display: grid; grid-template-columns: 238px minmax(0, 1fr); align-items: start; }
+.patch-list { display: grid; align-content: start; border-right: 1px solid #dce4e0; padding: 16px 12px 16px 0; min-height: 460px; gap: 3px; }
+.patch-list button { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; padding: 12px 10px; min-height: 63px; border: 0; border-radius: 4px; color: #63736c; background: none; }
+.patch-list button:hover { background: #edf1ef; }
+.patch-list button[aria-current=true] { background: #e3eeea; color: #125a4b; }
+.patch-list button span { display: grid; gap: 5px; flex: 1; min-width: 0; }
+.patch-list button strong { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.patch-list button small { font-size: 10px; color: #75837d; }
+.patch-list button svg { flex-shrink: 0; }
+.patch-editor { min-width: 0; padding: 24px 0 24px 24px; }
+.patch-editor h3 { font-size: 16px; margin: 0; }
+.patch-description { font-size: 12px; line-height: 1.65; color: #63736c; margin: 12px 0 16px; }
+.patch-section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.patch-section-title h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.patch-badge { display: inline-block; flex: 0 0 auto; padding: 4px 6px; border-radius: 4px; background: #e8edf2; color: #426076; font-size: 11px; }
+.patch-badge.success { color: #176b4c; background: #e4f3e9; }
+.patch-status { font-size: 12px; line-height: 1.6; border-left: 3px solid #628498; padding: 10px 12px; background: #edf2f5; color: #385568; margin: 16px 0; overflow-wrap: anywhere; }
+.patch-status.success { border-color: #2c8b62; background: #edf7f0; color: #216440; }
+.patch-status.error { border-color: #b94b4b; background: #fff1f0; color: #923e3e; }
+.patch-target-controls { border: 0; border-top: 1px solid #dce4e0; padding: 14px 0 0; margin: 20px 0 0; min-width: 0; }
+.patch-target-controls legend { padding: 0 10px 0 0; font-size: 12px; color: #53665d; }
+.patch-console .patch-editor .patch-agent-form { grid-template-columns: minmax(0, 1fr); }
+.patch-console .patch-editor .plugin-install-actions { padding-top: 16px; border-top: 1px solid #dce4e0; }
+.patch-verification, .patch-log { margin-top: 20px; font-size: 12px; color: #586b62; }
+.patch-verification p { line-height: 1.6; }
+.patch-console summary { cursor: pointer; padding: 7px 0; }
+.patch-console .patch-agent-panel { border: 0; padding: 0; background: none; margin: 0; }
+.patch-console .patch-agent-output { max-height: 280px; }
+.patch-history { padding: 20px 0; }
+.patch-history-row { border-bottom: 1px solid #dce4e0; padding: 20px 0; }
+.patch-history-row h4 { margin: 0 0 5px; font-size: 14px; }
+.patch-history-row time { font-size: 11px; color: #748279; }
+.patch-history-row details { color: #66756d; font-size: 12px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.patch-record-file { display: grid; gap: 5px; margin: 10px 0; }
+.patch-facts { display: grid; gap: 10px; font-size: 12px; }
+.patch-facts > div { display: grid; grid-template-columns: 80px minmax(0, 1fr); }
+.patch-facts dt { color: #748279; }
+.patch-facts dd { margin: 0; overflow-wrap: anywhere; }
+.patch-empty { display: grid; justify-items: center; gap: 12px; padding: 54px 20px; color: #6c7b73; font-size: 12px; }
+.patch-empty p { max-width: 450px; margin: 0; line-height: 1.7; text-align: center; }
+.patch-downloads h4 { margin: 0; font-size: 14px; }
+.patch-downloads p { color: #6c7b73; font-size: 12px; }
+@media (max-width: 900px) {
+  .patch-editor-layout { grid-template-columns: 190px minmax(0, 1fr); }
+  .patch-editor { padding-left: 16px; }
+}
+@media (max-width: 620px) {
+  .patch-console { padding: 18px 14px 32px; }
+  .patch-page-tabs { gap: 20px; }
+  .patch-editor-layout { grid-template-columns: minmax(0, 1fr); }
+  .patch-list { grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 0; border-right: 0; border-bottom: 1px solid #dce4e0; padding: 12px 0; }
+  .patch-list button { padding: 9px 6px; }
+  .patch-list button > svg:last-child { display: none; }
+  .patch-editor { padding: 20px 0; }
+  .patch-section-title { flex-wrap: wrap; }
+  .patch-facts > div { grid-template-columns: 68px minmax(0, 1fr); }
+  .patch-console .plugin-component-row { align-items: flex-start; flex-direction: column; gap: 10px; }
+}

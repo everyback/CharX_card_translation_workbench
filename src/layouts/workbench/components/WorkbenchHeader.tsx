@@ -7,6 +7,7 @@ interface WorkbenchHeaderProps {
   project: ProjectDetail | null;
   busy: string;
   aboutActive?: boolean;
+  pluginsActive?: boolean;
   onDeleteProject: () => void;
   onApplyDraft: () => void;
   onSaveAndExport: () => void;
@@ -16,11 +17,12 @@ export function WorkbenchHeader({
   project,
   busy,
   aboutActive = false,
+  pluginsActive = false,
   onDeleteProject,
   onApplyDraft,
   onSaveAndExport,
 }: WorkbenchHeaderProps) {
-  const visibleProject = aboutActive ? null : project;
+  const visibleProject = aboutActive || pluginsActive ? null : project;
 
   return (
     <header className="workspace-header">
@@ -39,13 +41,13 @@ export function WorkbenchHeader({
               </h1>
             </div>
           </div>
-        ) : <h1>{aboutActive ? '关于卡片翻译工作台' : '卡片项目'}</h1>}
+        ) : <h1>{pluginsActive ? '插件与补丁' : aboutActive ? '关于卡片翻译工作台' : '卡片项目'}</h1>}
         <div className="header-meta">
           {visibleProject ? <>
             <span className={`status-badge status-${visibleProject.status}`}>{STATUS_LABELS[visibleProject.status] || visibleProject.status}</span>
             <span>{visibleProject.sourceLanguage} → {visibleProject.targetLanguage}</span>
             <span>更新于 {formatTime(visibleProject.updatedAt)}</span>
-          </> : <span>{aboutActive ? '项目介绍、作者说明与本地使用边界' : '导入一张卡片开始工作'}</span>}
+          </> : <span>{pluginsActive ? 'RisuAI 兼容组件与安装核对' : aboutActive ? '项目介绍、作者说明与本地使用边界' : '导入一张卡片开始工作'}</span>}
         </div>
       </div>
       <div className="header-actions">

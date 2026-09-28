@@ -93,12 +93,14 @@ export function useCardImport({
     };
     const onDragEnter = (event: DragEvent) => {
       if (!hasFiles(event)) return;
+      if (isSshKeyDropTarget(event.target)) { resetDrag(); return; }
       event.preventDefault();
       dragDepthRef.current += 1;
       setDraggingFiles(true);
     };
     const onDragOver = (event: DragEvent) => {
       if (!hasFiles(event)) return;
+      if (isSshKeyDropTarget(event.target)) { resetDrag(); return; }
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
     };
@@ -111,7 +113,7 @@ export function useCardImport({
     const onDrop = (event: DragEvent) => {
       if (!hasFiles(event)) return;
       event.preventDefault();
-      if (isImageOrDownloadTarget(event.target)) {
+      if (isImageOrDownloadTarget(event.target) || isSshKeyDropTarget(event.target)) {
         resetDrag();
         return;
       }
@@ -139,4 +141,8 @@ export function useCardImport({
 
 function isImageOrDownloadTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest('img, a[download]'));
+}
+
+function isSshKeyDropTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('[data-ssh-key-drop]'));
 }

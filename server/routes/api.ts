@@ -100,6 +100,8 @@ import {
 } from '../application/review/review-metadata.js';
 import { registerInspectionRoutes } from './inspection.js';
 import { registerSystemRoutes } from './system.js';
+import { registerPatchRoutes } from './patches.js';
+import { registerRemotePatchRoutes } from './remote-patches.js';
 import { readStoredFile, readStoredFileRange, storeFile, projectStoragePath, imageExtension, removeProjectStorage, removeStoredFile } from '../repositories/file-storage.js';
 import {
   isUploadTooLargeError,
@@ -143,6 +145,8 @@ const exportService = createExportService({
 });
 
 registerSystemRoutes(app);
+registerPatchRoutes(app);
+registerRemotePatchRoutes(app);
 
 app.post('/api/projects', async (request, reply) => {
   const body = asRecord(request.body);

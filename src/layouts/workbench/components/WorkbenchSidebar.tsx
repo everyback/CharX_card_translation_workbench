@@ -7,6 +7,7 @@ import {
   Info,
   Languages,
   LoaderCircle,
+  Plug,
   Search,
   Settings as SettingsIcon,
   Settings2,
@@ -25,7 +26,9 @@ interface WorkbenchSidebarProps {
   onImportFiles: (files: File[]) => void;
   onOpenSettings: () => void;
   onOpenAbout: () => void;
+  onOpenPlugins: () => void;
   aboutActive: boolean;
+  pluginsActive: boolean;
 }
 
 export function WorkbenchSidebar({
@@ -38,7 +41,9 @@ export function WorkbenchSidebar({
   onImportFiles,
   onOpenSettings,
   onOpenAbout,
+  onOpenPlugins,
   aboutActive,
+  pluginsActive,
 }: WorkbenchSidebarProps) {
   const [query, setQuery] = useState('');
   const normalizedQuery = query.trim().toLowerCase();
@@ -124,6 +129,9 @@ export function WorkbenchSidebar({
       </nav>
 
       <div className="sidebar-footer">
+        <button className={`icon-text-button ${pluginsActive ? 'active' : ''}`} onClick={onOpenPlugins}>
+          <Plug size={16} />插件与补丁
+        </button>
         <button className={`icon-text-button ${aboutActive ? 'active' : ''}`} onClick={onOpenAbout}>
           <Info size={16} />关于项目
         </button>

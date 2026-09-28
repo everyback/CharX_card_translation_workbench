@@ -1,4 +1,4 @@
-import { AlertTriangle, Download, FileJson, RotateCcw } from 'lucide-react';
+import { AlertTriangle, Download, FileJson, Plug, RotateCcw } from 'lucide-react';
 import { usePresetProject } from '@/features/preset/model/usePresetProject';
 import type { ShowUiConfirm, ShowWorkbenchError } from '@/shared/model/workbench-actions';
 import { LoadingMask } from '@/shared/ui';
@@ -11,6 +11,7 @@ export interface PresetWorkspaceProps {
   onError: ShowWorkbenchError;
   onNotice: (notice: string) => void;
   confirm: ShowUiConfirm;
+  onOpenPlugins: () => void;
 }
 
 /**
@@ -20,7 +21,7 @@ export interface PresetWorkspaceProps {
  * scan, translate or approve. The flow is import → (optional edit) → export, and
  * the export reads the draft directly, so no apply step is involved.
  */
-export function PresetWorkspace({ projectId, projectName, onError, onNotice, confirm }: PresetWorkspaceProps) {
+export function PresetWorkspace({ projectId, projectName, onError, onNotice, confirm, onOpenPlugins }: PresetWorkspaceProps) {
   const { view, loading, saving, warnings, saveText, reset, selectBlock } = usePresetProject({
     projectId,
     onError,
@@ -58,6 +59,9 @@ export function PresetWorkspace({ projectId, projectName, onError, onNotice, con
           <a className="secondary-button" href={`/api/projects/${projectId}/preset-report`} target="_blank" rel="noreferrer">
             <FileJson size={15} />查看报告 JSON
           </a>
+          {view.capabilities.summary.requiresPlugin && <button className="secondary-button" type="button" onClick={onOpenPlugins}>
+            <Plug size={15} />插件与补丁
+          </button>}
           <button
             className="secondary-button"
             type="button"

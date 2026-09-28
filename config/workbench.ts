@@ -60,6 +60,12 @@ function resolveConfiguredDirectory(name: string, fallback: string): string {
   return resolveConfiguredPath(environment(name), fallback);
 }
 
+function resolvePatchRoots(): readonly string[] {
+  const raw = environment('WORKBENCH_PATCH_ROOTS');
+  if (!raw) return Object.freeze([]);
+  return Object.freeze(raw.split(path.delimiter).map((value) => value.trim()).filter(Boolean).map((value) => path.resolve(value)));
+}
+
 try {
   process.loadEnvFile(path.resolve(process.cwd(), '.env'));
 } catch (error) {
@@ -99,5 +105,11 @@ export const workbenchConfig = Object.freeze({
     ),
     webRoot: resolveConfiguredDirectory('WORKBENCH_WEB_DIR', WORKBENCH_DEFAULTS.webDirectory),
     nodeModulesRoot,
+  }),
+  patchAgent: Object.freeze({
+    enabled: environment('WORKBENCH_PATCH_AGENT') === '1',
+    roots: resolvePatchRoots(),
+    backupDirectory: resolveConfiguredDirectory('WORKBENCH_PATCH_BACKUP_DIR', path.join(dataRoot, 'patch-backups')),
+    installerPath: resolveConfiguredPath(environment('WORKBENCH_PATCH_INSTALLER_PATH'), 'patches/risuai/install.mjs'),
   }),
 });

@@ -1,0 +1,7 @@
+services:
+  card-translation-workbench:
+    environment:
+      WORKBENCH_PATCH_AGENT: '1'
+      WORKBENCH_PATCH_ROOTS: /app/risuai
+    volumes:
+      - ${RISUAI_PATCH_HOST_PATH:?Set RISUAI_PATCH_HOST_PATH to the RisuAI source or installation directory}:/app/risuai:rw

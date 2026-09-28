@@ -1,0 +1,19 @@
+{
+  "list-cache": [
+    {
+      "patch": "read-performance",
+      "name": "远程读取性能",
+      "checks": {
+        "frontend": ["assetReadBatchCache=new Map()", "async getItemsBatch(e){", "this.assetReadBatchCache.get(e)"],
+        "server": ["app.get('/api/readbatch'", "__risuListCache"]
+      }
+    },
+    {
+      "patch": "read-cache",
+      "name": "远程资源本地缓存",
+      "checks": {
+        "frontend": ["assetLocalCache=caches.open(`risu-assets-v1`)", "async getItemCached(e){", "async forgetAsset(e){", "this.assetLocalCacheForgotten.has(e)"]
+      }
+    }
+  ]
+}

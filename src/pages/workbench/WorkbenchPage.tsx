@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { UiAlert } from '@/shared/ui';
 import { AboutPage } from '@/pages/about/AboutPage';
 import { SettingsDialog } from '@/features/settings/ui/SettingsDialog';
@@ -17,7 +17,7 @@ import {
   saveRegexRule,
   testRegexRule,
 } from '@/features/lua/api/lua-api';
-import { readWorkbenchRoute, writeWorkbenchRoute } from './model/routing';
+import { isIndependentTab, readWorkbenchRoute, writeWorkbenchRoute } from './model/routing';
 import { WorkbenchHeader } from '@/layouts/workbench/components/WorkbenchHeader';
 import { WorkbenchSidebar } from '@/layouts/workbench/components/WorkbenchSidebar';
 import { DropOverlay } from '@/layouts/workbench/components/DropOverlay';
@@ -36,6 +36,8 @@ import { useWorkbenchSettings } from '@/features/settings/model/useWorkbenchSett
 import { useWorkbenchFeedback } from './model/useWorkbenchFeedback';
 import { useTranslationTasks } from '@/features/translation/model/useTranslationTasks';
 import type { ReviewProblemFilter, ReviewStatusFilter } from './tabs/review/ReviewPage';
+
+const PluginManagerPage = lazy(() => import('@/pages/plugins/PluginManagerPage').then((module) => ({ default: module.PluginManagerPage })));
 
 export function WorkbenchPage() {
   const initialRouteRef = useRef(readWorkbenchRoute());
@@ -220,6 +222,11 @@ export function WorkbenchPage() {
     selectWorkspaceProject(projectId);
   }, [clearJobDetail, selectWorkspaceProject]);
 
+  const openProject = useCallback((projectId: string) => {
+    selectProject(projectId);
+    setTab('overview');
+  }, [selectProject]);
+
   useEffect(() => {
     if (!initialRouteRef.current.projectId || selectedProjectId) return;
     selectWorkspaceProject(initialRouteRef.current.projectId);
@@ -230,16 +237,18 @@ export function WorkbenchPage() {
       const route = readWorkbenchRoute();
       historyApplyingRef.current = true;
       setTab(route.tab);
-      if (route.projectId !== selectedProjectId) selectWorkspaceProject(route.projectId);
-      setSelectedSegmentId(route.segmentId);
+      if (!isIndependentTab(route.tab)) {
+        if (route.projectId !== selectedProjectId) selectWorkspaceProject(route.projectId);
+        setSelectedSegmentId(route.segmentId);
+      }
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, [selectedProjectId, selectWorkspaceProject, setSelectedSegmentId]);
 
   useEffect(() => {
-    const routeProjectId = selectedProjectId || (!historyReadyRef.current ? initialRouteRef.current.projectId : '');
-    const routeSegmentId = selectedSegmentId || (!historyReadyRef.current ? initialRouteRef.current.segmentId : '');
+    const routeProjectId = isIndependentTab(tab) ? '' : selectedProjectId || (!historyReadyRef.current ? initialRouteRef.current.projectId : '');
+    const routeSegmentId = isIndependentTab(tab) ? '' : selectedSegmentId || (!historyReadyRef.current ? initialRouteRef.current.segmentId : '');
     const key = `${tab}|${routeProjectId}|${routeSegmentId}`;
     if (!historyReadyRef.current) {
       historyReadyRef.current = true;
@@ -336,15 +345,17 @@ export function WorkbenchPage() {
       <DropOverlay visible={Boolean(draggingFiles)} />
       <WorkbenchSidebar
         projects={projects}
-        selectedProjectId={selectedProjectId}
+        selectedProjectId={isIndependentTab(tab) ? '' : selectedProjectId}
         busy={busy}
         settings={settings}
         fileInputRef={fileInputRef}
-        onSelectProject={selectProject}
+        onSelectProject={openProject}
         onImportFiles={(files) => void importCards(files)}
         onOpenSettings={openSettings}
         onOpenAbout={() => setTab('about')}
+        onOpenPlugins={() => setTab('plugins')}
         aboutActive={tab === 'about'}
+        pluginsActive={tab === 'plugins'}
       />
 
       <main className={`workspace ${tab === 'review' ? 'workspace-review' : ''}`}>
@@ -352,6 +363,7 @@ export function WorkbenchPage() {
           project={project}
           busy={busy}
           aboutActive={tab === 'about'}
+          pluginsActive={tab === 'plugins'}
           onDeleteProject={() => void deleteProject()}
           onApplyDraft={() => void applyDraft()}
           onSaveAndExport={() => void saveAndExport()}
@@ -363,7 +375,7 @@ export function WorkbenchPage() {
           onClearError={() => setError('')}
           onClearNotice={() => setNotice('')}
         />
-        {importResults && (
+        {!isIndependentTab(tab) && importResults && (
           <ImportSummary
             results={importResults}
             busy={busy}
@@ -374,9 +386,10 @@ export function WorkbenchPage() {
             conversionFormats={['st-preset']}
           />
         )}
-        <ProjectLoadingMask loading={projectLoading} progress={projectLoadProgress} />
-
-        {tab === 'about' ? (
+        {!isIndependentTab(tab) && <ProjectLoadingMask loading={projectLoading} progress={projectLoadProgress} />}
+        {tab === 'plugins' ? (
+          <Suspense fallback={<div className="plugin-manager">正在读取插件与补丁清单...</div>}><PluginManagerPage /></Suspense>
+        ) : tab === 'about' ? (
           <AboutPage />
         ) : !project ? (
           <QuickStartView
@@ -560,6 +573,7 @@ export function WorkbenchPage() {
               onError: showError,
               onNotice: setNotice,
               confirm: showUiConfirm,
+              onOpenPlugins: () => setTab('plugins'),
             }}
           />
         )}

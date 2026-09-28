@@ -17,6 +17,7 @@ import type {
 } from '@/shared/types';
 import { DEFAULT_SCOPE } from '@/features/translation/model/scope';
 import { LOADING_MASK_MINIMUM_MS, PROJECT_SEGMENT_PAGE_SIZE } from './workspace-constants';
+import { isIndependentTab } from './routing';
 import type { ShowWorkbenchError } from '@/shared/model/workbench-actions';
 
 interface UseProjectWorkspaceOptions {
@@ -219,17 +220,21 @@ export function useProjectWorkspace({
 
   useEffect(() => {
     selectedProjectIdRef.current = selectedProjectId;
-    if (!selectedProjectId) {
+    if (!selectedProjectId || isIndependentTab(tab)) {
+      projectRequestRef.current += 1;
       setProjectLoading(false);
       return;
     }
+    if (project?.id === selectedProjectId) return;
     const expectedProjectId = selectedProjectId;
     const requestId = ++projectRequestRef.current;
     const loadingStartedAt = Date.now();
     setProjectLoading(true);
     setProjectLoadProgress({ current: 0, total: 0, known: false });
     void loadProjectProgressively(expectedProjectId, requestId)
-      .catch(onError)
+      .catch((error) => {
+        if (projectRequestRef.current === requestId) onError(error);
+      })
       .finally(async () => {
         const remaining = LOADING_MASK_MINIMUM_MS - (Date.now() - loadingStartedAt);
         if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
@@ -237,7 +242,7 @@ export function useProjectWorkspace({
           setProjectLoading(false);
         }
       });
-  }, [loadProjectProgressively, onError, selectedProjectId]);
+  }, [loadProjectProgressively, onError, project?.id, selectedProjectId, tab]);
 
   useEffect(() => {
     if (tab !== 'overview' || !project?.id || project.id !== selectedProjectId || projectOverview) return;
