@@ -35,23 +35,27 @@ export function LuaSyntaxDetails({
       {syntaxSaveMessage && <p className="lua-inline-save-message" role="status">{syntaxSaveMessage}</p>}
       {syntaxIssues.length > 0 ? <div className="lua-snippet-list">
         {syntaxIssues.map((issue, index) => {
-          const reportIssueIndex = report.issues.findIndex((item) => item.kind === 'syntax' && item.pathLabel === issue.pathLabel && item.line === issue.line);
-          const issueKey = `${issue.kind}:${issue.pathLabel}:${reportIssueIndex >= 0 ? reportIssueIndex : index}`;
+          const issueKey = `${issue.kind}:${issue.pathLabel}:${issue.line ?? 0}`;
           const expandedContext = syntaxContextExpanded[issueKey] === true;
           const contextLines = issue.contextLines ?? [];
           const visibleContextLines = expandedContext || !issue.line
             ? contextLines
             : contextLines.filter((contextLine) => Math.abs(contextLine.line - issue.line!) <= 5);
-          const canExpandContext = visibleContextLines.length < contextLines.length;
-          return <article className="lua-snippet-card" id={`lua-syntax-snippet-${index}`} data-lua-issue-key={issueKey} key={issueKey}>
-            <div className="lua-editor-meta"><strong>{issue.pathLabel}</strong><span>{issue.line ? `第 ${issue.line} 行，第 ${issue.column ?? '?'} 列` : 'Lua 语法错误'}</span></div>
+          const sourceContext = issue.sourceContextLines ?? [];
+          const sourceLine = issue.sourceLineNumber ?? issue.sourceReferenceLine;
+          const visibleSourceContext = expandedContext || !sourceLine ? sourceContext : sourceContext.filter(row => Math.abs(row.line - sourceLine) <= 5);
+          const canExpandContext = visibleContextLines.length < contextLines.length || visibleSourceContext.length < sourceContext.length;
+          return <details open={index === 0 || undefined} className="lua-snippet-card" id={`lua-syntax-snippet-${index}`} data-lua-issue-key={issueKey} key={issueKey}>
+            <summary className="lua-editor-meta"><strong>{issue.pathLabel}</strong><span>{issue.line ? `第 ${issue.line} 行，第 ${issue.column ?? '?'} 列` : 'Lua 语法错误'}</span></summary>
             <div className="lua-snippet-help">{issue.message}</div>
+            <div className="lua-syntax-columns"><div>
             <div className="lua-snippet-help">原文参考上下文{issue.sourceLineNumber ? ` · 原文第 ${issue.sourceLineNumber} 行` : ` · 参考位置 ${issue.sourceReferenceLine ?? '?'} 行（未精确对齐）`}</div>
             {issue.sourceContextLines?.length ? <div className="lua-code-editor">
-              {issue.sourceContextLines.map((row) => <div className={`lua-code-line${row.line === issue.sourceLineNumber ? ' error-line' : ''}`} key={row.line}>
+              {visibleSourceContext.map((row) => <div className={`lua-code-line${row.line === issue.sourceLineNumber ? ' error-line' : ''}`} key={row.line}>
                 <span className="lua-code-line-number">{row.line}</span><code className="lua-code-line-text">{row.text || ' '}</code>
               </div>)}
             </div> : <div className="lua-snippet-help">增删行或代码变动导致原文无法可靠定位；请以当前稿解析器行号为准。</div>}
+            </div><div>
             <div className="lua-snippet-help">当前稿上下文 · 红色行为解析器报错位置；点击任意行编辑，保存只修改这一行</div>
             {contextLines.length ? <div className="lua-code-editor lua-snippet-code-editor">
               {visibleContextLines.map((contextLine) => <EditableSyntaxLine
@@ -82,7 +86,8 @@ export function LuaSyntaxDetails({
                 保存错误行并重新校验
               </button>
             </div>}
-          </article>;
+            </div></div>
+          </details>;
         })}
       </div> : <div className="lua-simple-empty">当前没有待修复的 Lua 语法片段。</div>}
     </section>

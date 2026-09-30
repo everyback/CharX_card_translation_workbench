@@ -129,7 +129,7 @@ export function useReviewActions({
         } catch (updateError) {
           if (updateError instanceof ApiError && typeof updateError.payload.qaFlag === 'string') {
             const qaFlag = updateError.payload.qaFlag;
-            setProject((current) => current ? {
+            setProject((current) => current?.id === selectedProjectId ? {
               ...current,
               segments: current.segments.map((segment) => segment.id === segmentId
                 ? { ...segment, qaFlags: [...segment.qaFlags.filter((flag) => !sameReviewProblemFamily(flag, qaFlag)), qaFlag] }
@@ -166,7 +166,7 @@ export function useReviewActions({
         }
       }
       if (confirmedLabels.length) onNotice(`已确认${confirmedLabels.join('和')}，并通过审核。`);
-      setProject((current) => current ? {
+      setProject((current) => current?.id === selectedProjectId ? {
         ...current,
         segments: current.segments.map((segment) => segment.id === segmentId ? updated : segment),
       } : current);
@@ -285,13 +285,16 @@ export function useReviewActions({
 
   async function reviewBulk(action: 'copy-machine' | 'clear-manual', segmentIds: string[]) {
     if (!project || !segmentIds.length) return;
+    let changed = false;
     await runAction('review-bulk', async () => {
       await api(`/api/projects/${project.id}/review-bulk`, {
         method: 'POST', ...jsonBody({ action, segmentIds }),
       });
+      changed = true;
       onNotice(action === 'copy-machine' ? `已载入 ${segmentIds.length} 条机器译文，等待审核。` : `已清除 ${segmentIds.length} 条人工定稿。`);
       await refreshProject(project.id);
     });
+    return changed;
   }
 
   async function clearAllTranslationResults() {
@@ -343,9 +346,11 @@ export function useReviewActions({
 
   async function applyDraftQuiet() {
     if (!project) return;
+    let saved = false;
     await runAction('apply', async () => {
       try {
         await api(`/api/projects/${project.id}/apply`, { method: 'POST', ...jsonBody({}) });
+        saved = true;
         onNotice('Lua 修改已保存，完整性校验已重新执行。');
         await Promise.all([refreshProject(project.id), refreshProjects()]);
         onClearReviewFocus();
@@ -354,6 +359,7 @@ export function useReviewActions({
         throw error;
       }
     });
+    return saved;
   }
 
   async function saveAndExport(navigateOnError = true) {

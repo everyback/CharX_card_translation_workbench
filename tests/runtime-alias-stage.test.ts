@@ -17,3 +17,16 @@ test('translation stage collects translated text names even when the catalog alr
   await assert.rejects(buildRuntimeAliasDraft(module, source, 'zh-CN', async () => ({}), async () => { throw new Error('provider failed'); }), /provider failed/);
   assert.equal(JSON.stringify(module), before);
 });
+
+
+test('cancellation after name translation prevents segmentation and preserves the module', async () => {
+  const controller = new AbortController();
+  const module = { trigger: [{ effect: [{ code: 'local roster = [==[[{"id":"cirno","aliases":["Cirno"],"sfw":["cirno_angry"]}]]==]' }] }] };
+  const before = JSON.stringify(module);
+  let segmented = false;
+  await assert.rejects(buildRuntimeAliasDraft(module, {}, 'zh-CN', async () => {
+    controller.abort(); return { cirno: ['琪露诺'] };
+  }, async () => { segmented = true; return {}; }, controller.signal), { name: 'AbortError' });
+  assert.equal(segmented, false);
+  assert.equal(JSON.stringify(module), before);
+});

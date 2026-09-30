@@ -1,3 +1,4 @@
+import { reconcileTextDraft } from '@/features/review/lib/text-draft';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { UiAlert } from '@/shared/ui';
 import { AboutPage } from '@/pages/about/AboutPage';
@@ -56,6 +57,7 @@ export function WorkbenchPage() {
   const [reviewQuery, setReviewQuery] = useState('');
   const [reviewSelectedIds, setReviewSelectedIds] = useState<Set<string>>(new Set());
   const [reviewFiltersCollapsed, setReviewFiltersCollapsed] = useState(false);
+  const reviewBases = useRef<Record<string, string>>({});
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const {
     busy,
@@ -169,16 +171,18 @@ export function WorkbenchPage() {
 
   useEffect(() => {
     if (!selectedSegment) return;
-    setReviewDrafts((current) => current[selectedSegment.id] === undefined
-      ? { ...current, [selectedSegment.id]: selectedSegment.finalText ?? selectedSegment.translatedText ?? '' }
-      : current);
+    const id = selectedSegment.id;
+    const incoming = selectedSegment.finalText ?? selectedSegment.translatedText ?? '';
+    const previous = reviewBases.current[id];
+    reviewBases.current[id] = incoming;
+    setReviewDrafts((current) => ({ ...current, [id]: reconcileTextDraft(current[id], previous, incoming) }));
   }, [selectedSegment?.id, selectedSegment?.finalText, selectedSegment?.translatedText]);
 
   const clearReviewDrafts = useCallback((segmentIds: string[]) => {
     if (!segmentIds.length) return;
     setReviewDrafts((current) => {
       const next = { ...current };
-      for (const segmentId of segmentIds) delete next[segmentId];
+      for (const segmentId of segmentIds) { delete next[segmentId]; delete reviewBases.current[segmentId]; }
       return next;
     });
   }, []);
@@ -192,13 +196,11 @@ export function WorkbenchPage() {
   }, [selectedSegment, updateSegment]);
 
   const retranslateReviewSegments = useCallback((segmentIds: string[]) => {
-    clearReviewDrafts(segmentIds);
-    void retranslateSegments(segmentIds);
+    void retranslateSegments(segmentIds).then((changed) => { if (changed) clearReviewDrafts(segmentIds); });
   }, [clearReviewDrafts, retranslateSegments]);
 
   const bulkReviewSegments = useCallback((action: 'copy-machine' | 'clear-manual', segmentIds: string[]) => {
-    clearReviewDrafts(segmentIds);
-    void reviewBulk(action, segmentIds);
+    void reviewBulk(action, segmentIds).then((changed) => { if (changed) clearReviewDrafts(segmentIds); });
   }, [clearReviewDrafts, reviewBulk]);
 
   const saveLuaAndExport = useCallback(async () => {
@@ -206,10 +208,10 @@ export function WorkbenchPage() {
     // The Lua page can still hold the report from before a syntax-line save.
     // Refresh it before choosing between re-checking and exporting so the
     // button never branches on a stale blocker count.
-    const latestLuaReport = await loadLuaReport(project.id, true);
-    if (latestLuaReport?.blockerCount) {
-      await applyDraftQuiet();
-      return;
+    const latestLuaReport = await loadLuaReport(project.id);
+    if (!latestLuaReport) return;
+    if (latestLuaReport.blockerCount) {
+      if (!await applyDraftQuiet()) return;
     }
     await saveAndExport(false);
   }, [applyDraftQuiet, loadLuaReport, project?.id, saveAndExport]);
@@ -417,6 +419,8 @@ export function WorkbenchPage() {
               onOpenJobs: showJobs,
               onOpenReview: showReview,
               onOpenLuaManagement: showLua,
+              protocols,
+              onOpenProtocols: () => setTab('protocols'),
               onApproveAll: () => void approveAll(),
               onOpenSegments: () => setTab('segments'),
               onApplyDraft: () => void applyDraft(),
@@ -491,7 +495,7 @@ export function WorkbenchPage() {
                 onSelectedIdsChange: setReviewSelectedIds,
                 reviewFiltersCollapsed,
                 onReviewFiltersCollapsedChange: setReviewFiltersCollapsed,
-                draft: selectedSegment ? reviewDrafts[selectedSegment.id] ?? '' : '',
+                draft: selectedSegment ? reviewDrafts[selectedSegment.id] ?? selectedSegment.finalText ?? selectedSegment.translatedText ?? '' : '',
                 onDraftChange: (value) => {
                   if (selectedSegment) setReviewDrafts((current) => ({ ...current, [selectedSegment.id]: value }));
                 },
@@ -512,6 +516,7 @@ export function WorkbenchPage() {
               },
               protocols: {
                 protocols,
+                activeTranslationJob,
                 busy: busy.startsWith('protocol-'),
                 onDiscover: () => void discoverProjectProtocols(),
                 onAnalyze: (schemaIds) => void analyzeProjectProtocols(schemaIds),
@@ -522,7 +527,7 @@ export function WorkbenchPage() {
                 report: luaReport,
                 loading: luaReportLoading || busy.startsWith('router-repair'),
                 onRefresh: () => void loadLuaReport(project.id),
-                onScan: () => void scan('lua-only'),
+                onScan: () => void loadLuaReport(project.id),
                 onPreviewRouterRepair: previewPortraitRouter,
                 onApplyRouterRepair: repairPortraitRouter,
                 onResetLuaDraft: resetLuaDraft,
@@ -530,7 +535,7 @@ export function WorkbenchPage() {
                 onSaveLuaSyntaxLine: async (pathJson, line, replacement, expectedLine) => {
                   const result = await saveLuaSyntaxLine(project.id, pathJson, line, replacement, expectedLine);
                   setReviewFocus(null);
-                  void loadLuaReport(project.id, true);
+                  void Promise.all([loadLuaReport(project.id), refreshProject(project.id), refreshProjects(false)]).catch(showError);
                   return result;
                 },
                 onOpenExport: () => void saveLuaAndExport(),
@@ -539,14 +544,14 @@ export function WorkbenchPage() {
                   setNotice(result.sourceNamespace === result.targetNamespace
                     ? '已人工确认保留原始 namespace；未跳转审核页，也未改写资源引用。'
                     : `已人工确认 namespace 为「${result.targetNamespace}」，并同步已识别的模块内部引用。`);
-                  await Promise.all([loadLuaReport(project.id, true), refreshProject(project.id), refreshProjects()]);
+                  void Promise.all([loadLuaReport(project.id), refreshProject(project.id), refreshProjects(false)]).catch(showError);
                 },
                 reviewFocus,
                 onClearReviewFocus: () => setReviewFocus(null),
                 onSaveAliases: async (ownerId, aliases) => {
                   await saveLuaRuntimeAliases(project.id, ownerId, aliases);
                   setNotice(`已将 ${ownerId} 的目标语言别名一次合并到 Lua 匹配目录。`);
-                  await loadLuaReport(project.id);
+                  void Promise.all([loadLuaReport(project.id), refreshProject(project.id), refreshProjects(false)]).catch(showError);
                 },
                 onPreviewRegexCoverage: () => previewRegexCoverage(project.id),
                 regexConcurrency: settings?.concurrency ?? 1,
@@ -557,7 +562,7 @@ export function WorkbenchPage() {
                 onTestRegexRule: (pathLabel, pattern) => testRegexRule(project.id, pathLabel, pattern),
                 onSaveRegexRule: async (pathLabel, pattern, expectedPattern, forcePass, out, expectedOut) => {
                   const result = await saveRegexRule(project.id, pathLabel, pattern, expectedPattern, forcePass, out, expectedOut);
-                  await loadLuaReport(project.id);
+                  void Promise.all([loadLuaReport(project.id), refreshProject(project.id), refreshProjects(false)]).catch(showError);
                   return result;
                 },
               },

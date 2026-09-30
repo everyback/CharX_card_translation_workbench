@@ -8,6 +8,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import type { LuaManagementReport } from '@/shared/types';
+import { diagnosticState } from '../../lib/diagnostic-state';
 
 export interface LuaDetectionGridProps {
   report: LuaManagementReport;
@@ -36,18 +37,19 @@ export function LuaDetectionGrid({
   onOpenRouterPreview,
   onOpenExport,
 }: LuaDetectionGridProps) {
+  const state = diagnosticState(report);
   return (
     <div className="lua-detection-grid">
       <section className="lua-panel lua-detection-card lua-script-detection">
         <div className="lua-panel-header"><div><h2>脚本结构检测</h2><span>Lua 代码块、控制引用和语法状态</span></div><Code2 size={17} /></div>
         <div className="lua-detection-result"><strong>{report.hasModule ? '已完成扫描' : '不适用'}</strong><span>{report.hasModule ? `发现 ${report.sourceCount} 个 Lua 代码块、${report.controlReferenceCount} 个控制引用。` : '当前卡片没有 Risu 模块。'}</span></div>
         {syntaxIssues.length > 0 && <div className="lua-detection-alert">发现 {syntaxIssues.length} 条 Lua 语法问题，见下方语法检测。</div>}
-        <button type="button" className="secondary-button lua-detection-action" onClick={onScan}><Search size={14} />重新扫描脚本</button>
+        <button type="button" className="secondary-button lua-detection-action" disabled={loading} onClick={onScan}><Search size={14} />重新检测脚本</button>
       </section>
 
       <section className="lua-panel lua-detection-card lua-syntax-detection">
         <div className="lua-panel-header"><div><h2>Lua 语法检测</h2><span>逐条定位到真实错误代码行</span></div><ShieldCheck size={17} /></div>
-        <div className={`lua-detection-result ${syntaxIssues.length ? 'problem' : 'success'}`}><strong>{syntaxIssues.length ? `发现 ${syntaxIssues.length} 条问题` : '语法通过'}</strong><span>{syntaxIssues.length ? '可在下方直接编辑错误行并重新校验。' : '当前没有待修复的 Lua 语法片段。'}</span></div>
+        <div className={`lua-detection-result ${syntaxIssues.length ? 'problem' : state.syntaxPassed ? 'success' : ''}`}><strong>{state.syntax}</strong><span>{syntaxIssues.length ? '可在下方直接编辑错误行并重新校验。' : !report.hasModule ? '当前卡片没有 Risu Lua 模块。' : state.syntaxPassed ? '当前审核稿的 Lua 语法已通过校验。' : '生成审核稿后重新检测；没有错误记录不代表已经通过校验。'}</span></div>
         {syntaxIssues.length > 0 && <button type="button" className="secondary-button lua-detection-action" onClick={() => scrollToDetail('lua-syntax-detection-detail')}><ArrowRight size={14} />查看语法问题</button>}
       </section>
 
@@ -77,8 +79,8 @@ export function LuaDetectionGrid({
 
       <section className="lua-panel lua-detection-card lua-export-detection">
         <div className="lua-panel-header"><div><h2>导出完整性检测</h2><span>导出前执行最终保护校验</span></div><FileCheck2 size={17} /></div>
-        <div className={`lua-detection-result ${report.blockerCount ? 'problem' : 'success'}`}><strong>{report.blockerCount ? `${report.blockerCount} 个阻断` : '可以导出'}</strong><span>{report.warningCount ? `${report.warningCount} 条提醒会随导出回验。` : '没有待处理提醒。'}</span></div>
-        <button type="button" className="primary-button lua-detection-action" onClick={onOpenExport}><FileCheck2 size={14} />{report.blockerCount ? '保存并重新校验' : '保存并导出'}</button>
+        <div className={`lua-detection-result ${report.blockerCount ? 'problem' : ''}`}><strong>{state.export}</strong><span>{report.warningCount ? `${report.warningCount} 条提醒会随导出回验。` : '仅应用已通过审核的结果；导出时再次检查完整性。'}</span></div>
+        <button type="button" className="primary-button lua-detection-action" disabled={loading} onClick={onOpenExport}><FileCheck2 size={14} />保存并导出</button>
       </section>
     </div>
   );

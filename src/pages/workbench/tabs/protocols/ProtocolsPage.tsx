@@ -1,11 +1,13 @@
 import { Braces, Check, CircleAlert, LoaderCircle, RefreshCw, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { reconcileProtocolDraft } from '@/features/protocol/model/protocol-draft';
 import type { ProtocolFieldRule, ProtocolSchema, ProtocolStatus } from '@/shared/types';
 import { PROTOCOL_SOURCE_LABELS, PROTOCOL_STATUS_LABELS } from '@/features/protocol/model/protocol-labels';
 
 export function ProtocolsPage({
   protocols,
   busy,
+  activeTranslationJob,
   onDiscover,
   onAnalyze,
   onSave,
@@ -13,6 +15,7 @@ export function ProtocolsPage({
 }: {
   protocols: ProtocolSchema[];
   busy: boolean;
+  activeTranslationJob: boolean;
   onDiscover: () => void;
   onAnalyze: (schemaIds: string[]) => void;
   onSave: (schemaId: string, status: ProtocolStatus, fields: ProtocolFieldRule[]) => void;
@@ -22,6 +25,7 @@ export function ProtocolsPage({
   const [status, setStatus] = useState<'all' | ProtocolStatus>('all');
   const [selectedId, setSelectedId] = useState('');
   const [draftFields, setDraftFields] = useState<ProtocolFieldRule[]>([]);
+  const draftBaseline = useRef<{ id?: string; fields: ProtocolFieldRule[] }>({ fields: [] });
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return protocols.filter((protocol) => (
@@ -42,7 +46,12 @@ export function ProtocolsPage({
     }
   }, [filtered, selectedId]);
   useEffect(() => {
-    setDraftFields(selected?.fieldRules.map((field) => ({ ...field })) ?? []);
+    const previous = draftBaseline.current;
+    const incoming = selected?.fieldRules ?? [];
+    draftBaseline.current = { id: selected?.id, fields: incoming };
+    setDraftFields((current) => previous.id === selected?.id
+      ? reconcileProtocolDraft(current, previous.fields, incoming)
+      : incoming.map((field) => ({ ...field })));
   }, [selected?.id, selected?.fieldRules]);
 
   const updateDraftField = (index: number, changes: Partial<ProtocolFieldRule>) => {
@@ -60,6 +69,11 @@ export function ProtocolsPage({
 
   return (
     <section className="protocol-section">
+      <div className="protocol-flow-note">
+        <strong>扫描 → 确认协议槽位 → 翻译 → 审核</strong>
+        <p>协议用于状态栏、事件指令等结构化文本：保留外壳、控制键和分隔符，只翻译确认可见的槽位。模型识别只给出建议，采用规则后会重新扫描；高置信度的正则 / Lua 规则可在扫描时自动生效。</p>
+        <p>{activeTranslationJob ? '当前有进行中或暂停的翻译任务。可查看和识别协议，结束任务后才能采用或忽略规则，避免翻译片段与规则不一致。' : '采用或忽略规则会更新翻译片段；与旧整段译文重叠的内容可能需要重新翻译。'}</p>
+      </div>
       <div className="protocol-toolbar">
         <div className="search-input">
           <Search size={15} />
@@ -78,7 +92,7 @@ export function ProtocolsPage({
         <button className="primary-button" disabled={busy || visibleAnalyzable.length === 0} onClick={() => onAnalyze(visibleAnalyzable.map((protocol) => protocol.id))}>
           <Sparkles size={16} />模型识别（{visibleAnalyzable.length}）
         </button>
-        <button className="secondary-button" disabled={busy || highConfidence.length === 0} onClick={() => onApproveHighConfidence(highConfidence.map((protocol) => protocol.id))}>
+        <button className="secondary-button" disabled={busy || activeTranslationJob || highConfidence.length === 0} onClick={() => onApproveHighConfidence(highConfidence.map((protocol) => protocol.id))}>
           <ShieldCheck size={16} />采用高置信度（{highConfidence.length}）
         </button>
         <span className="result-count">{filtered.length} 种</span>
@@ -150,8 +164,8 @@ export function ProtocolsPage({
 
             <div className="protocol-actions">
               <button className="secondary-button" disabled={busy} onClick={() => onAnalyze([selected.id])}><Sparkles size={16} />重新判断</button>
-              <button className="secondary-button danger-ghost" disabled={busy} onClick={() => onSave(selected.id, 'ignored', draftFields)}><X size={16} />忽略协议</button>
-              <button className="primary-button" disabled={busy} onClick={() => onSave(selected.id, 'approved', draftFields)}><Check size={16} />采用为项目规则</button>
+              <button className="secondary-button danger-ghost" disabled={busy || activeTranslationJob} onClick={() => onSave(selected.id, 'ignored', draftFields)}><X size={16} />忽略并重新扫描</button>
+              <button className="primary-button" disabled={busy || activeTranslationJob} onClick={() => onSave(selected.id, 'approved', draftFields)}><Check size={16} />采用并重新扫描</button>
             </div>
           </> : <div className="table-empty">先重新发现协议，再从左侧选择一种结构</div>}
         </div>

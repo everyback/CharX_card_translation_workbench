@@ -1,3 +1,5 @@
+import { savePostprocessingDraft } from './application/translation/postprocessing-store.js';
+import { JobRunner } from './application/translation/job-runner.js';
 import { buildRuntimeAliasDraft } from './application/translation/runtime-alias-stage.js';
 import { saveRejectedTranslation } from './application/review/rejected-translation.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -276,7 +278,9 @@ async function readModelResponseContent(response: Response, streamingEnabled: bo
   return extractMessageContent(result);
 }
 
-const runningJobs = new Map<string, AbortController>();
+const jobRunner = new JobRunner(runJob, (error) => {
+  console.error('任务调度异常：', error instanceof Error ? error.name : 'UnknownError');
+});
 export const DEFAULT_MODEL_REQUEST_TIMEOUT_SECONDS = 120;
 export const MAX_MODEL_REQUEST_TIMEOUT_SECONDS = 86_400;
 const MAX_REGEX_ANALYSIS_SAMPLE_COUNT = 3;
@@ -515,7 +519,7 @@ export function normalizeRisuRegexLanguageAlternatives(
 /** Ask the configured provider for usable contiguous name tokens.
  * The response is treated as untrusted data and filtered before it reaches Lua.
  */
-export async function segmentRuntimeNames(input: RuntimeNameCandidate[]): Promise<Record<string, string[]>> {
+export async function segmentRuntimeNames(input: RuntimeNameCandidate[], signal?: AbortSignal): Promise<Record<string, string[]>> {
   const settings = runtimeSettings();
   if (!settings.apiKey || !settings.model || !input.length) return {};
   assertProviderReady(settings);
@@ -524,6 +528,8 @@ export async function segmentRuntimeNames(input: RuntimeNameCandidate[]): Promis
     .slice(0, 200)
     .map((item) => ({ ownerId: item.ownerId, name: item.name.trim().slice(0, 160) }));
   if (!candidates.length) return {};
+  const timeoutSignal = AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds));
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   return withProviderSlot(settings.concurrency, 'runtime-name-segmentation', async () => {
     const response = await fetch(chatCompletionsEndpoint(settings.apiBaseUrl), {
       method: 'POST',
@@ -549,14 +555,14 @@ export async function segmentRuntimeNames(input: RuntimeNameCandidate[]): Promis
           { role: 'user', content: JSON.stringify(candidates) },
         ],
       }),
-      signal: AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds)),
+      signal: requestSignal,
     });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 800);
       throw new Error(`名称分词模型接口 ${response.status}：${body || response.statusText}`);
     }
     return normalizeRuntimeNameSegments(await readModelResponseContent(response, settings.streamingEnabled), candidates);
-  });
+  }, requestSignal);
 }
 
 /** Translate only cataloged proper-name aliases, then let the existing
@@ -564,6 +570,7 @@ export async function segmentRuntimeNames(input: RuntimeNameCandidate[]): Promis
 export async function translateRuntimeAliases(
   input: RuntimeAliasTranslationCandidate[],
   targetLanguage: string,
+  signal?: AbortSignal,
 ): Promise<Record<string, string[]>> {
   const settings = runtimeSettings();
   if (!settings.apiKey || !settings.model || !input.length) return {};
@@ -577,6 +584,8 @@ export async function translateRuntimeAliases(
     .filter((item) => item.aliases.length)
     .slice(0, 200);
   if (!candidates.length) return {};
+  const timeoutSignal = AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds));
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   return withProviderSlot(settings.concurrency, 'runtime-name-translation', async () => {
     const response = await fetch(chatCompletionsEndpoint(settings.apiBaseUrl), {
       method: 'POST',
@@ -602,14 +611,14 @@ export async function translateRuntimeAliases(
           { role: 'user', content: JSON.stringify(candidates) },
         ],
       }),
-      signal: AbortSignal.timeout(modelRequestTimeoutMilliseconds(settings.requestTimeoutSeconds)),
+      signal: requestSignal,
     });
     if (!response.ok) {
       const body = (await response.text()).slice(0, 800);
       throw new Error(`运行时名称本地化接口 ${response.status}：${body || response.statusText}`);
     }
     return normalizeRuntimeAliasTranslations(await readModelResponseContent(response, settings.streamingEnabled), candidates, targetLanguage);
-  });
+  }, requestSignal);
 }
 
 export function normalizeRuntimeAliasTranslations(
@@ -672,12 +681,7 @@ export function normalizeRuntimeNameSegments(
 }
 
 export function scheduleJob(jobId: string): void {
-  if (runningJobs.has(jobId)) return;
-  const controller = new AbortController();
-  runningJobs.set(jobId, controller);
-  setImmediate(() => {
-    void runJob(jobId, controller.signal).finally(() => runningJobs.delete(jobId));
-  });
+  jobRunner.schedule(jobId);
 }
 
 /**
@@ -719,14 +723,15 @@ export async function recoverInterruptedJobs(): Promise<number> {
 }
 
 export function abortJob(jobId: string): void {
-  runningJobs.get(jobId)?.abort();
+  jobRunner.abort(jobId);
 }
 
 async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
   const job = await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId) as { status?: string } | undefined;
-  if (!job || !['queued', 'running'].includes(job.status ?? '')) return;
+  if (signal.aborted || !job || !['queued', 'running'].includes(job.status ?? '')) return;
 
-  await db.prepare("UPDATE jobs SET status = 'running', last_error = NULL, updated_at = ? WHERE id = ?").run(now(), jobId);
+  await db.prepare("UPDATE jobs SET status = 'running', last_error = NULL, updated_at = ? WHERE id = ? AND status IN ('queued', 'running')").run(now(), jobId);
   const inFlight = new Set<Promise<void>>();
 
   try {
@@ -784,11 +789,12 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
       await log(jobId, 'info', '阶段 2 开始：处理 Lua 正则语言并列项与关键词适配。');
       const followUpSettings = await runtimeSettingsSnapshot(jobProject?.projectId);
       const regexLanguageFollowUp = jobProject?.projectId
-        ? await translateProjectRegexLanguageAlternatives(jobId, jobProject.projectId, followUpSettings)
+        ? await translateProjectRegexLanguageAlternatives(jobId, jobProject.projectId, followUpSettings, signal)
         : { total: 0, added: 0, adapted: 0, failed: 0 };
       const followUp = jobProject?.projectId
-        ? await translateProjectRuntimeAliases(jobId, jobProject.projectId, followUpSettings, runtimeAliasCandidates)
+        ? await translateProjectRuntimeAliases(jobId, jobProject.projectId, followUpSettings, runtimeAliasCandidates, signal)
         : { total: 0, failed: 0 };
+      signal.throwIfAborted();
       const status = Number(counts.failed) > 0 || followUp.failed > 0 || regexLanguageFollowUp.failed > 0 ? 'review_with_errors' : 'review';
       await db.prepare("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued', 'running')")
         .run(status, now(), jobId);
@@ -815,15 +821,16 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
     }
   } catch (error) {
     await Promise.allSettled(inFlight);
+    if (signal.aborted) return;
     const message = error instanceof Error ? error.message : String(error);
-    await db.prepare("UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?").run(message, now(), jobId);
+    await db.prepare("UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ? AND status IN ('queued', 'running')").run(message, now(), jobId);
     await log(jobId, 'error', message);
   }
 }
 
 async function updateRuntimeAliasFollowUp(jobId: string, completed: number, failed: number): Promise<void> {
   await db.prepare(`
-    UPDATE jobs SET post_completed_items = ?, post_failed_items = ?, updated_at = ? WHERE id = ?
+    UPDATE jobs SET post_completed_items = ?, post_failed_items = ?, updated_at = ? WHERE id = ? AND status IN ('queued', 'running')
   `).run(completed, failed, now(), jobId);
 }
 
@@ -832,6 +839,7 @@ async function translateProjectRegexLanguageAlternatives(
   jobId: string,
   projectId: string,
   settings: RuntimeSettings,
+  signal: AbortSignal,
 ): Promise<{ total: number; added: number; adapted: number; failed: number }> {
   const row = await db.prepare(`
     SELECT original_json AS originalJson, original_module_json AS originalModuleJson,
@@ -929,15 +937,17 @@ async function translateProjectRegexLanguageAlternatives(
         targetLanguage: settings.targetLanguage,
         entries: batch,
         mode: 'coverage',
-      });
+      }, signal);
       await log(jobId, 'info', `阶段 2 返回 ${index + 1}/${batches.length}：正在汇总正则适配结果。`);
       return { proposals, failedEntries: 0 };
     } catch (error) {
+      signal.throwIfAborted();
       const message = error instanceof Error ? error.message : String(error);
       await log(jobId, 'warn', `正则适配批次失败（${batch.length} 条），保留原规则并交给审核：${message.slice(0, 240)}`);
       return { proposals: [] as RisuRegexAlternativeProposal[], failedEntries: batch.length };
     }
   });
+  signal.throwIfAborted();
   const proposals = results.flatMap((result) => result.proposals);
   const failedEntries = results.reduce((total, result) => total + result.failedEntries, 0);
   await log(jobId, 'info', '阶段 2 已收到模型返回：准备校验并写入正则语言适配结果。');
@@ -956,11 +966,11 @@ async function translateProjectRegexLanguageAlternatives(
       : 'info', `正则语言适配完成：模型未确认需要追加的目标语言并列项（检查 ${entries.length} 条规则${failedEntries ? `，${failedEntries} 条待重试` : ''}）。`);
     return { total: entries.length, added: 0, adapted: 0, failed: failedEntries };
   }
-  const saved = cardAlternativeChanges.length
-    ? await db.prepare('UPDATE projects SET draft_module_json = ?, draft_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
-      .run(JSON.stringify(draftModule), JSON.stringify(translatedCard), now(), projectId, row.updatedAt ?? '')
-    : await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
-      .run(JSON.stringify(draftModule), now(), projectId, row.updatedAt ?? '');
+  signal.throwIfAborted();
+  const saved = await savePostprocessingDraft(db, {
+    jobId, projectId, expectedUpdatedAt: row.updatedAt ?? '', updatedAt: now(),
+    module: draftModule, ...(cardAlternativeChanges.length ? { card: translatedCard } : {}),
+  });
   if (!saved.changes) {
     await log(jobId, 'warn', '正则适配结果未写回：项目草稿已被人工操作更新，已保留最新草稿。');
     return { total: entries.length, added: 0, adapted: 0, failed: failedEntries };
@@ -1377,6 +1387,7 @@ async function translateProjectRuntimeAliases(
   projectId: string,
   settings: RuntimeSettings,
   candidates: RuntimeAliasTranslationCandidate[],
+  signal: AbortSignal,
 ): Promise<RuntimeAliasFollowUpResult> {
   const workCount = Math.max(1, candidates.length);
   const row = await db.prepare(`
@@ -1406,9 +1417,14 @@ async function translateProjectRuntimeAliases(
   await log(jobId, 'info', `阶段 2 继续：正在本地化 ${candidates.length} 个运行时名称目录，完成后进入审核。`);
   let applied: ReturnType<typeof applyRisuModuleSegments>;
   try {
-    applied = await buildRuntimeAliasDraft(draftModule, aliasSource, settings.targetLanguage, translateRuntimeAliases, segmentRuntimeNames);
+    signal.throwIfAborted();
+    applied = await buildRuntimeAliasDraft(draftModule, aliasSource, settings.targetLanguage,
+      (input, language) => translateRuntimeAliases(input, language, signal),
+      (input) => segmentRuntimeNames(input, signal), signal);
+    signal.throwIfAborted();
     if (applied.syntaxIssues.length) throw new Error(applied.syntaxIssues[0].message);
   } catch (error) {
+    signal.throwIfAborted();
     await updateRuntimeAliasFollowUp(jobId, 0, workCount);
     await log(jobId, 'warn', `运行时名称本地化失败，请在任务页重试阶段 2：${error instanceof Error ? error.message : String(error)}`);
     return { total: workCount, failed: workCount };
@@ -1419,14 +1435,17 @@ async function translateProjectRuntimeAliases(
     return { total: workCount, failed: 0 };
   }
   try {
-    const saved = await db.prepare('UPDATE projects SET draft_module_json = ?, updated_at = ? WHERE id = ? AND updated_at = ?')
-      .run(JSON.stringify(applied.draft), now(), projectId, row.updatedAt ?? '');
+    signal.throwIfAborted();
+    const saved = await savePostprocessingDraft(db, {
+      jobId, projectId, expectedUpdatedAt: row.updatedAt ?? '', updatedAt: now(), module: applied.draft,
+    });
     if (!saved.changes) {
       await updateRuntimeAliasFollowUp(jobId, 0, workCount);
       await log(jobId, 'warn', '运行时名称本地化结果未写回：项目草稿已被人工操作更新，请重试阶段 2。');
       return { total: workCount, failed: workCount };
     }
   } catch (error) {
+    signal.throwIfAborted();
     await updateRuntimeAliasFollowUp(jobId, 0, workCount);
     await log(jobId, 'warn', `运行时名称本地化写回失败，请在任务页重试阶段 2：${error instanceof Error ? error.message : String(error)}`);
     return { total: workCount, failed: workCount };

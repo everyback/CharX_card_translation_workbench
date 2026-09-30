@@ -1,3 +1,4 @@
+import { workflowState } from '../model/workflow-state';
 import { ChevronDown, LoaderCircle, Play, Search } from 'lucide-react';
 import { SCOPE_OPTIONS } from '../model/scope';
 import type { ScopePreset, Settings, ProjectDetail } from '@/shared/types';
@@ -25,6 +26,8 @@ export function TranslationCommandBar({
   onStartTranslation,
   onLanguageRuleChange,
 }: TranslationCommandBarProps) {
+  const workflow = workflowState(project);
+  const running = workflow.active && workflow.active.status !== 'paused';
   return (
     <section className="command-band">
       <label className="select-field">
@@ -44,8 +47,8 @@ export function TranslationCommandBar({
       >
         {busy === 'scan' ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}扫描字段
       </button>
-      <button className="primary-button" onClick={onStartTranslation} disabled={!project.segments.length || Boolean(busy) || activeTranslationJob} title={activeTranslationJob ? '翻译任务进行中，完成或失败后才能再次执行' : undefined}>
-        {busy === 'start' ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}开始翻译
+      <button className="primary-button" onClick={onStartTranslation} disabled={!project.segments.length || Boolean(busy)}>
+        {busy === 'start' ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{running ? '查看翻译进度' : ['paused', 'cancelled', 'failed'].includes(workflow.status) ? '继续翻译' : '开始翻译'}
       </button>
       <div className="command-spacer" />
       <span className="model-name">{settings?.model || '未配置模型'}</span>

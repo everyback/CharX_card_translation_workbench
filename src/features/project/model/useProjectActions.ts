@@ -58,7 +58,7 @@ export function useProjectActions({
       const updated = await api<ProjectDetail>(`/api/projects/${project.id}/language-rule`, {
         method: 'PATCH', ...jsonBody({ mode }),
       });
-      setProject((current) => current ? { ...current, languageBehaviorMode: updated.languageBehaviorMode } : current);
+      setProject((current) => current?.id === project.id ? { ...current, languageBehaviorMode: updated.languageBehaviorMode } : current);
       onNotice(mode === 'target' ? '已启用“卡片语言设定：跟随目标语言”。' : '已切换为“卡片语言设定：保留卡片原设定”。');
     });
   }
@@ -70,15 +70,18 @@ export function useProjectActions({
 
   async function repairPortraitRouter(changes?: PortraitRouterRepairPreview['changes']) {
     if (!project) return;
+    let saved = false;
     await runAction('router-repair', async () => {
       const result = await api<{ applied: Array<{ title: string }> }>(`/api/projects/${project.id}/lua/router-repair`, {
         method: 'POST', ...jsonBody({ changes: changes ?? [] }),
       });
+      saved = true;
       onNotice(result.applied.length
         ? `已将 ${result.applied.length} 项路由修复写入当前翻译稿模块；原始模块保持不变。`
         : '当前模块没有可应用的已知路由修复。');
       await Promise.all([refreshProject(project.id), refreshProjects()]);
     });
+    return saved;
   }
 
   async function resetLuaDraft() {

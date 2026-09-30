@@ -1,4 +1,4 @@
-import type { Dispatch, SetStateAction } from 'react';
+import { useRef, type Dispatch, type SetStateAction } from 'react';
 import { api, jsonBody } from '@/shared/api/http';
 import type {
   ProjectDetail,
@@ -37,6 +37,8 @@ export function useProtocolActions({
   onNotice,
   onOpenSettings,
 }: UseProtocolActionsOptions) {
+  const projectIdRef = useRef(project?.id);
+  projectIdRef.current = project?.id;
   const activeTranslationJob = Boolean(project?.jobs.some((job) => ['queued', 'running', 'paused'].includes(job.status)));
 
   async function discoverProjectProtocols() {
@@ -48,6 +50,7 @@ export function useProtocolActions({
         pendingCount: number;
         protocols: ProtocolSchema[];
       }>(`/api/projects/${project.id}/protocols/discover`, { method: 'POST', ...jsonBody({}) });
+      if (projectIdRef.current !== project.id) return;
       setProtocols(result.protocols);
       onNotice(`发现 ${result.schemaCount} 种协议、${result.occurrenceCount} 个实例；${result.pendingCount} 种等待确认。`);
     });
@@ -68,6 +71,7 @@ export function useProtocolActions({
         method: 'POST',
         ...jsonBody({ schemaIds }),
       });
+      if (projectIdRef.current !== project.id) return;
       setProtocols(result.protocols);
       onNotice(result.failed
         ? `模型完成 ${result.analyzed} 种协议判断，${result.failed} 种失败，可查看错误后重试。`
@@ -77,18 +81,13 @@ export function useProtocolActions({
 
   async function saveProtocolRule(schemaId: string, status: ProtocolStatus, fields: ProtocolFieldRule[]) {
     if (!project) return;
+    if (activeTranslationJob) { onNotice('请先结束当前翻译任务，再调整协议规则。'); return; }
+    if (!await showUiConfirm({ title: '更新协议并重新扫描', message: '这会按新规则重建翻译片段。与协议重叠的旧整段译文可能需要重新翻译。', confirmLabel: '更新并重新扫描', tone: 'warning' })) return;
     await runAction('protocol-save', async () => {
       await api<ProtocolSchema>(`/api/projects/${project.id}/protocols/${schemaId}`, {
         method: 'PATCH',
         ...jsonBody({ status, fields }),
       });
-      if (activeTranslationJob) {
-        onNotice(status === 'approved'
-          ? '协议规则已采用；当前翻译结束后请重新扫描，以按新规则生成协议字段。'
-          : '协议已忽略；当前翻译结束后请重新扫描，以更新字段范围。');
-        await Promise.all([refreshProject(project.id), refreshProjects()]);
-        return;
-      }
       const result = await api<{ preservedCount: number; newCount: number }>(`/api/projects/${project.id}/scan`, {
         method: 'POST',
         ...jsonBody({ scope }),
@@ -103,13 +102,11 @@ export function useProtocolActions({
   async function approveHighConfidenceProtocols(schemaIds: string[]) {
     if (!project || !schemaIds.length) return;
     const selected = protocols.filter((protocol) => schemaIds.includes(protocol.id));
-    const deferredScan = activeTranslationJob;
+    if (activeTranslationJob) { onNotice('请先结束当前翻译任务，再调整协议规则。'); return; }
     if (!await showUiConfirm({
       title: '采用协议规则',
-      message: deferredScan
-        ? `采用 ${selected.length} 种高置信度协议规则？当前翻译任务结束后再重新扫描字段。`
-        : `采用 ${selected.length} 种高置信度协议规则并重新扫描字段？\n与这些协议重叠的旧整段译文可能需要重新翻译。`,
-      confirmLabel: deferredScan ? '采用规则' : '采用并重新扫描',
+      message: `采用 ${selected.length} 种高置信度协议规则并重新扫描字段？\n与这些协议重叠的旧整段译文可能需要重新翻译。`,
+      confirmLabel: '采用并重新扫描',
       tone: 'warning',
     })) return;
     await runAction('protocol-approve', async () => {
@@ -117,11 +114,6 @@ export function useProtocolActions({
         `/api/projects/${project.id}/protocols/${protocol.id}`,
         { method: 'PATCH', ...jsonBody({ status: 'approved', fields: protocol.fieldRules }) },
       )));
-      if (deferredScan) {
-        onNotice(`已采用 ${selected.length} 种高置信度规则；当前翻译结束后请重新扫描字段。`);
-        await Promise.all([refreshProject(project.id), refreshProjects()]);
-        return;
-      }
       const result = await api<{ preservedCount: number; newCount: number }>(`/api/projects/${project.id}/scan`, {
         method: 'POST',
         ...jsonBody({ scope }),

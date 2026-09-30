@@ -1,3 +1,4 @@
+import { workflowState } from '@/features/translation/model/workflow-state';
 import {
   ArrowRight,
   CheckCheck,
@@ -14,7 +15,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import type { ProjectDetail, ScopePreset, Settings } from '@/shared/types';
+import type { ProjectDetail, ProtocolSchema, ScopePreset, Settings } from '@/shared/types';
 import { TranslationStageGuide } from './TranslationStageGuide';
 
 type PresetId = 'quick' | 'risu' | 'audit';
@@ -31,6 +32,8 @@ interface GuidedWorkflowProps {
   onOpenJobs: () => void;
   onOpenReview: () => void;
   onOpenLuaManagement: () => void;
+  protocols: ProtocolSchema[];
+  onOpenProtocols: () => void;
   onApproveAll: () => void;
   onOpenSegments: () => void;
   onApplyDraft: () => void;
@@ -78,7 +81,7 @@ function presetForScope(scope: ScopePreset): PresetId {
 function currentFlowStep(project: ProjectDetail): number {
   if (project.status === 'new') return 1;
   if (project.status === 'scanned') return 2;
-  if (project.status === 'translating') return 2;
+  if (['translating', 'paused', 'cancelled', 'failed'].includes(project.status)) return 2;
   if (project.status === 'review' || project.status === 'review_with_errors') {
     const pendingWithText = project.segments.some((segment) => (
       segment.reviewStatus === 'pending'
@@ -106,13 +109,16 @@ export function GuidedWorkflow({
   onOpenJobs,
   onOpenReview,
   onOpenLuaManagement,
+  protocols,
+  onOpenProtocols,
   onApproveAll,
   onOpenSegments,
   onApplyDraft,
   onSaveAndExport,
 }: GuidedWorkflowProps) {
   const [selectedPreset, setSelectedPreset] = useState<PresetId>(() => presetForScope(scope));
-  const flowStep = currentFlowStep(project);
+  const workflow = workflowState(project);
+  const flowStep = currentFlowStep({ ...project, status: workflow.status });
   const modelReady = Boolean(settings?.apiKeyConfigured && settings.model);
   const risuFormat = ['charx', 'risum'].includes(project.sourceFormat.toLowerCase())
     || Boolean(project.scanSummary?.luaSegments || project.scanSummary?.protocolSegments || project.controlReferences.length);
@@ -120,7 +126,7 @@ export function GuidedWorkflow({
     ? { ...preset, title: '完整可见内容', description: '覆盖普通卡片中的所有可见文字和世界书内容。', hint: '适合 JSON / PNG 卡片' }
     : preset);
   const selected = presets.find((preset) => preset.id === selectedPreset) ?? presets[1];
-  const hasFailedJob = project.jobs.some((job) => job.status === 'failed' || job.status === 'review_with_errors');
+  const hasFailedJob = ['failed', 'review_with_errors'].includes(workflow.latest?.status ?? '');
   const latestJob = project.jobs[0];
   const hasCancelledLatestJob = latestJob?.status === 'cancelled';
 
@@ -134,7 +140,20 @@ export function GuidedWorkflow({
   };
 
   const renderNextStep = () => {
-    if (project.status === 'new') {
+    if (['paused', 'failed', 'cancelled'].includes(workflow.status)) {
+      return <>
+        <div className="guided-next-copy">
+          <span className="guided-eyebrow">翻译任务</span>
+          <h2>{workflow.status === 'paused' ? '翻译已暂停' : workflow.status === 'failed' ? '翻译遇到错误' : '翻译已取消'}</h2>
+          <p>已完成的译文已保留。可继续处理未完成项，或打开任务页查看原因。</p>
+        </div>
+        <div className="guided-actions">
+          <button className="primary-button" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />继续翻译</button>
+          <button className="secondary-button" onClick={onOpenJobs}>查看任务</button>
+        </div>
+      </>;
+    }
+    if (workflow.status === 'new') {
       return (
         <>
           <div className="guided-next-copy">
@@ -153,14 +172,14 @@ export function GuidedWorkflow({
       );
     }
 
-    if (project.status === 'scanned') {
+    if (workflow.status === 'scanned') {
       return (
         <>
           <div className="guided-next-copy">
             <span className="guided-eyebrow">下一步 · 02</span>
             <h2>扫描完成，选择翻译方式</h2>
             <p>先选一个范围。你可以从快速翻译开始，也可以直接覆盖 RisuAI 卡片中的世界书和脚本内容。</p>
-            <TranslationStageGuide active="text" />
+            <TranslationStageGuide active={workflow.stage} />
           </div>
           {!modelReady && selectedPreset !== 'audit' && (
             <div className="guided-setup-note">
@@ -185,14 +204,14 @@ export function GuidedWorkflow({
       );
     }
 
-    if (project.status === 'translating') {
+    if (workflow.status === 'translating') {
       return (
         <>
           <div className="guided-next-copy">
             <span className="guided-eyebrow">正在处理 · 03</span>
             <h2>翻译正在进行</h2>
             <p>任务会在后台逐批处理。你可以打开任务页查看进度，完成后再进入人工审核。</p>
-            <TranslationStageGuide active="text" />
+            <TranslationStageGuide active={workflow.stage} />
           </div>
           <div className="guided-actions">
             <button className="secondary-button" onClick={onOpenJobs}><Layers3 size={16} />查看任务进度</button>
@@ -201,7 +220,7 @@ export function GuidedWorkflow({
       );
     }
 
-    if (project.status === 'review' || project.status === 'review_with_errors') {
+    if (workflow.status === 'review' || workflow.status === 'review_with_errors') {
       const pendingWithText = project.segments.filter((segment) => (
         segment.reviewStatus === 'pending'
         && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
@@ -260,7 +279,7 @@ export function GuidedWorkflow({
       );
     }
 
-    if (project.status === 'ready') {
+    if (workflow.status === 'ready') {
       return (
         <>
           <div className="guided-next-copy">
@@ -291,7 +310,7 @@ export function GuidedWorkflow({
     );
   };
 
-  const showPresets = project.status === 'new' || project.status === 'scanned';
+  const showPresets = workflow.status === 'new' || workflow.status === 'scanned';
 
   return (
     <section className="guided-workflow" aria-label="翻译流程引导">
@@ -337,7 +356,16 @@ export function GuidedWorkflow({
           <button className="secondary-button" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 脚本管理</button>
         </div>
       ) : null}
-      {project.status === 'new' && (
+      {protocols.length > 0 && <div className="guided-lua-tip">
+        <ShieldCheck size={16} />
+        <div><strong>协议槽位与保护规则 · {protocols.length} 种</strong><span>
+          {protocols.some(protocol => protocol.status === 'pending' || protocol.status === 'analyzed')
+            ? '有待确认的协议。建议翻译前核对哪些槽位可翻译、哪些需保护；后续采用规则会重新扫描，重叠的旧译文可能需要重译。'
+            : '协议规则决定结构化文本的翻译范围。需要检查漏译或调整槽位时，可打开协议页。'}
+        </span></div>
+        <button className="secondary-button" onClick={onOpenProtocols}>检查协议规则</button>
+      </div>}
+      {workflow.status === 'new' && (
         <div className="guided-scan-note"><CircleAlert size={14} />扫描完成后，你还可以在这里切换翻译预设。</div>
       )}
     </section>

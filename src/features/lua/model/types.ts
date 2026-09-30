@@ -9,7 +9,7 @@ export interface LuaManagementStep {
   message: string;
 }
 
-export type RegexCoverageRuleStatus = 'pending' | 'queued' | 'processing' | 'returned' | 'validated' | 'no-change' | 'rejected' | 'failed' | 'cancelled';
+export type RegexCoverageRuleStatus = 'pending' | 'queued' | 'processing' | 'returned' | 'validated' | 'no-change' | 'rejected' | 'failed' | 'cancelled' | 'saved' | 'saved-with-issues';
 
 export interface RegexCoverageValidation {
   passed: boolean;
@@ -192,6 +192,8 @@ export interface PortraitRouterRepairPreview {
 }
 
 export interface LuaManagementReport {
+  syntaxStatus: 'not-applicable' | 'pending' | 'passed' | 'failed';
+  scriptChanges: Array<{ pathLabel: string; before: string; after: string }>;
   generatedAt: string;
   hasModule: boolean;
   sourceCount: number;

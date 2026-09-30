@@ -1,3 +1,7 @@
+import { ApiError } from '@/shared/api/http';
+import { reconcileTextDraft } from '@/features/review/lib/text-draft';
+import { regexSaveState } from './lib/regex-save-state';
+import { regexConflictBaseline } from './lib/regex-conflict';
 import { ArrowRight, Check, Code2, Play, RotateCcw, RefreshCw, Search, ShieldCheck, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LuaManagementReport, PortraitRouterRepairChange, PortraitRouterRepairPreview, RegexCoveragePreview, RegexCoverageRule, RegexCoverageRuleResult, RegexCoverageRuleStatus, RegexRuleSaveResult, RegexRuleTestResult, ReviewFocus } from '@/shared/types';
@@ -6,6 +10,7 @@ import { LuaExportIssues } from './components/diagnostics/LuaExportIssues';
 import { LuaPortraitCandidates } from './components/portrait/LuaPortraitCandidates';
 import { LuaRuntimeRegexList } from './components/regex/LuaRuntimeRegexList';
 import { LuaSyntaxDetails } from './components/diagnostics/LuaSyntaxDetails';
+import { ScriptChanges } from './components/diagnostics/ScriptChanges';
 import { RegexCoverageDialog } from './components/regex/RegexCoverageDialog';
 import { RegexEditorDialog, type RegexEditorState } from './components/regex/RegexEditorDialog';
 import { NamespaceConfirmationDialog } from './components/namespace/NamespaceConfirmationDialog';
@@ -42,7 +47,7 @@ export function LuaPage({
   onRefresh: () => void;
   onScan: () => void;
   onPreviewRouterRepair: () => Promise<PortraitRouterRepairPreview>;
-  onApplyRouterRepair: (changes?: PortraitRouterRepairChange[]) => Promise<void> | void;
+  onApplyRouterRepair: (changes?: PortraitRouterRepairChange[]) => Promise<boolean | void> | void;
   onResetLuaDraft: () => Promise<void> | void;
   onPreviewError: (error: unknown) => void;
   onSaveLuaSyntaxLine: (pathJson: string, line: number, replacement: string, expectedLine?: string) => Promise<{ syntaxOk: boolean; remainingSyntaxIssues?: unknown[] }>;
@@ -57,6 +62,9 @@ export function LuaPage({
   reviewFocus: ReviewFocus | null;
   onClearReviewFocus: () => void;
 }) {
+  const regexSessionRef = useRef(0);
+  const syntaxBases = useRef<Record<string, string>>({});
+  const [regexEditorError, setRegexEditorError] = useState('');
   const [query, setQuery] = useState('');
   const [selectedOwnerId, setSelectedOwnerId] = useState<string | null>(null);
   const [routerPreview, setRouterPreview] = useState<PortraitRouterRepairPreview | null>(null);
@@ -160,11 +168,12 @@ export function LuaPage({
   useEffect(() => {
     if (!report) return;
     const drafts: Record<string, string> = {};
-    report.issues.forEach((issue, index) => {
-      if (issue.kind === 'syntax') drafts[`${issue.kind}:${issue.pathLabel}:${index}`] = issue.draftLine ?? '';
+    report.issues.forEach((issue) => {
+      if (issue.kind === 'syntax') drafts[`${issue.kind}:${issue.pathLabel}:${issue.line ?? 0}`] = issue.draftLine ?? '';
     });
-    setSyntaxLineDrafts(drafts);
-    setSyntaxContextExpanded({});
+    const previous = syntaxBases.current;
+    syntaxBases.current = drafts;
+    setSyntaxLineDrafts((current) => Object.fromEntries(Object.entries(drafts).map(([key, value]) => [key, reconcileTextDraft(current[key], previous[key], value)])));
   }, [report?.generatedAt]);
   function focusSyntaxEditor(): void {
     if (!report) return;
@@ -179,6 +188,7 @@ export function LuaPage({
     }
     window.setTimeout(() => {
       const element = document.getElementById(`lua-syntax-snippet-${syntaxIndex}`);
+      if (element instanceof HTMLDetailsElement) element.open = true;
       element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       element?.querySelector('textarea')?.focus();
     }, 0);
@@ -190,7 +200,11 @@ export function LuaPage({
       && issue.pathLabel === reviewFocus.pathLabel
       && (!reviewFocus.line || issue.line === reviewFocus.line));
     if (syntaxIndex < 0) return;
-    window.setTimeout(() => document.getElementById(`lua-syntax-snippet-${syntaxIndex}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+    window.setTimeout(() => {
+      const element = document.getElementById(`lua-syntax-snippet-${syntaxIndex}`);
+      if (element instanceof HTMLDetailsElement) element.open = true;
+      element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 0);
   }, [reviewFocus, report?.generatedAt, syntaxIssues]);
 
   async function saveSyntaxLine(issue: LuaManagementReport['issues'][number], issueKey: string, editedLine?: string): Promise<boolean> {
@@ -242,7 +256,8 @@ export function LuaPage({
         ...change,
         after: routerDrafts[routerChangeKey(change, index)] ?? change.after,
       }));
-      await onApplyRouterRepair(changes);
+      const saved = await onApplyRouterRepair(changes);
+      if (saved === false) return;
       setRouterPreview(null);
       setRouterDrafts({});
     } finally {
@@ -273,10 +288,21 @@ export function LuaPage({
     } : current);
   }
 
+  useEffect(() => () => {
+    regexSessionRef.current += 1;
+    regexCoverageQueueRef.current = [];
+    regexCoverageControllersRef.current.forEach((controller) => controller.abort());
+    regexEditorAbortRef.current?.abort();
+  }, []);
+
   async function openRegexPreview() {
+    if (regexPreviewLoading) return;
+    const session = ++regexSessionRef.current;
+    regexCoverageControllersRef.current.forEach((controller) => controller.abort());
     setRegexPreviewLoading(true);
     try {
       const preview = await onPreviewRegexCoverage();
+      if (session !== regexSessionRef.current) return;
       setRegexPreview({
         ...preview,
         rules: preview.rules.map((rule) => ({ ...rule, status: 'pending' as RegexCoverageRuleStatus })),
@@ -305,6 +331,7 @@ export function LuaPage({
       const next = regexCoverageQueueRef.current.shift();
       if (!next) break;
       const controller = new AbortController();
+      const session = regexSessionRef.current;
       regexCoverageInFlightRef.current += 1;
       regexCoverageControllersRef.current.set(next.pathLabel, controller);
       updateRegexRule(next.pathLabel, { status: 'processing', error: undefined });
@@ -312,6 +339,7 @@ export function LuaPage({
       void (async () => {
         try {
           const result = await onAnalyzeRegexRule(next.pathLabel, controller.signal, next.pattern);
+          if (session !== regexSessionRef.current) return;
           if (controller.signal.aborted) {
             updateRegexRule(next.pathLabel, { status: 'cancelled' });
             return;
@@ -329,11 +357,13 @@ export function LuaPage({
             setRegexCoverageDrafts((drafts) => ({ ...drafts, [next.pathLabel]: result.candidatePattern! }));
           }
         } catch (error) {
+          if (session !== regexSessionRef.current) return;
           updateRegexRule(next.pathLabel, {
             status: controller.signal.aborted ? 'cancelled' : 'failed',
             error: controller.signal.aborted ? undefined : error instanceof Error ? error.message : String(error),
           });
         } finally {
+          if (session !== regexSessionRef.current) return;
           regexCoverageControllersRef.current.delete(next.pathLabel);
           regexCoverageInFlightRef.current = Math.max(0, regexCoverageInFlightRef.current - 1);
           syncRegexCoverageActivity();
@@ -391,6 +421,7 @@ export function LuaPage({
     runtimePostprocess?: boolean;
     out?: string;
   }) {
+    setRegexEditorError('');
     const currentPattern = reference.fullPattern || '';
     if (!currentPattern) {
       onPreviewError(new Error('该规则缺少完整正则内容，请刷新诊断后重试。'));
@@ -418,9 +449,11 @@ export function LuaPage({
   async function testManualRegex() {
     if (!regexEditor || regexEditorTesting || regexEditorSaving || regexEditorAnalyzing) return;
     setRegexEditorTesting(true);
+    setRegexEditorError('');
     try {
       setRegexEditorTest(await onTestRegexRule(regexEditor.pathLabel, regexEditorPattern));
     } catch (error) {
+      setRegexEditorError(error instanceof Error ? error.message : String(error));
       onPreviewError(error);
     } finally {
       setRegexEditorTesting(false);
@@ -430,6 +463,7 @@ export function LuaPage({
   async function saveManualRegex() {
     if (!regexEditor || regexEditorSaving || regexEditorTesting || regexEditorAnalyzing) return;
     setRegexEditorSaving(true);
+    setRegexEditorError('');
     try {
       const output = regexEditor.runtimePostprocess ? regexEditorOutput : undefined;
       const result = await onSaveRegexRule(
@@ -445,7 +479,7 @@ export function LuaPage({
         currentPattern: result.pattern,
         sourceMatchCount: result.validationSourceMatchCount ?? result.sourceMatchCount,
         draftMatchCount: result.validationDraftMatchCount ?? result.draftMatchCount,
-        sourceSamples: result.sourceSamples,
+        sourceSamples: current.sourceSamples,
         draftSamples: result.draftSamples,
         forcePassed: result.forcePassed,
         currentOutput: result.out ?? current.currentOutput,
@@ -453,8 +487,14 @@ export function LuaPage({
       setRegexEditorPattern(result.pattern);
       if (result.out !== undefined) setRegexEditorOutput(result.out);
       setRegexEditorForcePass(result.forcePassed);
-      setRegexEditorTest(result);
+      setRegexEditorTest(null);
+      setRegexEditorCandidateNotice(regexSaveState(result).message);
     } catch (error) {
+      setRegexEditorError(error instanceof Error ? error.message : String(error));
+      if (error instanceof ApiError && error.status === 409) {
+        setRegexEditor((current) => current ? regexConflictBaseline(current, error.payload) : current);
+        setRegexEditorError('规则或替换输出已被其他操作更新。最新已保存内容已显示在上方；你的编辑已保留，请对照、测试后再保存。');
+      }
       onPreviewError(error);
     } finally {
       setRegexEditorSaving(false);
@@ -466,6 +506,7 @@ export function LuaPage({
     const controller = new AbortController();
     regexEditorAbortRef.current = controller;
     setRegexEditorAnalyzing(true);
+    setRegexEditorError('');
     try {
       const result = await onAnalyzeRegexRule(regexEditor.pathLabel, controller.signal, regexEditorPattern);
       if (controller.signal.aborted) return;
@@ -479,7 +520,10 @@ export function LuaPage({
       setRegexEditorTest(null);
       setRegexEditorCandidateNotice('模型已返回候选规则并填入输入框；请人工修改后测试匹配，再保存到草稿。');
     } catch (error) {
-      if (!controller.signal.aborted) onPreviewError(error);
+      if (!controller.signal.aborted) {
+        setRegexEditorError(error instanceof Error ? error.message : String(error));
+        onPreviewError(error);
+      }
     } finally {
       if (regexEditorAbortRef.current === controller) regexEditorAbortRef.current = null;
       setRegexEditorAnalyzing(false);
@@ -492,12 +536,14 @@ export function LuaPage({
 
   async function testRegexCoverageRule(rule: RegexCoverageRule) {
     const pattern = regexCoverageDrafts[rule.pathLabel] ?? rule.candidatePattern ?? rule.pattern;
-    if (!pattern || rule.status === 'queued' || rule.status === 'processing' || regexCoverageTestingPath === rule.pathLabel || regexCoverageSavingPath === rule.pathLabel) return;
+    if (!pattern || rule.status === 'queued' || rule.status === 'processing' || regexCoverageTestingPath !== null || regexCoverageSavingPath !== null) return;
     setRegexCoverageTestingPath(rule.pathLabel);
+    updateRegexRule(rule.pathLabel, { error: undefined });
     try {
       const result = await onTestRegexRule(rule.pathLabel, pattern);
       setRegexCoverageTests((tests) => ({ ...tests, [rule.pathLabel]: result }));
     } catch (error) {
+      updateRegexRule(rule.pathLabel, { error: error instanceof Error ? error.message : String(error) });
       onPreviewError(error);
     } finally {
       setRegexCoverageTestingPath(null);
@@ -506,35 +552,41 @@ export function LuaPage({
 
   async function saveRegexCoverageRule(rule: RegexCoverageRule) {
     const pattern = regexCoverageDrafts[rule.pathLabel] ?? rule.candidatePattern ?? rule.pattern;
-    if (!pattern || rule.status === 'queued' || rule.status === 'processing' || regexCoverageTestingPath === rule.pathLabel || regexCoverageSavingPath === rule.pathLabel) return;
+    if (!pattern || rule.status === 'queued' || rule.status === 'processing' || regexCoverageTestingPath !== null || regexCoverageSavingPath !== null) return;
     setRegexCoverageSavingPath(rule.pathLabel);
+    updateRegexRule(rule.pathLabel, { error: undefined });
     try {
       const result = await onSaveRegexRule(rule.pathLabel, pattern, rule.pattern, false);
-      const passed = result.compiled && (result.dynamicDisplay || result.runtimePostprocess || result.sourceMatchCount === result.draftMatchCount);
+      const savedState = regexSaveState(result);
+      const { passed } = savedState;
       updateRegexRule(rule.pathLabel, {
         pattern: result.pattern,
         candidatePattern: result.pattern,
-        sourceMatchCount: result.sourceMatchCount,
-        draftMatchCount: result.draftMatchCount,
+        sourceMatchCount: savedState.source,
+        draftMatchCount: savedState.draft,
         sourceSamples: result.sourceSamples,
         draftSamples: result.draftSamples,
-        status: passed ? 'validated' : 'rejected',
+        status: savedState.status,
         validation: {
           passed,
-          sourceMatchCount: result.sourceMatchCount,
-          draftMatchCount: result.draftMatchCount,
+          sourceMatchCount: savedState.source,
+          draftMatchCount: savedState.draft,
           dynamicDisplay: result.dynamicDisplay,
           runtimePostprocess: result.runtimePostprocess,
-          message: passed && result.dynamicDisplay
-            ? '动态展示规则已通过编译；静态卡片命中仅作样本参考。'
-            : passed && result.runtimePostprocess
-            ? '聊天后处理规则已通过编译；静态卡片命中仅作样本参考。'
-            : passed ? undefined : `已保存，但命中 ${result.draftMatchCount} 与原文 ${result.sourceMatchCount} 仍不一致。`,
+          message: savedState.message,
         },
       });
       setRegexCoverageDrafts((drafts) => ({ ...drafts, [rule.pathLabel]: result.pattern }));
-      setRegexCoverageTests((tests) => ({ ...tests, [rule.pathLabel]: result }));
+      setRegexCoverageTests((tests) => {
+        const next = { ...tests };
+        delete next[rule.pathLabel];
+        return next;
+      });
     } catch (error) {
+      updateRegexRule(rule.pathLabel, { error: error instanceof Error ? error.message : String(error) });
+      if (error instanceof ApiError && error.status === 409 && typeof error.payload.currentPattern === 'string') {
+        updateRegexRule(rule.pathLabel, { pattern: error.payload.currentPattern, error: '规则已更新，当前编辑已保留。请核对最新基线后再保存。' });
+      }
       onPreviewError(error);
     } finally {
       setRegexCoverageSavingPath(null);
@@ -545,7 +597,7 @@ export function LuaPage({
     return <section className="lua-management-section"><div className="table-empty">正在读取脚本诊断信息…</div></section>;
   }
   if (!report) {
-    return <section className="lua-management-section"><div className="table-empty">暂时无法读取脚本诊断信息，请重试。</div></section>;
+    return <section className="lua-management-section"><div className="table-empty">暂时无法读取脚本诊断信息。<button className="secondary-button" onClick={onRefresh}>重新读取诊断</button></div></section>;
   }
 
   return (
@@ -560,7 +612,7 @@ export function LuaPage({
           <button className="secondary-button" onClick={onRefresh} disabled={loading}>
             <RefreshCw className={loading ? 'spin' : ''} size={16} />刷新诊断
           </button>
-          <button className="secondary-button" onClick={onScan}><Search size={16} />重新扫描 脚本</button>
+          <button className="secondary-button" onClick={() => document.getElementById('lua-script-changes')?.scrollIntoView({ behavior: 'smooth' })}><Code2 size={16} />查看修改对比</button>
         </div>
       </header>
 
@@ -583,14 +635,15 @@ export function LuaPage({
         forcePass={regexEditorForcePass}
         test={regexEditorTest}
         candidateNotice={regexEditorCandidateNotice}
+        error={regexEditorError}
         analyzing={regexEditorAnalyzing}
         testing={regexEditorTesting}
         saving={regexEditorSaving}
         onClose={() => setRegexEditor(null)}
         onCancelAnalysis={cancelManualRegexAnalysis}
-        onPatternChange={(value) => { setRegexEditorPattern(value); setRegexEditorTest(null); setRegexEditorCandidateNotice(null); }}
-        onOutputChange={(value) => { setRegexEditorOutput(value); setRegexEditorTest(null); }}
-        onForcePassChange={setRegexEditorForcePass}
+        onPatternChange={(value) => { setRegexEditorPattern(value); setRegexEditorTest(null); setRegexEditorCandidateNotice(null); setRegexEditorError(''); }}
+        onOutputChange={(value) => { setRegexEditorOutput(value); setRegexEditorTest(null); setRegexEditorCandidateNotice(null); setRegexEditorError(''); }}
+        onForcePassChange={(value) => { setRegexEditorForcePass(value); setRegexEditorCandidateNotice(null); }}
         onAnalyze={() => void analyzeManualRegex()}
         onTest={() => void testManualRegex()}
         onSave={() => void saveManualRegex()}
@@ -744,6 +797,8 @@ export function LuaPage({
         onToggleContext={(issueKey, expanded) => setSyntaxContextExpanded((current) => ({ ...current, [issueKey]: expanded }))}
         onSaveSyntaxLine={saveSyntaxLine}
       />
+
+      <ScriptChanges changes={report.scriptChanges ?? []} />
 
       <div className="lua-maintenance-row">
         <button className="danger-button" onClick={() => void onResetLuaDraft()} disabled={loading || !report.hasModule} title="仅恢复 Lua 模块草稿，不影响卡片正文和翻译结果"><RotateCcw size={16} />恢复原始 Lua 草稿</button>

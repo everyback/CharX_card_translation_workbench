@@ -1,3 +1,5 @@
+import { workflowState } from '@/features/translation/model/workflow-state';
+import { AutomaticLoads } from './automatic-loads';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/shared/api/http';
 import type {
@@ -48,8 +50,12 @@ export function useProjectWorkspace({
   const [luaReportLoading, setLuaReportLoading] = useState(false);
   const [projectLoading, setProjectLoading] = useState(false);
   const [projectLoadProgress, setProjectLoadProgress] = useState({ current: 0, total: 0, known: false });
+  const automaticLoads = useRef(new AutomaticLoads());
   const selectedProjectIdRef = useRef('');
+  const projectListRequest = useRef(0);
   const projectRequestRef = useRef(0);
+  const loadedProjectIdRef = useRef(project?.id);
+  loadedProjectIdRef.current = project?.id;
   const projectOverviewRequestRef = useRef(0);
   const resourcesRequestRef = useRef(0);
   const luaReportRequestRef = useRef(0);
@@ -58,6 +64,8 @@ export function useProjectWorkspace({
     // Clicking the active project does not change selectedProjectId, so its loading effect
     // will not rerun. Avoid turning the mask on without a request that can clear it.
     if (selectedProjectIdRef.current === projectId) return;
+    automaticLoads.current.clear();
+    projectRequestRef.current += 1;
     setProjectLoading(Boolean(projectId));
     setProjectLoadProgress({ current: 0, total: 0, known: false });
     selectedProjectIdRef.current = projectId;
@@ -78,31 +86,34 @@ export function useProjectWorkspace({
   }, []);
 
   const refreshProjects = useCallback(async (syncSettings = true) => {
+    const requestId = ++projectListRequest.current;
+    const selectionAtStart = selectedProjectIdRef.current;
+    const refreshQuery = syncSettings ? '?fresh=1' : '';
     const [summary, list] = await Promise.all([
-      api<Dashboard>('/api/dashboard'),
-      api<ProjectSummary[]>('/api/projects'),
+      api<Dashboard>('/api/dashboard' + refreshQuery),
+      api<ProjectSummary[]>('/api/projects' + refreshQuery),
     ]);
+    if (requestId !== projectListRequest.current) return;
     if (syncSettings) onSettingsLoaded(summary.settings);
     setProjects(list);
     const currentProjectExists = list.some((item) => item.id === selectedProjectIdRef.current);
-    if (!currentProjectExists) selectProject(list[0]?.id || '');
+    if (!currentProjectExists && selectionAtStart === selectedProjectIdRef.current) selectProject(list[0]?.id || '');
   }, [onSettingsLoaded, selectProject]);
 
   const refreshProject = useCallback(async (projectId: string) => {
-    if (!projectId) {
-      setProject(null);
-      return;
-    }
+    // A save from the previous project must not supersede the new project's load.
+    if (!projectId || selectedProjectIdRef.current !== projectId) return;
+    const requestId = ++projectRequestRef.current;
     const [detail, terms, protocolSchemas] = await Promise.all([
       api<ProjectDetail>(`/api/projects/${projectId}`),
       api<GlossaryTerm[]>(`/api/projects/${projectId}/glossary`),
       api<ProtocolSchema[]>(`/api/projects/${projectId}/protocols`),
     ]);
-    if (selectedProjectIdRef.current !== projectId) return;
-    setProject(detail);
+    if (selectedProjectIdRef.current !== projectId || requestId !== projectRequestRef.current) return;
+    setProject({ ...detail, status: workflowState(detail).status });
+    setProjectLoading(false);
     setGlossary(terms);
     setProtocols(protocolSchemas);
-    setScope(detail.scope);
     setSelectedSegmentId((current) => current && detail.segments.some((segment) => segment.id === current)
       ? current
       : detail.segments.find((segment) => segment.reviewStatus === 'pending')?.id || detail.segments[0]?.id || '');
@@ -137,7 +148,7 @@ export function useProjectWorkspace({
     if (segments.length !== total) {
       throw new Error(`卡片段落数量不一致：已读取 ${segments.length} / ${total} 段。`);
     }
-    setProject({ ...detail, segments });
+    setProject({ ...detail, segments, status: workflowState({ ...detail, segments }).status });
     setGlossary(terms);
     setProtocols(protocolSchemas);
     setScope(detail.scope);
@@ -147,7 +158,7 @@ export function useProjectWorkspace({
   }, []);
 
   const loadProjectOverview = useCallback(async (projectId = project?.id) => {
-    if (!projectId || projectOverviewLoading) return;
+    if (!projectId || selectedProjectIdRef.current !== projectId) return;
     const requestId = ++projectOverviewRequestRef.current;
     const loadingStartedAt = Date.now();
     setProjectOverviewLoading(true);
@@ -158,7 +169,7 @@ export function useProjectWorkspace({
         setProjectOverview(overview);
       }
     } catch (overviewError) {
-      onError(overviewError);
+      if (projectOverviewRequestRef.current === requestId && selectedProjectIdRef.current === projectId) onError(overviewError);
     } finally {
       const remaining = LOADING_MASK_MINIMUM_MS - (Date.now() - loadingStartedAt);
       if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
@@ -166,10 +177,10 @@ export function useProjectWorkspace({
         setProjectOverviewLoading(false);
       }
     }
-  }, [clearError, onError, project?.id, projectOverviewLoading]);
+  }, [clearError, onError, project?.id]);
 
   const loadResources = useCallback(async (projectId = project?.id) => {
-    if (!projectId || resourcesLoading) return;
+    if (!projectId || selectedProjectIdRef.current !== projectId) return;
     const requestId = ++resourcesRequestRef.current;
     const loadingStartedAt = Date.now();
     setResourcesLoading(true);
@@ -180,7 +191,7 @@ export function useProjectWorkspace({
         setResources(inspection);
       }
     } catch (resourceError) {
-      onError(resourceError);
+      if (resourcesRequestRef.current === requestId && selectedProjectIdRef.current === projectId) onError(resourceError);
     } finally {
       const remaining = LOADING_MASK_MINIMUM_MS - (Date.now() - loadingStartedAt);
       if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
@@ -188,10 +199,10 @@ export function useProjectWorkspace({
         setResourcesLoading(false);
       }
     }
-  }, [clearError, onError, project?.id, resourcesLoading]);
+  }, [clearError, onError, project?.id]);
 
-  const loadLuaReport = useCallback(async (projectId = project?.id, force = false): Promise<LuaManagementReport | null> => {
-    if (!projectId || (!force && luaReportLoading)) return null;
+  const loadLuaReport = useCallback(async (projectId = project?.id): Promise<LuaManagementReport | null> => {
+    if (!projectId || selectedProjectIdRef.current !== projectId) return null;
     const requestId = ++luaReportRequestRef.current;
     setLuaReportLoading(true);
     clearError();
@@ -203,16 +214,19 @@ export function useProjectWorkspace({
         loadedReport = report;
       }
     } catch (reportError) {
-      onError(reportError);
+      if (luaReportRequestRef.current === requestId && selectedProjectIdRef.current === projectId) onError(reportError);
     } finally {
       if (luaReportRequestRef.current === requestId && selectedProjectIdRef.current === projectId) {
         setLuaReportLoading(false);
       }
     }
     return loadedReport;
-  }, [clearError, luaReportLoading, onError, project?.id]);
+  }, [clearError, onError, project?.id]);
 
-  const invalidateProjectOverview = useCallback(() => setProjectOverview(null), []);
+  const invalidateProjectOverview = useCallback(() => {
+    automaticLoads.current.clear();
+    setProjectOverview(null);
+  }, []);
 
   useEffect(() => {
     void refreshProjects().catch(onError);
@@ -245,25 +259,20 @@ export function useProjectWorkspace({
   }, [loadProjectProgressively, onError, project?.id, selectedProjectId, tab]);
 
   useEffect(() => {
-    if (tab !== 'overview' || !project?.id || project.id !== selectedProjectId || projectOverview) return;
-    void loadProjectOverview(project.id);
-  }, [loadProjectOverview, project?.id, projectOverview, selectedProjectId, tab]);
+    if (tab !== 'overview' || !project?.id || project.id !== selectedProjectId) return;
+    void automaticLoads.current.run('overview:' + project.id + ':' + project.updatedAt, () => loadProjectOverview(project.id));
+  }, [project?.updatedAt, loadProjectOverview, project?.id, projectOverview, selectedProjectId, tab]);
 
   useEffect(() => {
-    if (tab !== 'resources' || !project?.id || project.id !== selectedProjectId || resources) return;
-    void loadResources(project.id);
-  }, [loadResources, project?.id, resources, selectedProjectId, tab]);
+    if (tab !== 'resources' || !project?.id || project.id !== selectedProjectId) return;
+    void automaticLoads.current.run('resources:' + project.id + ':' + project.updatedAt, () => loadResources(project.id));
+  }, [project?.updatedAt, loadResources, project?.id, resources, selectedProjectId, tab]);
 
   useEffect(() => {
-    if (tab !== 'lua' || !project?.id || project.id !== selectedProjectId || luaReport) return;
-    void loadLuaReport(project.id);
-  }, [loadLuaReport, luaReport, project?.id, selectedProjectId, tab]);
+    if (tab !== 'lua' || !project?.id || project.id !== selectedProjectId) return;
+    void automaticLoads.current.run('lua:' + project.id + ':' + project.updatedAt, () => loadLuaReport(project.id));
+  }, [project?.updatedAt, loadLuaReport, luaReport, project?.id, selectedProjectId, tab]);
 
-  useEffect(() => {
-    // Scans, approvals, and exports refresh the project timestamp. Drop the
-    // cached report so the Lua tab observes the new draft on its next render.
-    setLuaReport(null);
-  }, [project?.updatedAt]);
 
   useEffect(() => {
     let stopped = false;
@@ -271,6 +280,10 @@ export function useProjectWorkspace({
     const poll = async () => {
       try {
         await refreshProjects(false);
+        if (stopped) return;
+        const currentId = selectedProjectIdRef.current;
+        // Allow the first paginated load to finish, including large cards.
+        if (currentId && loadedProjectIdRef.current === currentId && !isIndependentTab(tab)) await refreshProject(currentId);
       } catch (error) {
         onError(error);
       } finally {
@@ -282,7 +295,7 @@ export function useProjectWorkspace({
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [onError, refreshProjects]);
+  }, [onError, refreshProjects, refreshProject, tab]);
 
   return {
     projects,

@@ -18,9 +18,9 @@ export function registerSystemRoutes(app: FastifyInstance): void {
     databaseWorkers: db.workerCount,
   }));
 
-  app.get('/api/dashboard', async () => {
+  app.get<{ Querystring: { fresh?: string } }>('/api/dashboard', async (request) => {
     const currentTime = Date.now();
-    if (dashboardCache && dashboardCache.expiresAt > currentTime) return dashboardCache.value;
+    if (request.query.fresh !== '1' && dashboardCache && dashboardCache.expiresAt > currentTime) return dashboardCache.value;
     const projects = Number((await db.prepare('SELECT COUNT(*) AS count FROM projects').get() as { count: number }).count);
     const pendingReview = Number((await db.prepare("SELECT COUNT(*) AS count FROM segments WHERE review_status = 'pending'").get() as { count: number }).count);
     const activeJobs = Number((await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status IN ('queued', 'running', 'paused')").get() as { count: number }).count);
@@ -35,9 +35,9 @@ export function registerSystemRoutes(app: FastifyInstance): void {
 
   app.put('/api/settings', async (request) => updateSettings(asRecord(request.body)));
 
-  app.get('/api/projects', async () => {
+  app.get<{ Querystring: { fresh?: string } }>('/api/projects', async (request) => {
     const currentTime = Date.now();
-    if (projectListCache && projectListCache.expiresAt > currentTime) return projectListCache.value;
+    if (request.query.fresh !== '1' && projectListCache && projectListCache.expiresAt > currentTime) return projectListCache.value;
     const projects = await db.prepare(`
       SELECT
         p.id,

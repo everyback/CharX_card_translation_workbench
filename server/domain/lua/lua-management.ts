@@ -1,3 +1,4 @@
+import { scriptChanges, type ScriptChange } from './script-changes.js';
 import {
   risuControlReferences,
   scanRisuModule,
@@ -76,6 +77,8 @@ export interface LuaPortraitCandidate {
 }
 
 export interface LuaManagementReport {
+  syntaxStatus: 'not-applicable' | 'pending' | 'passed' | 'failed';
+  scriptChanges: ScriptChange[];
   generatedAt: string;
   hasModule: boolean;
   sourceCount: number;
@@ -610,6 +613,8 @@ export function buildLuaManagementReport(input: ReportInput): LuaManagementRepor
 
   return {
     generatedAt: input.generatedAt ?? new Date().toISOString(),
+    syntaxStatus: !hasModule ? 'not-applicable' : !draftModule ? 'pending' : issues.some(issue => issue.kind === 'syntax') ? 'failed' : 'passed',
+    scriptChanges: [...scriptChanges(input.originalModule, input.draftModule, '$module'), ...scriptChanges(input.originalCard, input.draftCard, '卡片')],
     hasModule,
     sourceCount,
     visibleCount,

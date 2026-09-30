@@ -1,3 +1,5 @@
+import { createJobLifecycleService } from '../application/translation/job-lifecycle-service.js';
+import { registerJobRoutes } from './jobs.js';
 import { loadReviewedDraft } from '../application/export/reviewed-draft.js';
 import { saveImageCandidate } from '../application/resources/image-candidate-service.js';
 import { validateUploadedImage } from '../domain/resources/image-upload.js';
@@ -144,6 +146,9 @@ const exportService = createExportService({
   review: reviewService,
 });
 
+registerJobRoutes(app, createJobLifecycleService({
+  database: db, clock: now, jobById: translationJobs.jobById, abortJob, scheduleJob,
+}));
 registerSystemRoutes(app);
 registerPatchRoutes(app);
 registerRemotePatchRoutes(app);
@@ -676,6 +681,9 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/protocols/
 app.patch<{ Params: { projectId: string; schemaId: string } }>(
   '/api/projects/:projectId/protocols/:schemaId',
   async (request, reply) => {
+    const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running', 'paused')")
+      .get(request.params.projectId) as { count: number };
+    if (Number(active.count) > 0) return reply.code(409).send({ error: '请先结束当前翻译任务，再调整协议规则并重新扫描。' });
     try {
       return await updateProtocolSchema(request.params.projectId, request.params.schemaId, asRecord(request.body));
     } catch (error) {
@@ -1759,66 +1767,6 @@ app.get<{ Params: { jobId: string } }>('/api/jobs/:jobId', async (request, reply
     FROM job_logs WHERE job_id = ? ORDER BY id DESC LIMIT 80
   `).all(request.params.jobId)).reverse();
   return { ...job, logs };
-});
-
-app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/pause', async (request, reply) => {
-  const result = await db.prepare("UPDATE jobs SET status = 'paused', updated_at = ? WHERE id = ? AND status IN ('queued', 'running')")
-    .run(now(), request.params.jobId);
-  if (!result.changes) return reply.code(409).send({ error: '任务当前不能暂停。' });
-  abortJob(request.params.jobId);
-  await db.prepare("UPDATE job_items SET status = 'pending', updated_at = ? WHERE job_id = ? AND status = 'running'")
-    .run(now(), request.params.jobId);
-  return await translationJobs.jobById(request.params.jobId);
-});
-
-app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/resume', async (request, reply) => {
-  const result = await db.prepare("UPDATE jobs SET status = 'queued', last_error = NULL, updated_at = ? WHERE id = ? AND status IN ('paused', 'failed', 'cancelled')")
-    .run(now(), request.params.jobId);
-  if (!result.changes) return reply.code(409).send({ error: '任务当前不能继续。' });
-  await db.prepare("UPDATE job_items SET status = 'pending', last_error = NULL, updated_at = ? WHERE job_id = ? AND status IN ('running', 'failed', 'cancelled')")
-    .run(now(), request.params.jobId);
-  await db.prepare("UPDATE projects SET status = 'translating', updated_at = ? WHERE id = (SELECT project_id FROM jobs WHERE id = ?)")
-    .run(now(), request.params.jobId);
-  scheduleJob(request.params.jobId);
-  return await translationJobs.jobById(request.params.jobId);
-});
-
-app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/retry-failed', async (request, reply) => {
-  const job = await translationJobs.jobById(request.params.jobId);
-  if (!job) return reply.code(404).send({ error: '任务不存在。' });
-  await db.prepare("UPDATE job_items SET status = 'pending', last_error = NULL, updated_at = ? WHERE job_id = ? AND status = 'failed'")
-    .run(now(), request.params.jobId);
-  await db.prepare("UPDATE jobs SET status = 'queued', failed_items = 0, post_completed_items = 0, post_failed_items = 0, last_error = NULL, updated_at = ? WHERE id = ?")
-    .run(now(), request.params.jobId);
-  scheduleJob(request.params.jobId);
-  return await translationJobs.jobById(request.params.jobId);
-});
-
-app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/rerun-postprocessing', async (request, reply) => {
-  const result = await db.prepare(`
-    UPDATE jobs
-    SET status = 'queued', post_completed_items = 0, post_failed_items = 0,
-      last_error = NULL, updated_at = ?
-    WHERE id = ? AND status IN ('review', 'review_with_errors')
-      AND (COALESCE(post_failed_items, 0) > 0 OR COALESCE(post_completed_items, 0) < COALESCE(post_total_items, 0))
-  `).run(now(), request.params.jobId);
-  if (!result.changes) return reply.code(409).send({ error: '阶段 2 已完成或当前没有可重试的失败项，无需重复执行。' });
-  await db.prepare("UPDATE projects SET status = 'translating', updated_at = ? WHERE id = (SELECT project_id FROM jobs WHERE id = ?)")
-    .run(now(), request.params.jobId);
-  await db.prepare('INSERT INTO job_logs(job_id, level, message, created_at) VALUES (?, ?, ?, ?)')
-    .run(request.params.jobId, 'info', '已请求重新执行阶段 2：正文译文保持不变，只复核 Lua 正则与关键词适配。', now());
-  scheduleJob(request.params.jobId);
-  return await translationJobs.jobById(request.params.jobId);
-});
-
-app.post<{ Params: { jobId: string } }>('/api/jobs/:jobId/cancel', async (request, reply) => {
-  abortJob(request.params.jobId);
-  const result = await db.prepare("UPDATE jobs SET status = 'cancelled', updated_at = ? WHERE id = ?")
-    .run(now(), request.params.jobId);
-  if (!result.changes) return reply.code(404).send({ error: '任务不存在。' });
-  await db.prepare("UPDATE job_items SET status = 'cancelled', updated_at = ? WHERE job_id = ? AND status IN ('pending', 'running')")
-    .run(now(), request.params.jobId);
-  return await translationJobs.jobById(request.params.jobId);
 });
 
 app.patch<{ Params: { segmentId: string } }>('/api/segments/:segmentId', async (request, reply) => {

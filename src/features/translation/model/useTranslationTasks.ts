@@ -32,11 +32,14 @@ export function useTranslationTasks({
 }: UseTranslationTasksOptions) {
   const [jobDetail, setJobDetail] = useState<Job | null>(null);
   const selectedProjectIdRef = useRef(selectedProjectId);
+  selectedProjectIdRef.current = selectedProjectId;
+  const jobRequestRef = useRef(0);
   const clearJobDetail = useCallback(() => setJobDetail(null), []);
 
   const loadJob = useCallback(async (jobId: string, expectedProjectId = selectedProjectIdRef.current) => {
+    const request = ++jobRequestRef.current;
     const detail = await api<Job>(`/api/jobs/${jobId}`);
-    if (selectedProjectIdRef.current !== expectedProjectId || detail.projectId !== expectedProjectId) return;
+    if (request !== jobRequestRef.current || selectedProjectIdRef.current !== expectedProjectId || detail.projectId !== expectedProjectId) return;
     setJobDetail(detail);
   }, []);
 
@@ -47,11 +50,11 @@ export function useTranslationTasks({
       return;
     }
 
-    const latestJob = project.jobs[0];
+    const latestJob = project.jobs.find((job) => ['queued', 'running', 'paused'].includes(job.status)) ?? project.jobs[0];
     const hasPendingSegments = project.segments.some((segment) => (
       segment.included && ['untranslated', 'rejected'].includes(segment.reviewStatus)
     ));
-    if (latestJob && ['queued', 'running'].includes(latestJob.status) && !hasPendingSegments) {
+    if (latestJob && ['queued', 'running'].includes(latestJob.status)) {
       onShowJobs();
       onNotice('当前翻译任务仍在进行中，已打开任务进度。');
       return;
@@ -82,6 +85,8 @@ export function useTranslationTasks({
       const job = action
         ? await api<Job>(`/api/jobs/${latestJob!.id}/${action}`, { method: 'POST', ...jsonBody({}) })
         : await api<Job>(`/api/projects/${project.id}/jobs`, { method: 'POST', ...jsonBody({}) });
+      if (selectedProjectIdRef.current !== project.id) return;
+      jobRequestRef.current += 1;
       setJobDetail(job);
       if (action === 'rerun-postprocessing') {
         onNotice('已从顶部按钮启动阶段 2：正文译文保持不变，开始处理 Lua 正则与关键词适配。');
@@ -100,9 +105,11 @@ export function useTranslationTasks({
     action: 'pause' | 'resume' | 'retry-failed' | 'rerun-postprocessing' | 'cancel',
   ) => {
     const expectedProjectId = selectedProjectIdRef.current;
+    jobRequestRef.current += 1;
     await runAction(action, async () => {
       const detail = await api<Job>(`/api/jobs/${jobId}/${action}`, { method: 'POST', ...jsonBody({}) });
       if (selectedProjectIdRef.current === expectedProjectId && detail.projectId === expectedProjectId) {
+        jobRequestRef.current += 1;
         setJobDetail(detail);
       }
       if (action === 'retry-failed') {
@@ -138,16 +145,21 @@ export function useTranslationTasks({
       tone: 'danger',
     })) return;
 
+    let changed = false;
     await runAction('retranslate', async () => {
       const job = await api<Job>(`/api/projects/${project.id}/retranslate`, {
         method: 'POST',
         ...jsonBody({ segmentIds: uniqueIds }),
       });
+      changed = true;
+      if (selectedProjectIdRef.current !== project.id) return;
+      jobRequestRef.current += 1;
       setJobDetail(job);
       onNotice(`已清空 ${selected.length} 条结果并重新加入翻译队列。`);
       onShowJobs();
       await Promise.all([refreshProject(project.id), refreshProjects()]);
     });
+    return changed;
   }, [
     onNotice,
     onOpenSettings,
@@ -161,23 +173,20 @@ export function useTranslationTasks({
   ]);
 
   useEffect(() => {
-    selectedProjectIdRef.current = selectedProjectId;
+    jobRequestRef.current += 1;
     setJobDetail((current) => current && current.projectId === selectedProjectId ? current : null);
   }, [selectedProjectId]);
 
   useEffect(() => {
-    const active = project?.id === selectedProjectId
-      ? project.jobs.find((job) => ['queued', 'running'].includes(job.status))
-      : undefined;
-    if (!active) return;
+    // Keep the selected job fresh, including its final response after a pause
+    // or completion. Polling the active job must not replace a history selection.
+    const jobId = project?.id === selectedProjectId ? jobDetail?.id ?? project.jobs[0]?.id : undefined;
+    if (!jobId) return;
     let stopped = false;
     let timer = 0;
     const poll = async () => {
       try {
-        await Promise.all([
-          refreshProject(selectedProjectId),
-          loadJob(active.id, selectedProjectId),
-        ]);
+        await loadJob(jobId, selectedProjectId);
       } catch (error) {
         onError(error);
       } finally {
@@ -189,7 +198,7 @@ export function useTranslationTasks({
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [loadJob, onError, project?.id, project?.jobs, refreshProject, selectedProjectId]);
+  }, [jobDetail?.id, loadJob, onError, project?.id, project?.jobs[0]?.id, selectedProjectId]);
 
   return {
     jobDetail,

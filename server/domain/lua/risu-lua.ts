@@ -952,7 +952,7 @@ export function validateRisuLuaChanges(
       const draftLines = candidate.replace(/\r\n/gu, '\n').split('\n');
       const sourceLineNumber = line ? locateLuaSourceLine(sourceLines, draftLines, line) : undefined;
       const sourceReferenceLine = line ? sourceLineNumber ?? luaSourceReference(sourceLines, draftLines, line) : undefined;
-      const sourceContextLines = sourceReferenceLine ? sourceLines.slice(Math.max(0, sourceReferenceLine - 6), sourceReferenceLine + 5).map((text, index) => ({ line: Math.max(1, sourceReferenceLine - 5) + index, text })) : undefined;
+      const sourceContextLines = sourceReferenceLine ? sourceLines.slice(Math.max(0, sourceReferenceLine - 13), sourceReferenceLine + 12).map((text, index) => ({ line: Math.max(1, sourceReferenceLine - 12) + index, text })) : undefined;
       const contextLines = line
         ? buildLuaSyntaxContext(sourceLines, draftLines, line, sourceLineNumber)
         : undefined;
