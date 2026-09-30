@@ -33,7 +33,7 @@ test('script comparison survives successful syntax repair and covers regex outpu
 
 test('script comparison represents additions, removals, plain card regex and exact long lines', () => {
   const long = 'x'.repeat(20000);
-  assert.deepEqual(scriptChanges({}, wrap(long), '$module'), [{ pathLabel: '$module.trigger.0.effect.0.code', before: '', after: long }]);
+  assert.deepEqual(scriptChanges({}, wrap(long), '$module'), [{ pathLabel: '$module.trigger.0.effect.0.code', before: '', after: long, luaPathJson: '["trigger",0,"effect",0,"code"]' }]);
   assert.equal(scriptChanges(wrap(long), {}, '$module')[0].before, long);
   assert.equal(scriptChanges({ customscript: [{ in: 'a', out: 'b' }] }, { customscript: [{ in: 'a', out: 'c' }] }, '卡片')[0].after, 'c');
   assert.deepEqual(scriptChanges(wrap(long), wrap(long), '$module'), []);
@@ -58,4 +58,16 @@ test('syntax failure and review readiness remain distinct', () => {
   const passed = buildLuaManagementReport({ originalCard: {}, originalModule, draftModule: originalModule, projectStatus: 'review' });
   assert.equal(diagnosticState(passed).syntax, '语法通过');
   assert.equal(diagnosticState(passed).export, '保存审核稿后回验');
+});
+
+
+test('editable comparison exposes exact module paths only for existing Lua fields', () => {
+  const original = wrap('return "Hello"');
+  const current = wrap('return "你好"');
+  const [change] = scriptChanges(original, current, '$module');
+  assert.deepEqual(JSON.parse(change.luaPathJson!), ['trigger', 0, 'effect', 0, 'code']);
+  assert.equal(scriptChanges(original, {}, '$module')[0].luaPathJson, undefined);
+  assert.equal(scriptChanges(original, current, '卡片')[0].luaPathJson, undefined);
+  const regex = scriptChanges({ regex: [{ in: 'a' }] }, { regex: [{ in: 'b' }] }, '$module')[0];
+  assert.equal(regex.luaPathJson, undefined);
 });

@@ -48,9 +48,23 @@ test('script diagnostics preserve project scope and reviewed text; nearby lines 
     assert.equal(protectedPath.status, 400);
     const fixed = await request(`/api/projects/${project.id}/lua/syntax-line`, 'PATCH', { pathJson: issue.pathJson, line: 3, expectedLine: 'return message(', replacement: 'return message' });
     assert.equal(fixed.status, 200);
-    const after = await (await request(`/api/projects/${project.id}/lua/diagnostics`)).json() as { syntaxStatus: string; scriptChanges: Array<{ after: string }> };
+    const after = await (await request(`/api/projects/${project.id}/lua/diagnostics`)).json() as { syntaxStatus: string; scriptChanges: Array<{ after: string; luaPathJson?: string }> };
     assert.equal(after.syntaxStatus, 'passed');
-    assert.ok(after.scriptChanges.some(change => change.after.includes('local count = 2')));
+    const comparison = after.scriptChanges.find(change => change.after.includes('local count = 2'))!;
+    assert.ok(comparison.luaPathJson);
+    const editPassed = await request(`/api/projects/${project.id}/lua/syntax-line`, 'PATCH', {
+      pathJson: comparison.luaPathJson, line: 2, expectedLine: 'local count = 2', replacement: 'local count = 4',
+    });
+    assert.equal(editPassed.status, 200);
+    assert.equal((await editPassed.json() as { syntaxOk: boolean }).syntaxOk, true);
+    const refreshed = await (await request(`/api/projects/${project.id}/lua/diagnostics`)).json() as typeof after;
+    assert.ok(refreshed.scriptChanges.some(change => change.after.includes('local count = 4') && change.luaPathJson));
+    const original = await db.prepare('SELECT original_module_json AS original FROM projects WHERE id = ?').get(project.id) as { original: string };
+    assert.ok(original.original.includes('local count = 1'));
+    const outdated = await request(`/api/projects/${project.id}/lua/syntax-line`, 'PATCH', {
+      pathJson: comparison.luaPathJson, line: 2, expectedLine: 'local count = 2', replacement: 'local count = 5',
+    });
+    assert.equal(outdated.status, 409);
     assert.deepEqual(await db.prepare('SELECT * FROM segments WHERE project_id = ? ORDER BY id').all(project.id), before);
     assert.equal((await db.prepare('SELECT scope FROM projects WHERE id = ?').get(project.id) as { scope: string }).scope, 'all');
     await db.prepare("INSERT INTO jobs (id, project_id, status, scope, model, created_at, updated_at) VALUES ('paused', ?, 'paused', 'all', 'fixture', 'now', 'now')").run(project.id);
@@ -61,6 +75,9 @@ test('script diagnostics preserve project scope and reviewed text; nearby lines 
     for (const key of ['WORKBENCH_EMBEDDED', 'WORKBENCH_DATA_DIR', 'WORKBENCH_DB_PATH']) {
       if (previousEnv[key] === undefined) delete process.env[key]; else process.env[key] = previousEnv[key];
     }
-    await rm(directory, { recursive: true, force: true });
+    await rm(directory, { recursive: true, force: true, maxRetries: 3 }).catch(error => {
+      // The TS compiler child can retain this temporary cwd on Windows until exit.
+      if (error.code !== 'EBUSY') throw error;
+    });
   }
 });

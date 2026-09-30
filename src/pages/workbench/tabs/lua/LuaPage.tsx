@@ -1,3 +1,4 @@
+import { scriptEditorSources, regexChanges } from './lib/script-editor';
 import { ApiError } from '@/shared/api/http';
 import { reconcileTextDraft } from '@/features/review/lib/text-draft';
 import { regexSaveState } from './lib/regex-save-state';
@@ -62,6 +63,10 @@ export function LuaPage({
   reviewFocus: ReviewFocus | null;
   onClearReviewFocus: () => void;
 }) {
+  const [panel, setPanel] = useState<'changes' | 'overview' | 'regex' | 'aliases'>('overview');
+  const [editingChange, setEditingChange] = useState(false);
+  const luaSources = useMemo(() => report ? scriptEditorSources(report) : [], [report]);
+  const regexComparisons = useMemo(() => report ? regexChanges(report) : [], [report]);
   const regexSessionRef = useRef(0);
   const syntaxBases = useRef<Record<string, string>>({});
   const [regexEditorError, setRegexEditorError] = useState('');
@@ -87,6 +92,7 @@ export function LuaPage({
   const [syntaxLineDrafts, setSyntaxLineDrafts] = useState<Record<string, string>>({});
   const [savingSyntaxKey, setSavingSyntaxKey] = useState<string | null>(null);
   const [syntaxSaveMessage, setSyntaxSaveMessage] = useState<string | null>(null);
+  const [syntaxSavePath, setSyntaxSavePath] = useState<string | null>(null);
   const [syntaxContextExpanded, setSyntaxContextExpanded] = useState<Record<string, boolean>>({});
   const [namespaceDialogOpen, setNamespaceDialogOpen] = useState(false);
   const [namespaceDraft, setNamespaceDraft] = useState('');
@@ -176,6 +182,7 @@ export function LuaPage({
     setSyntaxLineDrafts((current) => Object.fromEntries(Object.entries(drafts).map(([key, value]) => [key, reconcileTextDraft(current[key], previous[key], value)])));
   }, [report?.generatedAt]);
   function focusSyntaxEditor(): void {
+    setPanel('overview');
     if (!report) return;
     const focusPath = reviewFocus?.pathLabel;
     const focusLine = reviewFocus?.line;
@@ -196,6 +203,7 @@ export function LuaPage({
 
   useEffect(() => {
     if (!reviewFocus || !report) return;
+    setPanel('overview');
     const syntaxIndex = syntaxIssues.findIndex((issue) => issue.kind === 'syntax'
       && issue.pathLabel === reviewFocus.pathLabel
       && (!reviewFocus.line || issue.line === reviewFocus.line));
@@ -218,6 +226,7 @@ export function LuaPage({
     const replacement = editedLine ?? syntaxLineDrafts[issueKey] ?? issue.draftLine ?? '';
     setSavingSyntaxKey(issueKey);
     setSyntaxSaveMessage(null);
+    setSyntaxSavePath(issue.pathLabel);
     try {
       const result = await onSaveLuaSyntaxLine(pathJson, line, replacement, issue.draftLine);
       const nextIssue = result.remainingSyntaxIssues?.[0] as { line?: number } | undefined;
@@ -606,13 +615,13 @@ export function LuaPage({
         <div>
           <span className="section-kicker">RisuAI / Lua</span>
           <h1>脚本与聊天后处理</h1>
-          <p>命名空间、聊天输出后处理和静态正则分开管理。</p>
+          <p>选择工作区处理脚本；路径列表与代码各自滚动。</p>
         </div>
         <div className="lua-management-actions">
-          <button className="secondary-button" onClick={onRefresh} disabled={loading}>
+          <button className="secondary-button" onClick={onRefresh} disabled={loading || editingChange}>
             <RefreshCw className={loading ? 'spin' : ''} size={16} />刷新诊断
           </button>
-          <button className="secondary-button" onClick={() => document.getElementById('lua-script-changes')?.scrollIntoView({ behavior: 'smooth' })}><Code2 size={16} />查看修改对比</button>
+          <button className="secondary-button" disabled={editingChange} onClick={() => setPanel('changes')}><Code2 size={16} />脚本编辑</button>
         </div>
       </header>
 
@@ -622,6 +631,17 @@ export function LuaPage({
         <div className={postprocessReferences.length ? 'attention' : ''}><span>聊天后处理</span><strong>{postprocessReferences.length}</strong><small>生成回复后执行</small></div>
         <div className={staticRegexProblemCount ? 'blocking' : ''}><span>静态正则</span><strong>{staticRegexReferences.length}</strong><small>{staticRegexProblemCount ? `${staticRegexProblemCount} 条待处理` : '命中已校验'}</small></div>
       </div>
+
+      <div className="lua-workspace-tabs" role="tablist" aria-label="脚本管理工作区">
+        {([
+          ['overview', '诊断与修复', report.blockerCount],
+          ['changes', '脚本编辑', luaSources.length],
+          ['regex', '正则规则', report.regexRules.length],
+          ['aliases', '名称与别名', report.portraitCandidateCount],
+        ] as const).map(([id, label, count]) => <button type="button" role="tab" id={`lua-tab-${id}`} aria-controls={`lua-pane-${id}`} aria-selected={panel === id}
+          key={id} disabled={editingChange} onClick={() => setPanel(id)}>{label}<span>{count}</span></button>)}
+      </div>
+      {editingChange && <p className="lua-inline-save-message">正在编辑代码行，保存或取消后可切换路径与工作区。</p>}
 
       {reviewFocus && <div className="lua-focus-alert" role="status">
         <div><strong>已过滤保存校验错误行</strong><span>{reviewFocus.pathLabel}{reviewFocus.originalMatches != null && reviewFocus.draftMatches != null ? ` · 匹配数 ${reviewFocus.originalMatches} → ${reviewFocus.draftMatches}` : ''}{reviewFocus.line ? ` · 第 ${reviewFocus.line} 行，第 ${reviewFocus.column ?? '?'} 列` : ''}</span><p>{reviewFocus.problem}</p>{reviewFocus.sourceLine && <code className="lua-focus-code-line">原始代码：{reviewFocus.sourceLine}</code>}{reviewFocus.draftLine && <code className="lua-focus-code-line current">当前稿：{reviewFocus.draftLine}</code>}<p><b>修正方案：</b>{reviewFocus.fixSuggestion}</p>{reviewFocus.line && <button type="button" className="secondary-button lua-locate-button" onClick={() => focusSyntaxEditor()}><Code2 size={14} />定位到 Lua 编辑器</button>}</div>
@@ -696,8 +716,8 @@ export function LuaPage({
         onApply={() => void applyRouterPreview()}
       />}
 
-      <div className="lua-primary-grid">
-        <section className="lua-panel lua-namespace-panel" id="lua-namespace-detection-detail">
+      <div className="lua-primary-grid" hidden={panel !== 'overview' && panel !== 'regex'}>
+        <section hidden={panel !== 'overview'} className="lua-panel lua-namespace-panel" id="lua-namespace-detection-detail">
           <div className="lua-panel-header">
             <div><h2>模块命名空间检查</h2><span>由你直接核对和修改；系统不会推断用途或自动生成译名</span></div>
             <ShieldCheck size={17} />
@@ -721,7 +741,7 @@ export function LuaPage({
           ) : <div className="lua-simple-empty">当前模块未定义命名空间。</div>}
         </section>
 
-        <section className="lua-panel lua-postprocess-panel">
+        <section hidden={panel !== 'regex'} className="lua-panel lua-postprocess-panel">
           <div className="lua-panel-header">
             <div><h2>聊天后处理</h2><span>{postprocessReferences.length} 条 editoutput 规则</span></div>
             <Code2 size={17} />
@@ -739,6 +759,7 @@ export function LuaPage({
         </section>
       </div>
 
+      <div role="tabpanel" id="lua-pane-regex" aria-labelledby="lua-tab-regex" hidden={panel !== 'regex'}>
       <section className="lua-panel lua-static-regex-panel">
         <div className="lua-panel-header">
           <div><h2>静态正则校验</h2><span>仅显示可以在卡片文本中验证命中数的规则</span></div>
@@ -759,6 +780,11 @@ export function LuaPage({
         </div>
       </section>
 
+      <LuaRuntimeRegexList references={runtimeDisplayReferences} onOpen={openRegexEditor} />
+      <ScriptChanges mode="regex" changes={regexComparisons} regexRules={report.regexRules} onOpenRegex={openRegexEditor} loading={loading} />
+      </div>
+
+      <div role="tabpanel" id="lua-pane-overview" aria-labelledby="lua-tab-overview" hidden={panel !== 'overview'}>
       <LuaDetectionGrid
         report={report}
         syntaxIssues={syntaxIssues}
@@ -769,9 +795,15 @@ export function LuaPage({
         onScan={onScan}
         onOpenRouterPreview={() => void openRouterPreview()}
         onOpenExport={onOpenExport}
+        onNavigate={(id) => {
+          setPanel(id === 'lua-runtime-regex-detection-detail' ? 'regex' : id === 'lua-portrait-detection-detail' ? 'aliases' : 'overview');
+          window.setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+        }}
       />
 
-      <div className="lua-detail-grid">
+      <LuaExportIssues report={report} onOpenRegex={openRegexEditor} />
+      </div>
+      <div role="tabpanel" id="lua-pane-aliases" aria-labelledby="lua-tab-aliases" hidden={panel !== 'aliases'}>
         <LuaPortraitCandidates
           report={report}
           filteredCandidates={filteredCandidates}
@@ -781,10 +813,10 @@ export function LuaPage({
           onSelectOwner={setSelectedOwnerId}
           onSaveAliases={onSaveAliases}
         />
-        <LuaRuntimeRegexList references={runtimeDisplayReferences} onOpen={openRegexEditor} />
-        <LuaExportIssues report={report} onOpenRegex={openRegexEditor} />
+
       </div>
 
+      <div hidden={panel !== 'overview'}>
       <LuaSyntaxDetails
         report={report}
         syntaxIssues={syntaxIssues}
@@ -798,13 +830,22 @@ export function LuaPage({
         onSaveSyntaxLine={saveSyntaxLine}
       />
 
-      <ScriptChanges changes={report.scriptChanges ?? []} />
+      </div>
+      <div role="tabpanel" id="lua-pane-changes" aria-labelledby="lua-tab-changes" hidden={panel !== 'changes'}>
+      {!report.scriptSources && !luaSources.length && report.sourceCount > 0 && <p className="lua-inline-save-message">当前服务尚未返回完整 Lua 代码，请更新后端后刷新诊断。</p>}
+      <ScriptChanges mode="lua" changes={luaSources} loading={loading} savingKey={savingSyntaxKey} message={syntaxSaveMessage} messagePath={syntaxSavePath}
+        onEditingChange={setEditingChange}
+        onSaveLine={(change, line, replacement, expectedLine) => saveSyntaxLine({
+          kind: 'syntax', pathLabel: change.pathLabel, pathJson: change.luaPathJson, line, draftLine: expectedLine,
+          message: '', blocking: false, segmentIds: [],
+        }, `${change.pathLabel}:line:${line}`, replacement)} />
+      </div>
 
-      <div className="lua-maintenance-row">
+      <div className="lua-maintenance-row" hidden={panel !== 'overview'}>
         <button className="danger-button" onClick={() => void onResetLuaDraft()} disabled={loading || !report.hasModule} title="仅恢复 Lua 模块草稿，不影响卡片正文和翻译结果"><RotateCcw size={16} />恢复原始 Lua 草稿</button>
       </div>
 
-      <div className="lua-footnote"><Code2 size={15} /><span>脚本管理页只处理脚本、正则和别名；可翻译文本统一在审核页修改，语法错误只在上方按真实代码行修复。</span></div>
+      <div className="lua-footnote"><Code2 size={15} /><span>脚本管理页只处理脚本、正则和别名；可翻译文本统一在审核页修改，Lua 可在修改对比和语法问题中按真实代码行修改，保存后重新校验。</span></div>
     </section>
   );
 }

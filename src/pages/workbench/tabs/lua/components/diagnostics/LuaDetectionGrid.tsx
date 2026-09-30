@@ -20,6 +20,7 @@ export interface LuaDetectionGridProps {
   onScan: () => void;
   onOpenRouterPreview: () => void;
   onOpenExport: () => void;
+  onNavigate?: (id: string) => void;
 }
 
 function scrollToDetail(id: string): void {
@@ -36,6 +37,7 @@ export function LuaDetectionGrid({
   onScan,
   onOpenRouterPreview,
   onOpenExport,
+  onNavigate = scrollToDetail,
 }: LuaDetectionGridProps) {
   const state = diagnosticState(report);
   return (
@@ -50,7 +52,7 @@ export function LuaDetectionGrid({
       <section className="lua-panel lua-detection-card lua-syntax-detection">
         <div className="lua-panel-header"><div><h2>Lua 语法检测</h2><span>逐条定位到真实错误代码行</span></div><ShieldCheck size={17} /></div>
         <div className={`lua-detection-result ${syntaxIssues.length ? 'problem' : state.syntaxPassed ? 'success' : ''}`}><strong>{state.syntax}</strong><span>{syntaxIssues.length ? '可在下方直接编辑错误行并重新校验。' : !report.hasModule ? '当前卡片没有 Risu Lua 模块。' : state.syntaxPassed ? '当前审核稿的 Lua 语法已通过校验。' : '生成审核稿后重新检测；没有错误记录不代表已经通过校验。'}</span></div>
-        {syntaxIssues.length > 0 && <button type="button" className="secondary-button lua-detection-action" onClick={() => scrollToDetail('lua-syntax-detection-detail')}><ArrowRight size={14} />查看语法问题</button>}
+        {syntaxIssues.length > 0 && <button type="button" className="secondary-button lua-detection-action" onClick={() => onNavigate('lua-syntax-detection-detail')}><ArrowRight size={14} />查看语法问题</button>}
       </section>
 
       <section className="lua-panel lua-detection-card lua-control-detection">
@@ -62,13 +64,13 @@ export function LuaDetectionGrid({
       <section className="lua-panel lua-detection-card lua-runtime-regex-detection">
         <div className="lua-panel-header"><div><h2>运行时展示正则</h2><span>消息展示阶段执行，独立于静态命中校验</span></div><Code2 size={17} /></div>
         <div className="lua-detection-result success"><strong>{runtimeDisplayReferences.length} 条运行时规则</strong><span>{runtimeDisplayReferences.length ? '只验证规则编译、捕获组和替换模板。' : '当前没有消息展示阶段的正则规则。'}</span></div>
-        {runtimeDisplayReferences.length > 0 && <button type="button" className="secondary-button lua-detection-action" onClick={() => scrollToDetail('lua-runtime-regex-detection-detail')}><ArrowRight size={14} />查看运行时规则</button>}
+        {runtimeDisplayReferences.length > 0 && <button type="button" className="secondary-button lua-detection-action" onClick={() => onNavigate('lua-runtime-regex-detection-detail')}><ArrowRight size={14} />查看运行时规则</button>}
       </section>
 
       <section className="lua-panel lua-detection-card lua-portrait-detection">
         <div className="lua-panel-header"><div><h2>专有名词检测</h2><span>立绘匹配名称与目标语言别名</span></div><Search size={17} /></div>
         <div className={`lua-detection-result ${report.portraitMissingCount ? 'problem' : 'success'}`}><strong>{report.portraitCandidateCount} 个候选</strong><span>{report.portraitFeatureDetected ? `${report.portraitCoveredCount} 个已有别名，${report.portraitMissingCount} 个待补。` : '未检测到立绘匹配功能。'}</span></div>
-        {report.portraitFeatureDetected && <button type="button" className="secondary-button lua-detection-action" onClick={() => scrollToDetail('lua-portrait-detection-detail')}><ArrowRight size={14} />查看名称候选</button>}
+        {report.portraitFeatureDetected && <button type="button" className="secondary-button lua-detection-action" onClick={() => onNavigate('lua-portrait-detection-detail')}><ArrowRight size={14} />查看名称候选</button>}
       </section>
 
       <section className="lua-panel lua-detection-card lua-router-detection">

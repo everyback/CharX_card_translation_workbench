@@ -95,15 +95,17 @@ export function LuaSyntaxDetails({
 }
 
 
-function EditableSyntaxLine({ line, text, errorLine, column, disabled, saving, onSave }: {
+export function EditableSyntaxLine({ line, text, errorLine, column, disabled, saving, onSave, onEditingChange }: {
   line: number; text: string; errorLine: boolean; column?: number; disabled: boolean; saving: boolean;
   onSave: (replacement: string, expectedLine: string) => Promise<boolean>;
+  onEditingChange?: (editing: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
   const [baseline, setBaseline] = useState(text);
-  const begin = () => { setBaseline(text); setDraft(text); setEditing(true); };
-  const save = async () => { if (await onSave(draft, baseline)) setEditing(false); };
+  const end = () => { setEditing(false); onEditingChange?.(false); };
+  const begin = () => { setBaseline(text); setDraft(text); setEditing(true); onEditingChange?.(true); };
+  const save = async () => { if (await onSave(draft, baseline)) end(); };
   return <div className={`lua-code-line${errorLine ? ' error-line' : ''}`}>
     <span className="lua-code-line-number">{line}</span>
     {editing ? <div className="lua-code-line-edit">
@@ -112,7 +114,7 @@ function EditableSyntaxLine({ line, text, errorLine, column, disabled, saving, o
       <div className="lua-line-actions">
         <button type="button" className="primary-button" disabled={disabled || draft === baseline}
           onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}保存第 {line} 行并校验</button>
-        <button type="button" className="secondary-button" disabled={disabled} onClick={() => setEditing(false)}>取消</button>
+        <button type="button" className="secondary-button" disabled={disabled} onClick={end}>取消</button>
       </div>
       {column && <small className="lua-code-column-marker">解析器错误列：{column}</small>}
     </div> : <button type="button" className="lua-line-edit-trigger" disabled={disabled}

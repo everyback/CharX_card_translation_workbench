@@ -1913,3 +1913,44 @@ select { padding: 0 9px; }
   .lua-static-regex-row span, .lua-static-regex-row em, .lua-runtime-regex-row span, .lua-runtime-regex-row em { grid-column: 1; text-align: left; }
   .lua-static-regex-row > svg, .lua-runtime-regex-row > svg { grid-column: 2; grid-row: 1 / 4; }
 }
+
+/* Script management: bounded workspaces instead of stacked comparisons. */
+.lua-management-section [hidden] { display: none !important; }
+.lua-workspace-tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid #dbe4e1; padding: 0 0 10px; margin-bottom: 16px; }
+.lua-workspace-tabs button { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #52685e; cursor: pointer; }
+.lua-workspace-tabs button[aria-selected="true"] { background: #e7f3ee; border-color: #b7d9cc; color: #175f4e; font-weight: 600; }
+.lua-workspace-tabs button span { background: #fff; border-radius: 12px; padding: 1px 7px; font-size: 12px; }
+.lua-workspace-tabs button:disabled { cursor: default; opacity: .65; }
+.lua-management-section .lua-primary-grid { grid-template-columns: minmax(0, 1fr); }
+.lua-change-workspace { display: grid; grid-template-columns: minmax(180px, 250px) minmax(0, 1fr); min-height: 320px; }
+.lua-change-navigation { border-right: 1px solid #dbe4e1; display: flex; flex-direction: column; min-width: 0; }
+.lua-change-paths { max-height: 480px; overflow: auto; flex: 1; }
+.lua-change-paths button { display: flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; padding: 12px; border: 0; border-bottom: 1px solid #e7eeeb; background: transparent; cursor: pointer; }
+.lua-change-paths button.selected { background: #e7f3ee; box-shadow: inset 3px 0 #287565; }
+.lua-change-paths button span { font-size: 10px; color: #497566; flex-shrink: 0; }
+.lua-change-paths code { font: 12px/1.6 Consolas, monospace; overflow-wrap: anywhere; min-width: 0; }
+.lua-change-pagination { display: flex; justify-content: space-between; align-items: center; gap: 5px; padding: 10px; font-size: 11px; }
+.lua-change-pagination button { padding: 5px; border: 1px solid #dbe4e1; border-radius: 4px; background: #fff; }
+.lua-change-editor-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 12px 0; }
+.lua-change-editor-toolbar > code { flex: 1 1 180px; overflow-wrap: anywhere; }
+.lua-change-editor-toolbar label { display: flex; align-items: center; gap: 5px; }
+.lua-change-workspace .lua-change-current-code,
+.lua-change-workspace .lua-change-columns pre,
+.lua-change-workspace .lua-change-columns .router-code-panel { height: clamp(280px, 48vh, 520px); max-height: 520px; overflow: auto; }
+.lua-change-current-code .lua-line-edit-trigger { min-width: 0; }
+.lua-change-current-code .lua-code-line-edit textarea { min-height: 90px; }
+.lua-management-section .lua-postprocess-list,
+.lua-management-section .lua-static-regex-list,
+.lua-management-section .lua-snippet-list,
+.lua-management-section .lua-issue-list { max-height: 480px; overflow: auto; }
+@media (max-width: 1100px) {
+  .lua-change-workspace { grid-template-columns: minmax(150px, 210px) minmax(0, 1fr); }
+  .lua-change-workspace .lua-change-columns { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 700px) {
+  .lua-change-workspace { grid-template-columns: minmax(0, 1fr); }
+  .lua-change-paths { max-height: 150px; }
+  .lua-change-navigation { border-right: 0; border-bottom: 1px solid #dbe4e1; }
+}
+.lua-management-section .lua-runtime-regex-list,
+.lua-management-section .lua-segment-table { max-height: 480px; overflow: auto; }

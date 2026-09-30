@@ -4,10 +4,11 @@ export interface ScriptChange {
   pathLabel: string;
   before: string;
   after: string;
+  luaPathJson?: string;
 }
 
 /** Compare complete script fields, independently of outstanding diagnostics. */
-export function scriptChanges(original: unknown, draft: unknown, root: string): ScriptChange[] {
+export function scriptChanges(original: unknown, draft: unknown, root: string, includeUnchanged = false): ScriptChange[] {
   if (draft == null) return [];
   const collect = (value: unknown, path: Array<string | number>, result: Map<string, string>) => {
     if (typeof value === 'string') {
@@ -24,6 +25,13 @@ export function scriptChanges(original: unknown, draft: unknown, root: string): 
   collect(original, [root], before);
   collect(draft, [root], after);
   return [...new Set([...before.keys(), ...after.keys()])]
-    .filter(path => before.get(path) !== after.get(path))
-    .map(path => ({ pathLabel: (JSON.parse(path) as Array<string | number>).join('.'), before: before.get(path) ?? '', after: after.get(path) ?? '' }));
+    .filter(path => includeUnchanged || before.get(path) !== after.get(path))
+    .map(path => {
+      const parts = JSON.parse(path) as Array<string | number>;
+      const modulePath = parts.slice(1);
+      return { pathLabel: parts.join('.'), before: before.get(path) ?? '', after: after.get(path) ?? '',
+        ...(root === '$module' && after.has(path) && isLuaModuleCodePath(modulePath)
+          ? { luaPathJson: JSON.stringify(modulePath) } : {}),
+      };
+    });
 }

@@ -193,7 +193,8 @@ export interface PortraitRouterRepairPreview {
 
 export interface LuaManagementReport {
   syntaxStatus: 'not-applicable' | 'pending' | 'passed' | 'failed';
-  scriptChanges: Array<{ pathLabel: string; before: string; after: string }>;
+  scriptChanges: Array<{ pathLabel: string; before: string; after: string; luaPathJson?: string }>;
+  scriptSources?: LuaManagementReport['scriptChanges'];
   generatedAt: string;
   hasModule: boolean;
   sourceCount: number;
