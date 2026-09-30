@@ -139,15 +139,15 @@ export function createReviewService({
   ): Promise<BulkApprovalResult> {
     const safeClause = safeOnly ? "AND risk_level = 'low'" : '';
     const project = await database.prepare(`
-      SELECT target_language AS targetLanguage, language_behavior_mode AS mode
+      SELECT source_language AS sourceLanguage, target_language AS targetLanguage, language_behavior_mode AS mode
       FROM projects WHERE id = ?
-    `).get(projectId) as { targetLanguage?: string; mode?: string } | undefined;
+    `).get(projectId) as { sourceLanguage?: string; targetLanguage?: string; mode?: string } | undefined;
     const rows = await database.prepare(`
       SELECT id, path_label AS pathLabel, path_json AS pathJson, kind, protocol_delimiter AS protocolDelimiter, source_text AS sourceText,
         qa_flags AS qaFlags,
         COALESCE(NULLIF(TRIM(final_text), ''), TRIM(translated_text)) AS effectiveText
       FROM segments
-      WHERE project_id = ? AND review_status = 'pending' ${safeClause}
+      WHERE project_id = ? AND in_scope = 1 AND review_status = 'pending' ${safeClause}
         AND path_label <> '$module.namespace'
         AND (TRIM(COALESCE(final_text, '')) != '' OR TRIM(COALESCE(translated_text, '')) != '')
     `).all(projectId) as Array<Record<string, unknown>>;
@@ -175,9 +175,9 @@ export function createReviewService({
           ...unchangedCodeSpanFragments(sourceText, effectiveText),
           ...unchangedFilePathFragments(sourceText, effectiveText),
         ],
-        settings.sourceLanguage,
+        project?.sourceLanguage || settings.sourceLanguage,
         settings.fallbackLanguage,
-        settings.targetLanguage,
+        project?.targetLanguage || settings.targetLanguage,
       );
       const languageIssue = project?.mode !== 'preserve'
         ? languageBehaviorDirectiveIssue(effectiveText, String(project?.targetLanguage || 'zh-CN'))

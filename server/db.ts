@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { AsyncDatabase } from './async-db.js';
 import { workbenchConfig } from '../config/workbench.js';
 import { migrateLegacyStorage } from './repositories/storage-migration.js';
+import { addColumnIfMissing as migrateColumn } from './repositories/schema-migration.js';
 
 mkdirSync(workbenchConfig.paths.dataRoot, { recursive: true });
 
@@ -231,6 +232,16 @@ await addColumnIfMissing('resource_image_candidates', 'storage_path', 'TEXT');
 await addColumnIfMissing('resource_image_candidates', 'storage_bytes', 'INTEGER');
 await addColumnIfMissing('resource_image_candidates', 'storage_sha256', 'TEXT');
 await addColumnIfMissing('segments', 'protocol_delimiter', 'TEXT');
+await addColumnIfMissing('segments', 'in_scope', 'INTEGER NOT NULL DEFAULT 1');
+await addColumnIfMissing('job_items', 'cancel_reason', 'TEXT');
+await addColumnIfMissing('jobs', 'language_config', 'TEXT');
+await addColumnIfMissing('projects', 'module_review_state', 'TEXT');
+await addColumnIfMissing('projects', 'preset_review_state', 'TEXT');
+await db.exec(`UPDATE job_items SET cancel_reason = CASE
+  WHEN last_error = '片段已转移到新的翻译任务' THEN 'transferred'
+  WHEN last_error LIKE '人工审核已接管段落：%' THEN 'manual-review'
+  WHEN EXISTS (SELECT 1 FROM jobs WHERE jobs.id = job_items.job_id AND jobs.status = 'cancelled') THEN 'user'
+  ELSE 'legacy' END WHERE status = 'cancelled' AND cancel_reason IS NULL`);
 await addColumnIfMissing('projects', 'language_behavior_mode', "TEXT NOT NULL DEFAULT 'target'");
 await addColumnIfMissing('projects', 'regex_validation_overrides', "TEXT NOT NULL DEFAULT '{}'");
 await addColumnIfMissing('jobs', 'post_total_items', 'INTEGER NOT NULL DEFAULT 0');
@@ -292,10 +303,7 @@ export async function saveSetting(key: string, value: string): Promise<void> {
 }
 
 async function addColumnIfMissing(table: string, column: string, definition: string): Promise<void> {
-  const columns = await db.prepare<{ name: string }>(`PRAGMA table_info(${table})`).all();
-  if (!columns.some((entry) => entry.name === column)) {
-    await db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
+  await migrateColumn(db, table, column, definition);
 }
 
 export { resolveDatabaseWorkerCount } from '../config/workbench.js';

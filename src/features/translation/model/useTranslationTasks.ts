@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, jsonBody } from '@/shared/api/http';
-import type { Job, ProjectDetail, Settings } from '@/shared/types';
+import { workflowState } from './workflow-state';
+import type { Job, ProjectDetail, Settings, ScopePreset } from '@/shared/types';
 import type { RunWorkbenchAction, ShowUiConfirm, ShowWorkbenchError } from '@/shared/model/workbench-actions';
 
 interface UseTranslationTasksOptions {
   project: ProjectDetail | null;
+  scope: ScopePreset;
   selectedProjectId: string;
   settings: Settings | null;
   refreshProject: (projectId: string) => Promise<void>;
@@ -19,6 +21,7 @@ interface UseTranslationTasksOptions {
 
 export function useTranslationTasks({
   project,
+  scope,
   selectedProjectId,
   settings,
   refreshProject,
@@ -45,46 +48,35 @@ export function useTranslationTasks({
 
   const startTranslation = useCallback(async () => {
     if (!project) return;
+    const workflow = workflowState(project);
+    if (workflow.active && workflow.active.status !== 'paused') {
+      onShowJobs();
+      return;
+    }
+    if (scope !== project.scope || project.status === 'new') {
+      onNotice('翻译范围已变化，请先按所选范围重新扫描。已有译文和审核记录会保留。');
+      return;
+    }
+    if (!workflow.canStart) {
+      onShowJobs();
+      onNotice('当前没有待执行的翻译项，请按引导检查审核结果或扫描范围。');
+      return;
+    }
     if (!settings?.apiKeyConfigured || !settings.model) {
       onOpenSettings();
       return;
     }
 
-    const latestJob = project.jobs.find((job) => ['queued', 'running', 'paused'].includes(job.status)) ?? project.jobs[0];
-    const hasPendingSegments = project.segments.some((segment) => (
-      segment.included && ['untranslated', 'rejected'].includes(segment.reviewStatus)
-    ));
-    if (latestJob && ['queued', 'running'].includes(latestJob.status)) {
-      onShowJobs();
-      onNotice('当前翻译任务仍在进行中，已打开任务进度。');
-      return;
-    }
-
-    // The top-level button also controls the follow-up stage. Once the text
-    // queue is empty, reuse the latest completed job instead of creating an
-    // empty text-translation job that would fail with "没有待翻译段落".
-    const postTotal = latestJob ? Math.max(0, latestJob.postTotalItems ?? 0) : 0;
-    const postCompleted = latestJob ? Math.max(0, latestJob.postCompletedItems ?? 0) : 0;
-    const postFailed = latestJob ? Math.max(0, latestJob.postFailedItems ?? 0) : 0;
-    const followUpNeedsRetry = postFailed > 0 || (postTotal > 0 && postCompleted < postTotal);
-    const followUpAction: 'retry-failed' | 'rerun-postprocessing' | null = !hasPendingSegments && latestJob?.status === 'review' && followUpNeedsRetry
-      ? 'rerun-postprocessing'
-      : !hasPendingSegments && latestJob?.status === 'review_with_errors' && (followUpNeedsRetry || latestJob.failedItems > 0)
-        ? 'retry-failed'
-        : null;
-    if (!hasPendingSegments && latestJob && ['review', 'review_with_errors'].includes(latestJob.status) && !followUpAction) {
-      onShowJobs();
-      onNotice('当前翻译和阶段 2 均已完成，没有需要重复执行的内容。');
-      return;
-    }
-    const resumeAction = latestJob && ['paused', 'failed', 'cancelled'].includes(latestJob.status)
+    const latestJob = workflow.latest;
+    const followUpAction = workflow.retryAction;
+    const resumeAction = workflow.resumable && latestJob && latestJob.scope === project.scope
       ? 'resume'
       : null;
     await runAction('start', async () => {
       const action = followUpAction || resumeAction;
       const job = action
         ? await api<Job>(`/api/jobs/${latestJob!.id}/${action}`, { method: 'POST', ...jsonBody({}) })
-        : await api<Job>(`/api/projects/${project.id}/jobs`, { method: 'POST', ...jsonBody({}) });
+        : await api<Job>(`/api/projects/${project.id}/jobs`, { method: 'POST', ...jsonBody({ scope }) });
       if (selectedProjectIdRef.current !== project.id) return;
       jobRequestRef.current += 1;
       setJobDetail(job);
@@ -98,7 +90,7 @@ export function useTranslationTasks({
       onShowJobs();
       await Promise.all([refreshProject(project.id), refreshProjects()]);
     });
-  }, [onNotice, onOpenSettings, onShowJobs, project, refreshProject, refreshProjects, runAction, settings]);
+  }, [onNotice, onOpenSettings, onShowJobs, project, scope, refreshProject, refreshProjects, runAction, settings]);
 
   const jobAction = useCallback(async (
     jobId: string,

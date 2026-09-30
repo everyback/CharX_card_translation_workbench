@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { db } from '../db.js';
 import { PROJECT_TITLE_COLUMNS } from '../repositories/project-queries.js';
+import { readWorkflowProgress } from '../repositories/workflow-progress.js';
 import { listAvailableModels, publicSettings, updateSettings } from '../scheduler.js';
 
 let dashboardCache: { expiresAt: number; value: {
@@ -22,7 +23,7 @@ export function registerSystemRoutes(app: FastifyInstance): void {
     const currentTime = Date.now();
     if (request.query.fresh !== '1' && dashboardCache && dashboardCache.expiresAt > currentTime) return dashboardCache.value;
     const projects = Number((await db.prepare('SELECT COUNT(*) AS count FROM projects').get() as { count: number }).count);
-    const pendingReview = Number((await db.prepare("SELECT COUNT(*) AS count FROM segments WHERE review_status = 'pending'").get() as { count: number }).count);
+    const pendingReview = Number((await db.prepare("SELECT COUNT(*) AS count FROM segments WHERE in_scope = 1 AND review_status = 'pending'").get() as { count: number }).count);
     const activeJobs = Number((await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status IN ('queued', 'running', 'paused')").get() as { count: number }).count);
     const value = { projects, pendingReview, activeJobs, settings: publicSettings() };
     dashboardCache = { expiresAt: currentTime + 5000, value };
@@ -55,12 +56,14 @@ export function registerSystemRoutes(app: FastifyInstance): void {
         SUM(CASE WHEN s.review_status = 'approved' THEN 1 ELSE 0 END) AS approvedCount,
         SUM(CASE WHEN s.review_status = 'pending' THEN 1 ELSE 0 END) AS pendingReviewCount
       FROM projects p
-      LEFT JOIN segments s ON s.project_id = p.id
+      LEFT JOIN segments s ON s.project_id = p.id AND s.in_scope = 1
       GROUP BY p.id
       ORDER BY p.updated_at DESC
     `).all();
-    projectListCache = { expiresAt: currentTime + 5000, value: projects };
-    return projects;
+    const progress = await readWorkflowProgress(db);
+    const value = projects.map(project => ({ ...project, ...progress.get(String(project.id)) }));
+    projectListCache = { expiresAt: currentTime + 5000, value };
+    return value;
   });
 }
 

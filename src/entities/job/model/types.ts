@@ -1,6 +1,12 @@
 import type { ScopePreset } from '@/shared/model/workbench-types';
 
 export interface Job {
+  languageConfig?: {
+    sourceLanguage: string;
+    fallbackLanguage: string;
+    targetLanguage: string;
+    languageBehaviorMode: 'target' | 'preserve';
+  } | null;
   id: string;
   projectId: string;
   status: string;

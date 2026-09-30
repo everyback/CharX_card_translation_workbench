@@ -318,13 +318,14 @@ export function scanCard(
   return segments;
 }
 
-export function scanRisuModule(module: Record<string, unknown>, scope: ScopePreset): ScannedSegment[] {
+export function scanRisuModule(module: Record<string, unknown>, scope: ScopePreset, protocolSchemas: readonly ProtocolSchemaRule[] = []): ScannedSegment[] {
   const segments: ScannedSegment[] = [];
   const seen = new Set<string>();
   const controlLiterals = risuControlLiterals(module);
   const add = (segment: ScannedSegment) => {
     if (segment.kind !== 'lua-language' && isControlLiteralSegment(segment.sourceText, controlLiterals)) return;
-    if (!likelyNeedsTranslation(segment.sourceText)) return;
+    if (!likelyNeedsTranslation(segment.sourceText)
+      && !(segment.kind === 'protocol-field' && likelyProtocolValueNeedsTranslation(segment.sourceText))) return;
     const key = `${segment.pathLabel}:${segment.start}:${segment.end}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -348,7 +349,8 @@ export function scanRisuModule(module: Record<string, unknown>, scope: ScopePres
         const extracted = value.length >= LARGE_FIELD_THRESHOLD
           ? extractStructuredFieldText(value, path, category, 'medium')
           : [fieldSegment(path, value, category, 'medium')];
-        splitTextAttributes(value, path, category, 'medium', extracted).forEach(add);
+        protocolAwareSegments(value, path, category, 'medium',
+          splitTextAttributes(value, path, category, 'medium', extracted), protocolSchemas).forEach(add);
       }
     });
   }
@@ -3182,7 +3184,6 @@ export function restoreProtectedModuleDraft(
 ): Record<string, unknown> {
   const restored = structuredClone(draft);
   for (const segment of segments) {
-    if (segment.reviewStatus !== 'approved') continue;
     const raw = parseSegmentPath(segment.pathJson);
     if (!raw || raw[0] !== '$module') continue;
     const path = raw.slice(1);

@@ -1,5 +1,5 @@
 import { reconcileTextDraft } from '@/features/review/lib/text-draft';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UiAlert } from '@/shared/ui';
 import { AboutPage } from '@/pages/about/AboutPage';
 import { SettingsDialog } from '@/features/settings/ui/SettingsDialog';
@@ -59,18 +59,9 @@ export function WorkbenchPage() {
   const [reviewFiltersCollapsed, setReviewFiltersCollapsed] = useState(false);
   const reviewBases = useRef<Record<string, string>>({});
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
-  const {
-    busy,
-    error,
-    notice,
-    uiAlert,
-    setError,
-    setNotice,
-    closeUiAlert,
-    showUiConfirm,
-    showError,
-    runAction,
-  } = useWorkbenchFeedback();
+  const feedback = useWorkbenchFeedback();
+  const { busy, closeUiAlert } = feedback;
+  const globalFeedback = useMemo(() => feedback.bindContext(null), [feedback.bindContext]);
   const {
     settings,
     settingsOpen,
@@ -78,9 +69,9 @@ export function WorkbenchPage() {
     openSettings,
     closeSettings,
     saveSettings,
-  } = useWorkbenchSettings(runAction);
+  } = useWorkbenchSettings(globalFeedback.runAction);
 
-  const clearError = useCallback(() => setError(''), [setError]);
+  const clearError = useCallback(() => globalFeedback.setError(''), [globalFeedback]);
   const {
     projects,
     project,
@@ -111,10 +102,14 @@ export function WorkbenchPage() {
     invalidateProjectOverview,
   } = useProjectWorkspace({
     tab,
-    onError: showError,
+    onError: globalFeedback.showError,
     onSettingsLoaded: applyLoadedSettings,
     clearError,
   });
+
+  const { error, notice, uiAlert } = feedback.selectContext(selectedProjectId);
+  const { setError, setNotice, showError, showUiConfirm, runAction } = useMemo(
+    () => feedback.bindContext(selectedProjectId), [feedback.bindContext, selectedProjectId]);
 
   const showOverview = useCallback(() => setTab('overview'), []);
   const showJobs = useCallback(() => setTab('jobs'), []);
@@ -127,6 +122,7 @@ export function WorkbenchPage() {
     retranslateSegments,
   } = useTranslationTasks({
     project,
+    scope,
     selectedProjectId,
     settings,
     refreshProject,
@@ -467,7 +463,8 @@ export function WorkbenchPage() {
                 onAction: (jobId, action) => void jobAction(jobId, action),
                 onOpenReview: showReview,
                 languageBehaviorMode: project.languageBehaviorMode,
-                targetLanguage: settings?.targetLanguage || project.targetLanguage,
+                targetLanguage: project.targetLanguage,
+                currentScope: project.scope,
               },
               review: {
                 segments: project.segments,

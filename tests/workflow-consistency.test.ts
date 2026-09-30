@@ -8,7 +8,10 @@ import { reconcileProtocolDraft } from '../src/features/protocol/model/protocol-
 import type { ProjectDetail, ProtocolFieldRule, RegexRuleSaveResult } from '../src/shared/types.js';
 
 const project = (status: string, jobStatus: string, completed = 0) => ({
-  status, jobs: [{ id: 'j', status: jobStatus, totalItems: 4, completedItems: completed, failedItems: 0 }],
+  status, scope: 'all', segments: Array.from({ length: 4 }, () => ({
+    included: true, reviewStatus: status === 'ready' ? 'approved' : jobStatus === 'review' ? 'pending' : 'untranslated',
+    translatedText: status === 'ready' || jobStatus === 'review' ? '译文' : null,
+  })), jobs: [{ id: 'j', status: jobStatus, totalItems: 4, completedItems: completed, failedItems: 0 }],
 } as ProjectDetail);
 
 test('workflow recovers stale translating status after pause, failure and cancellation', () => {

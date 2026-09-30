@@ -257,6 +257,11 @@ label.remote-target-field, .remote-target-field label { display: grid; gap: 5px;
 select, .search-input, .settings-grid input { min-height: 34px; border: 1px solid #cbd3d0; border-radius: 5px; background: #fff; color: #303936; }
 select { padding: 0 9px; }
 .command-spacer { flex: 1; }
+.command-band { flex-wrap: wrap; }
+.command-band .select-field { flex: 0 0 auto; }
+.command-band .select-field > span, .command-band > button { white-space: nowrap; }
+.command-band > button { flex-shrink: 0; }
+.scope-change-note { flex: 1 0 100%; order: 1; color: #7e5b14; font-size: 12px; line-height: 1.5; }
 .model-name { max-width: 240px; overflow: hidden; color: #77817e; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .tab-row { display: flex; gap: 2px; padding: 13px 26px 0; overflow-x: auto; border-bottom: 1px solid #dfe4e2; background: #fff; }
 .tab-row button { min-width: 82px; flex: 0 0 auto; padding: 9px 13px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #66716d; cursor: pointer; white-space: nowrap; }

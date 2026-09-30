@@ -28,6 +28,7 @@ export function TranslationCommandBar({
 }: TranslationCommandBarProps) {
   const workflow = workflowState(project);
   const running = workflow.active && workflow.active.status !== 'paused';
+  const scopeChanged = scope !== project.scope;
   return (
     <section className="command-band">
       <label className="select-field">
@@ -47,9 +48,10 @@ export function TranslationCommandBar({
       >
         {busy === 'scan' ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}扫描字段
       </button>
-      <button className="primary-button" onClick={onStartTranslation} disabled={!project.segments.length || Boolean(busy)}>
-        {busy === 'start' ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{running ? '查看翻译进度' : ['paused', 'cancelled', 'failed'].includes(workflow.status) ? '继续翻译' : '开始翻译'}
+      <button className="primary-button" onClick={onStartTranslation} disabled={Boolean(busy) || !running && (scopeChanged || !workflow.canStart)}>
+        {busy === 'start' ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{running ? '查看翻译进度' : workflow.retryAction ? workflow.latest?.failedItems ? '重试失败项与阶段 2' : '重试阶段 2' : workflow.resumable ? '继续翻译' : workflow.canStart ? '开始翻译' : '没有待翻译项'}
       </button>
+      {scopeChanged && <span className="scope-change-note" role="status">范围已变化，请重新扫描；已有译文会保留。</span>}
       <div className="command-spacer" />
       <span className="model-name">{settings?.model || '未配置模型'}</span>
       <label className={`language-rule-badge ${project.languageBehaviorMode === 'preserve' ? 'preserve' : ''}`} title="项目级卡片语言设定">

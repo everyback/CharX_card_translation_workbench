@@ -11,6 +11,7 @@ async function createReviewDatabase(): Promise<{ database: AsyncDatabase; direct
   const database = new AsyncDatabase(path.join(directory, 'test.sqlite'));
   await database.exec(`
     CREATE TABLE projects (
+      source_language TEXT NOT NULL DEFAULT 'en',
       id TEXT PRIMARY KEY,
       target_language TEXT NOT NULL,
       language_behavior_mode TEXT NOT NULL,
@@ -18,6 +19,7 @@ async function createReviewDatabase(): Promise<{ database: AsyncDatabase; direct
       original_json TEXT NOT NULL
     );
     CREATE TABLE segments (
+      in_scope INTEGER NOT NULL DEFAULT 1,
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
       path_label TEXT NOT NULL,

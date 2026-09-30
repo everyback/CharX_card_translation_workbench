@@ -1,3 +1,4 @@
+import './helpers/isolated-runtime.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { lorebookAliasIssue, residualHangulIssue, residualLanguageIssue, shouldSplitTranslationBatch } from '../server/domain/translation/translation-errors.js';

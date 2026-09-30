@@ -1,9 +1,12 @@
 import type { AsyncDatabase } from '../../async-db.js';
+import type { JobLanguage } from './job-language.js';
+import { publicJobLanguage } from './job-language.js';
 
 export interface TranslationJobServiceDependencies {
   database: AsyncDatabase;
   createId: () => string;
   clock: () => string;
+  captureLanguage?: (projectId: string) => Promise<JobLanguage>;
 }
 
 export interface TranslationJobCreationResult {
@@ -34,12 +37,12 @@ export interface TranslationJobService {
 }
 
 export function createTranslationJobService(
-  { database, createId, clock }: TranslationJobServiceDependencies,
+  { database, createId, clock, captureLanguage }: TranslationJobServiceDependencies,
 ): TranslationJobService {
   async function jobById(jobId: string): Promise<Record<string, unknown> | undefined> {
-    return await database.prepare(`
+    const row = await database.prepare(`
       SELECT
-        id, project_id AS projectId, status, scope, model,
+        id, project_id AS projectId, status, scope, model, language_config AS languageConfig,
         total_items AS totalItems, completed_items AS completedItems,
         failed_items AS failedItems, last_error AS lastError,
         post_total_items AS postTotalItems,
@@ -48,6 +51,7 @@ export function createTranslationJobService(
         created_at AS createdAt, updated_at AS updatedAt
       FROM jobs WHERE id = ?
     `).get(jobId) as Record<string, unknown> | undefined;
+    return row ? { ...row, languageConfig: publicJobLanguage(row.languageConfig) } : undefined;
   }
 
   async function hasActiveTranslationJob(projectId: string): Promise<boolean> {
@@ -121,7 +125,7 @@ export function createTranslationJobService(
       for (const owner of activeOwners) {
         await database.prepare(`
           UPDATE job_items
-          SET status = 'cancelled', last_error = '片段已转移到新的翻译任务', updated_at = ?
+          SET status = 'cancelled', cancel_reason = 'transferred', last_error = '片段已转移到新的翻译任务', updated_at = ?
           WHERE id = ? AND job_id = ? AND status <> 'cancelled'
         `).run(timestamp, owner.itemId, owner.jobId);
       }
@@ -142,9 +146,10 @@ export function createTranslationJobService(
 
       if (resetResults) await clearTranslationResults(uniqueSegmentIds, timestamp);
       await database.prepare(`
-        INSERT INTO jobs(id, project_id, status, scope, model, total_items, created_at, updated_at)
-        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)
-      `).run(jobId, projectId, scope, model, uniqueSegmentIds.length, timestamp, timestamp);
+        INSERT INTO jobs(id, project_id, status, scope, model, total_items, created_at, updated_at, language_config)
+        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+      `).run(jobId, projectId, scope, model, uniqueSegmentIds.length, timestamp, timestamp,
+        captureLanguage ? JSON.stringify(await captureLanguage(projectId)) : null);
       for (const segmentId of uniqueSegmentIds) await insertItem.run(createId(), jobId, segmentId, timestamp);
       await database.prepare("UPDATE projects SET status = 'translating', updated_at = ? WHERE id = ?")
         .run(timestamp, projectId);
@@ -174,7 +179,7 @@ export function createTranslationJobService(
       WHERE segment_id = ? AND status = 'failed'
     `);
     const clearFailedItems = database.prepare(`
-      UPDATE job_items SET status = 'cancelled', last_error = NULL, updated_at = ?
+      UPDATE job_items SET status = 'cancelled', cancel_reason = 'reset', last_error = NULL, updated_at = ?
       WHERE segment_id = ? AND status = 'failed'
     `);
     const affectedJobs = new Set<string>();
@@ -228,7 +233,7 @@ export function createTranslationJobService(
 
       await database.prepare(`
         UPDATE job_items
-        SET status = 'cancelled', last_error = ?, updated_at = ?
+        SET status = 'cancelled', cancel_reason = 'manual-review', last_error = ?, updated_at = ?
         WHERE segment_id = ?
           AND status IN ('pending', 'running')
           AND EXISTS (

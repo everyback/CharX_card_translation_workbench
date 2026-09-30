@@ -115,6 +115,7 @@ export function createScanService({
     projectId: string,
     scope: string,
     scannedSegments: readonly ScannedSegment[],
+    completeSegments: readonly ScannedSegment[] = scannedSegments,
   ): Promise<{ segmentCount: number; preservedCount: number; newCount: number }> {
     const timestamp = clock();
     const previousSegments = await database.prepare(`
@@ -122,18 +123,23 @@ export function createScanService({
         translated_text, final_text, review_status, included, qa_flags
       FROM segments WHERE project_id = ?
     `).all(projectId) as PreviousSegment[];
-    const plan = reconcileScannedSegments(scannedSegments, previousSegments);
+    // Reconcile against the complete inventory. Scope only controls the active
+    // selection; it must not erase reviewed work outside that selection.
+    const plan = reconcileScannedSegments(completeSegments, previousSegments);
+    const selected = new Set(scannedSegments.map(segment => segmentIdentity(
+      JSON.stringify(segment.path), segment.kind, segment.sourceText, segment.start, segment.end,
+    )));
     const insert = database.prepare(`
       INSERT INTO segments(
         id, project_id, path_json, path_label, category, kind, protocol_delimiter, source_text,
         translated_text, final_text, start_pos, end_pos, risk_level,
-        review_status, included, qa_flags, sort_order, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        review_status, included, qa_flags, sort_order, updated_at, in_scope
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const updatePreserved = database.prepare(`
       UPDATE segments SET
         path_json = ?, path_label = ?, category = ?, kind = ?, source_text = ?,
-        protocol_delimiter = ?, start_pos = ?, end_pos = ?, risk_level = ?, sort_order = ?, updated_at = ?
+        protocol_delimiter = ?, start_pos = ?, end_pos = ?, risk_level = ?, sort_order = ?, updated_at = ?, in_scope = ?
       WHERE id = ?
     `);
     const deleteObsolete = database.prepare('DELETE FROM segments WHERE project_id = ? AND id = ?');
@@ -142,10 +148,11 @@ export function createScanService({
       for (const item of plan.retained) {
         const { segment, sortOrder, previousId } = item;
         const pathJson = JSON.stringify(segment.path);
+        const inScope = Number(selected.has(segmentIdentity(pathJson, segment.kind, segment.sourceText, segment.start, segment.end)));
         if (previousId) {
           await updatePreserved.run(
             pathJson, segment.pathLabel, segment.category, segment.kind, segment.sourceText,
-            segment.protocolDelimiter ?? null, segment.start, segment.end, segment.risk, sortOrder, timestamp, previousId,
+            segment.protocolDelimiter ?? null, segment.start, segment.end, segment.risk, sortOrder, timestamp, inScope, previousId,
           );
           continue;
         }
@@ -154,7 +161,7 @@ export function createScanService({
           segment.category, segment.kind, segment.protocolDelimiter ?? null, segment.sourceText,
           null, null,
           segment.start, segment.end, segment.risk,
-          'untranslated', 1, '[]', sortOrder, timestamp,
+          'untranslated', 1, '[]', sortOrder, timestamp, inScope,
         );
       }
       for (const previousId of plan.obsoleteIds) await deleteObsolete.run(projectId, previousId);
@@ -164,8 +171,12 @@ export function createScanService({
     });
     return {
       segmentCount: scannedSegments.length,
-      preservedCount: plan.preservedCount,
-      newCount: scannedSegments.length - plan.preservedCount,
+      preservedCount: plan.retained.filter(item => item.previousId && selected.has(segmentIdentity(
+        JSON.stringify(item.segment.path), item.segment.kind, item.segment.sourceText, item.segment.start, item.segment.end,
+      ))).length,
+      newCount: plan.retained.filter(item => !item.previousId && selected.has(segmentIdentity(
+        JSON.stringify(item.segment.path), item.segment.kind, item.segment.sourceText, item.segment.start, item.segment.end,
+      ))).length,
     };
   }
 

@@ -13,6 +13,7 @@ async function createJobDatabase(): Promise<{ database: AsyncDatabase; directory
   await database.exec(`
     PRAGMA foreign_keys = ON;
     CREATE TABLE projects (
+      scope TEXT NOT NULL DEFAULT 'all-visible',
       id TEXT PRIMARY KEY,
       status TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -51,6 +52,7 @@ async function createJobDatabase(): Promise<{ database: AsyncDatabase; directory
       attempt_count INTEGER NOT NULL,
       last_error TEXT,
       updated_at TEXT NOT NULL,
+      cancel_reason TEXT,
       UNIQUE(job_id, segment_id)
     );
     CREATE TABLE job_logs (
@@ -68,10 +70,10 @@ async function createJobDatabase(): Promise<{ database: AsyncDatabase; directory
 async function fixture() {
   const { database, directory } = await createJobDatabase();
   await database.exec(`
-    INSERT INTO projects VALUES ('p', 'translating', 'before');
+    INSERT INTO projects (id, status, updated_at) VALUES ('p', 'translating', 'before');
     INSERT INTO segments VALUES ('s','p',NULL,NULL,'untranslated','[]','before',0);
     INSERT INTO jobs VALUES ('j','p','running','all-visible','mock',1,0,0,1,0,0,NULL,'before','before');
-    INSERT INTO job_items VALUES ('i','j','s','running',1,NULL,'before');
+    INSERT INTO job_items VALUES ('i','j','s','running',1,NULL,'before',NULL);
   `);
   const effects: string[] = [];
   const service = createJobLifecycleService({ database, clock: () => 'after',
@@ -156,5 +158,26 @@ test('postprocessing writes reject cancelled jobs, stale versions and foreign pr
     assert.deepEqual(JSON.parse(String(draft?.draft_json)), input.card);
     await f.database.exec("INSERT INTO projects(id,status,updated_at) VALUES ('other','review','v2'); UPDATE jobs SET status='running', project_id='other';");
     assert.equal((await savePostprocessingDraft(f.database, { ...input, expectedUpdatedAt: 'v2' })).changes, 0);
+  } finally { await f.close(); }
+});
+
+test('resume cannot resurrect transferred or manually reviewed items, including after the successor completes', async () => {
+  const f = await fixture();
+  try {
+    await f.service.pause('j');
+    await f.database.exec(`
+      INSERT INTO segments VALUES ('keep','p',NULL,NULL,'untranslated','[]','before',1);
+      INSERT INTO job_items VALUES ('keep-item','j','keep','pending',0,NULL,'before',NULL);
+      INSERT INTO jobs VALUES ('next','p','review','all-visible','mock',1,1,0,0,0,0,NULL,'later','later');
+      INSERT INTO job_items VALUES ('next-item','next','s','completed',1,NULL,'later',NULL);
+      UPDATE job_items SET status = 'cancelled', cancel_reason = 'transferred' WHERE id = 'i';
+    `);
+    await f.service.resume('j');
+    assert.equal((await f.database.prepare("SELECT status FROM job_items WHERE id='i'").get())?.status, 'cancelled');
+    assert.equal((await f.database.prepare("SELECT total_items FROM jobs WHERE id='j'").get())?.total_items, 1);
+    await f.service.pause('j');
+    await f.database.exec("UPDATE job_items SET status='cancelled', cancel_reason='manual-review' WHERE id='keep-item'");
+    await assert.rejects(f.service.resume('j'), /已转移或由人工接管/);
+    assert.equal((await f.database.prepare("SELECT status FROM jobs WHERE id='j'").get())?.status, 'paused');
   } finally { await f.close(); }
 });

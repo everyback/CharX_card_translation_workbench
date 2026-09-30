@@ -26,6 +26,8 @@ export interface ProjectSummary {
 }
 
 export interface ProjectDetail extends ProjectSummary {
+  storedStatus?: string;
+  workflowCounts?: import('../../../../shared/workflow-progress.js').WorkflowCounts;
   sourceFilename: string | null;
   sourceLanguage: string;
   targetLanguage: string;

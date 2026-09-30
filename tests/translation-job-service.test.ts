@@ -32,6 +32,7 @@ async function createJobDatabase(): Promise<{ database: AsyncDatabase; directory
       status TEXT NOT NULL,
       scope TEXT NOT NULL,
       model TEXT NOT NULL,
+      language_config TEXT,
       total_items INTEGER NOT NULL,
       completed_items INTEGER NOT NULL DEFAULT 0,
       failed_items INTEGER NOT NULL DEFAULT 0,
@@ -50,6 +51,7 @@ async function createJobDatabase(): Promise<{ database: AsyncDatabase; directory
       attempt_count INTEGER NOT NULL,
       last_error TEXT,
       updated_at TEXT NOT NULL,
+      cancel_reason TEXT,
       UNIQUE(job_id, segment_id)
     );
     CREATE TABLE job_logs (
@@ -98,6 +100,7 @@ test('translation job service creates every job item and advances the project in
       status: 'queued',
       scope: 'all-visible',
       model: 'test-model',
+      languageConfig: null,
       totalItems: 1,
       completedItems: 0,
       failedItems: 0,

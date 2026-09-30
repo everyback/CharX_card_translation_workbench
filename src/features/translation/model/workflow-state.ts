@@ -1,17 +1,9 @@
 import type { ProjectDetail } from '@/shared/types';
+import { countWorkflowSegments, deriveWorkflow } from '../../../../shared/workflow-progress.js';
 
 export function workflowState(project: ProjectDetail) {
-  const active = project.jobs.find((job) => ['queued', 'running', 'paused'].includes(job.status));
-  const latest = active ?? project.jobs[0];
-  const status = active
-    ? active.status === 'paused' ? 'paused' : 'translating'
-    : !['new', 'scanned', 'ready'].includes(project.status) && ['failed', 'cancelled'].includes(latest?.status ?? '')
-      ? latest!.status
-    : project.status === 'translating'
-      ? latest?.status === 'failed' || latest?.status === 'cancelled' ? latest.status
-        : latest?.status === 'review_with_errors' ? 'review_with_errors' : 'review'
-      : project.status;
-  const stage = active && active.completedItems + active.failedItems >= active.totalItems
-    ? 'adaptation' : 'text';
-  return { status, stage, active, latest } as const;
+  const counts = project.segments.length === (project.scanSummary?.totalSegments ?? project.segments.length)
+    ? countWorkflowSegments(project.segments)
+    : project.workflowCounts ?? countWorkflowSegments(project.segments);
+  return deriveWorkflow(project.storedStatus ?? project.status, project.scope, counts, project.jobs);
 }

@@ -1,7 +1,10 @@
 import { buildReviewedDraft } from './reviewed-draft.js';
+import { createHash } from 'node:crypto';
+import { ModuleReviewConflict, restoreModuleReviewBase } from '../../domain/lua/module-review-base.js';
 import type { AsyncDatabase } from '../../async-db.js';
 import {
   bilingualModuleName,
+  applyApprovedSegments,
   cardExportName,
   findRisuRegexAffectedSegmentIds,
   staleProtectedDraftPaths,
@@ -157,6 +160,7 @@ export function createExportService({ database, clock, targetLanguage, review }:
   }> {
     const project = await database.prepare(`
       SELECT original_json, original_module_json, draft_module_json AS draftModuleJson, source_format AS sourceFormat, source_filename AS sourceFilename,
+        module_review_state AS moduleReviewState, draft_json AS draftJson, preset_review_state AS presetReviewState,
         regex_validation_overrides AS regexValidationOverrides,
         source_blob, source_storage_path AS sourceStoragePath,
         draft_source_blob AS draftSourceBlob, draft_storage_path AS draftStoragePath
@@ -165,6 +169,9 @@ export function createExportService({ database, clock, targetLanguage, review }:
       original_json: string;
       original_module_json: string | null;
       draftModuleJson: string | null;
+      moduleReviewState: string | null;
+      draftJson: string;
+      presetReviewState: string | null;
       regexValidationOverrides: string | null;
       sourceFormat: string;
       sourceFilename: string | null;
@@ -187,21 +194,34 @@ export function createExportService({ database, clock, targetLanguage, review }:
     const existingDraftModule = project.draftModuleJson
       ? JSON.parse(project.draftModuleJson) as Record<string, unknown>
       : null;
-    const { draftCard: draft, draftModule, moduleResult, cardSegments, moduleSegments, resourceSegments, ignoredProtectedPaths } = buildReviewedDraft(
-      JSON.parse(project.original_json), originalModule, existingDraftModule, segments, project.sourceFormat,
-    );
+    let reviewed: ReturnType<typeof buildReviewedDraft>;
+    let cardBase = JSON.parse(project.original_json) as Record<string, unknown>;
+    try {
+      if (project.sourceFormat === 'st-preset') {
+        const previous = project.presetReviewState ? JSON.parse(project.presetReviewState) : null;
+        const applied = previous?.applied ?? applyApprovedSegments(cardBase,
+          segments.map(segment => ({ ...segment, reviewStatus: 'approved' })));
+        cardBase = restoreModuleReviewBase(previous?.base ?? cardBase, applied, JSON.parse(project.draftJson), '$preset');
+      }
+      reviewed = buildReviewedDraft(
+      cardBase, originalModule, existingDraftModule, segments, project.sourceFormat,
+      project.moduleReviewState ? JSON.parse(project.moduleReviewState) : null,
+    ); } catch (error) {
+      if (error instanceof ModuleReviewConflict) throw new ProjectWorkflowError(error.message, 409,
+        { code: 'MODULE_REVIEW_CONFLICT', pathLabel: error.pathLabel });
+      throw error;
+    }
+    const { draftCard: draft, draftModule, moduleBase, moduleResult, cardSegments, moduleSegments, resourceSegments, ignoredProtectedPaths } = reviewed;
+    const moduleReviewState = moduleBase && draftModule ? JSON.stringify({ base: moduleBase, applied: draftModule }) : null;
+    const presetReviewState = project.sourceFormat === 'st-preset' ? JSON.stringify({ base: cardBase, applied: draft }) : null;
     // Keep the large original archive out of SQLite when only card/module text
     // changed. Export falls back to source_blob in that case.
     const confirmedReplacements = await confirmedImageReplacements(projectId);
     const approvedResourceSegments = resourceSegments.filter((segment) => segment.reviewStatus === 'approved');
     const sourceChanges = approvedResourceSegments.length > 0 || confirmedReplacements.length > 0;
-    let existingDraftSourceBlob: Uint8Array | null = null;
-    if (sourceChanges) {
-      existingDraftSourceBlob = project.draftSourceBlob || (project.draftStoragePath ? await readStoredFile(project.draftStoragePath) : null);
-    }
     const originalSourceBlob = project.source_blob || (project.sourceStoragePath ? await readStoredFile(project.sourceStoragePath) : null);
     let draftSourceBlob: Uint8Array | null = sourceChanges
-      ? (existingDraftSourceBlob || originalSourceBlob)
+      ? originalSourceBlob
       : null;
     if (sourceChanges && draftSourceBlob) {
       if (approvedResourceSegments.length > 0) {
@@ -244,20 +264,23 @@ export function createExportService({ database, clock, targetLanguage, review }:
     let storedDraft: Awaited<ReturnType<typeof storeFile>> | null = null;
     if (sourceChanges && draftSourceBlob) {
       storedDraft = await storeFile(
-        projectStoragePath(projectId, 'draft', fileExtension(project.sourceFilename, project.sourceFormat)),
+        projectStoragePath(projectId, 'draft', fileExtension(project.sourceFilename, project.sourceFormat))
+          .replace(/draft\./u, `draft-${createHash('sha256').update(draftSourceBlob).digest('hex')}.`),
         draftSourceBlob,
       );
     }
     if (sourceChanges) {
       await database.prepare(`
         UPDATE projects
-        SET draft_json = ?, draft_module_json = ?, draft_source_blob = NULL,
+        SET draft_json = ?, draft_module_json = ?, module_review_state = ?, preset_review_state = ?, draft_source_blob = NULL,
           draft_storage_path = ?, draft_storage_bytes = ?, draft_storage_sha256 = ?,
           status = 'ready', updated_at = ?
         WHERE id = ?
       `).run(
         JSON.stringify(draft),
         draftModule ? JSON.stringify(draftModule) : null,
+        moduleReviewState,
+        presetReviewState,
         storedDraft?.path || null, storedDraft?.bytes || null, storedDraft?.sha256 || null,
         clock(),
         projectId,
@@ -267,11 +290,15 @@ export function createExportService({ database, clock, targetLanguage, review }:
       // BLOB, but rebinding it in the same UPDATE can exceed its value limit.
       await database.prepare(`
         UPDATE projects
-        SET draft_json = ?, draft_module_json = ?, status = 'ready', updated_at = ?
+        SET draft_json = ?, draft_module_json = ?, module_review_state = ?, preset_review_state = ?,
+          draft_source_blob = NULL, draft_storage_path = NULL, draft_storage_bytes = NULL, draft_storage_sha256 = NULL,
+          status = 'ready', updated_at = ?
         WHERE id = ?
       `).run(
         JSON.stringify(draft),
         draftModule ? JSON.stringify(draftModule) : null,
+        moduleReviewState,
+        presetReviewState,
         clock(),
         projectId,
       );
@@ -289,8 +316,12 @@ export function createExportService({ database, clock, targetLanguage, review }:
   }
 
   async function exportProject(projectId: string, options: { presetBundle?: boolean } = {}): Promise<ExportPayload> {
+    await assertProjectCanApply(projectId, true);
+    // Export always reflects the current approvals, even when a review was
+    // withdrawn after the last explicit save.
+    await applyProject(projectId);
     const project = await database.prepare(`
-      SELECT p.name, p.source_format AS sourceFormat, p.source_filename AS sourceFilename, p.source_blob AS sourceBlob,
+      SELECT p.name, p.target_language AS targetLanguage, p.source_format AS sourceFormat, p.source_filename AS sourceFilename, p.source_blob AS sourceBlob,
         p.source_storage_path AS sourceStoragePath, p.source_storage_bytes AS sourceBytes,
         source_metadata_keys AS sourceMetadataKeys, original_json AS originalJson, draft_json AS draftJson,
         original_module_json AS originalModuleJson, draft_module_json AS draftModuleJson,
@@ -301,6 +332,7 @@ export function createExportService({ database, clock, targetLanguage, review }:
       FROM projects p WHERE p.id = ?
     `).get(projectId) as {
       name?: string;
+      targetLanguage?: string;
       sourceFormat?: string;
       sourceFilename?: string | null;
       sourceBlob?: Uint8Array;
@@ -355,7 +387,7 @@ export function createExportService({ database, clock, targetLanguage, review }:
       project.originalName || project.name || '',
       project.translatedName || '',
     ));
-    const exportLanguage = exportLanguageTag(targetLanguage());
+    const exportLanguage = exportLanguageTag(project.targetLanguage || targetLanguage());
     const exportModule = draftModule && originalModule
       ? { ...draftModule, name: bilingualModuleName(text(draftModule.name), text(originalModule.name)) }
       : draftModule;
@@ -606,7 +638,10 @@ export function createExportService({ database, clock, targetLanguage, review }:
     return replacementSource;
   }
 
-  return { applyProject, exportProject };
+  return {
+    applyProject: (projectId: string) => database.transaction(() => applyProject(projectId)),
+    exportProject: (projectId: string, options?: { presetBundle?: boolean }) => database.transaction(() => exportProject(projectId, options)),
+  };
 }
 
 function sanitizeFilename(value: string): string {

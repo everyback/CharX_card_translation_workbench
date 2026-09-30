@@ -51,7 +51,7 @@ const PRESETS: Array<{
     id: 'quick',
     title: '快速翻译',
     scope: 'core',
-    description: '先翻译角色主体、名称和问候语，最快看到效果。',
+    description: '先翻译角色主体，最快看到效果。',
     hint: '适合第一次试用',
   },
   {
@@ -63,10 +63,10 @@ const PRESETS: Array<{
   },
   {
     id: 'audit',
-    title: '仅扫描审核',
+    title: '扫描后检查',
     scope: 'all-visible',
-    description: '只扫描结构和风险，不调用模型，先摸清卡片内容。',
-    hint: '不会消耗模型额度',
+    description: '扫描完整可见内容，先检查字段和结构，再手动启动翻译。',
+    hint: '扫描不调用模型',
   },
 ];
 
@@ -76,25 +76,6 @@ function presetForScope(scope: ScopePreset): PresetId {
   if (scope === 'core') return 'quick';
   if (scope === 'all-visible' || scope === 'lua-only') return 'audit';
   return 'risu';
-}
-
-function currentFlowStep(project: ProjectDetail): number {
-  if (project.status === 'new') return 1;
-  if (project.status === 'scanned') return 2;
-  if (['translating', 'paused', 'cancelled', 'failed'].includes(project.status)) return 2;
-  if (project.status === 'review' || project.status === 'review_with_errors') {
-    const pendingWithText = project.segments.some((segment) => (
-      segment.reviewStatus === 'pending'
-      && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
-    ));
-    const approvedWithText = project.segments.some((segment) => (
-      segment.reviewStatus === 'approved'
-      && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
-    ));
-    return pendingWithText || !approvedWithText ? 3 : 4;
-  }
-  if (project.status === 'ready') return 4;
-  return project.segments.some((segment) => segment.translatedText || segment.finalText) ? 3 : 2;
 }
 
 export function GuidedWorkflow({
@@ -118,17 +99,14 @@ export function GuidedWorkflow({
 }: GuidedWorkflowProps) {
   const [selectedPreset, setSelectedPreset] = useState<PresetId>(() => presetForScope(scope));
   const workflow = workflowState(project);
-  const flowStep = currentFlowStep({ ...project, status: workflow.status });
+  const scopeChanged = scope !== project.scope;
+  const flowStep = scopeChanged && !workflow.active ? 1 : workflow.flowStep;
   const modelReady = Boolean(settings?.apiKeyConfigured && settings.model);
   const risuFormat = ['charx', 'risum'].includes(project.sourceFormat.toLowerCase())
     || Boolean(project.scanSummary?.luaSegments || project.scanSummary?.protocolSegments || project.controlReferences.length);
   const presets = PRESETS.map((preset) => preset.id === 'risu' && !risuFormat
     ? { ...preset, title: '完整可见内容', description: '覆盖普通卡片中的所有可见文字和世界书内容。', hint: '适合 JSON / PNG 卡片' }
     : preset);
-  const selected = presets.find((preset) => preset.id === selectedPreset) ?? presets[1];
-  const hasFailedJob = ['failed', 'review_with_errors'].includes(workflow.latest?.status ?? '');
-  const latestJob = project.jobs[0];
-  const hasCancelledLatestJob = latestJob?.status === 'cancelled';
 
   useEffect(() => {
     setSelectedPreset(presetForScope(scope));
@@ -140,174 +118,60 @@ export function GuidedWorkflow({
   };
 
   const renderNextStep = () => {
-    if (['paused', 'failed', 'cancelled'].includes(workflow.status)) {
-      return <>
-        <div className="guided-next-copy">
-          <span className="guided-eyebrow">翻译任务</span>
-          <h2>{workflow.status === 'paused' ? '翻译已暂停' : workflow.status === 'failed' ? '翻译遇到错误' : '翻译已取消'}</h2>
-          <p>已完成的译文已保留。可继续处理未完成项，或打开任务页查看原因。</p>
-        </div>
-        <div className="guided-actions">
-          <button className="primary-button" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />继续翻译</button>
-          <button className="secondary-button" onClick={onOpenJobs}>查看任务</button>
-        </div>
-      </>;
-    }
-    if (workflow.status === 'new') {
-      return (
-        <>
-          <div className="guided-next-copy">
-            <span className="guided-eyebrow">下一步 · 01</span>
-            <h2>先扫描这张卡片</h2>
-            <p>扫描只读取卡片结构，整理主体、世界书、脚本和资源引用，不会调用模型，也不会改写原文件。</p>
-          </div>
-          <div className="guided-actions">
-            <button className="primary-button" onClick={() => onScan(selected.scope)} disabled={Boolean(busy)}>
-              {busy === 'scan' ? <ScanSearch className="spin" size={16} /> : <ScanSearch size={16} />}
-              扫描卡片
-              <ArrowRight size={15} />
-            </button>
-          </div>
-        </>
-      );
-    }
-
-    if (workflow.status === 'scanned') {
-      return (
-        <>
-          <div className="guided-next-copy">
-            <span className="guided-eyebrow">下一步 · 02</span>
-            <h2>扫描完成，选择翻译方式</h2>
-            <p>先选一个范围。你可以从快速翻译开始，也可以直接覆盖 RisuAI 卡片中的世界书和脚本内容。</p>
-            <TranslationStageGuide active={workflow.stage} />
-          </div>
-          {!modelReady && selectedPreset !== 'audit' && (
-            <div className="guided-setup-note">
-              <Settings2 size={16} />
-              <span>开始翻译前需要配置模型和 API Key。</span>
-              <button className="link-button" onClick={onOpenSettings}>去配置</button>
-            </div>
-          )}
-          <div className="guided-actions">
-            {selectedPreset === 'audit' ? (
-              <button className="primary-button" onClick={onOpenSegments}>
-                <FileSearch size={16} />查看扫描结果<ArrowRight size={15} />
-              </button>
-            ) : (
-              <button className="primary-button" onClick={onStartTranslation} disabled={Boolean(busy) || !modelReady}>
-                {busy === 'start' ? <Play className="spin" size={16} /> : <Play size={16} />}
-                开始翻译<ArrowRight size={15} />
-              </button>
-            )}
-          </div>
-        </>
-      );
-    }
-
-    if (workflow.status === 'translating') {
-      return (
-        <>
-          <div className="guided-next-copy">
-            <span className="guided-eyebrow">正在处理 · 03</span>
-            <h2>翻译正在进行</h2>
-            <p>任务会在后台逐批处理。你可以打开任务页查看进度，完成后再进入人工审核。</p>
-            <TranslationStageGuide active={workflow.stage} />
-          </div>
-          <div className="guided-actions">
-            <button className="secondary-button" onClick={onOpenJobs}><Layers3 size={16} />查看任务进度</button>
-          </div>
-        </>
-      );
-    }
-
-    if (workflow.status === 'review' || workflow.status === 'review_with_errors') {
-      const pendingWithText = project.segments.filter((segment) => (
-        segment.reviewStatus === 'pending'
-        && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
-      ));
-      const approvedWithText = project.segments.some((segment) => (
-        segment.reviewStatus === 'approved'
-        && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
-      ));
-      if (hasCancelledLatestJob) {
-        return (
-          <>
-            <div className="guided-next-copy">
-              <span className="guided-eyebrow">任务已取消 · 可继续</span>
-              <h2>翻译任务已取消，可以继续</h2>
-              <p>已完成的文本不会重复翻译；未完成的段落和 Lua/关键词适配会从上次中断处继续。</p>
-            </div>
-            <div className="guided-actions">
-              <button className="primary-button" onClick={onOpenJobs}><Play size={16} />打开任务并继续<ArrowRight size={15} /></button>
-            </div>
-          </>
-        );
-      }
-      if (!pendingWithText.length && approvedWithText) {
-        return (
-          <>
-            <div className="guided-next-copy">
-              <span className="guided-eyebrow">下一步 · 05</span>
-              <h2>审核已通过，可以保存并导出</h2>
-            <p>已有译文已经全部通过审核。点击“保存并导出”会先检查 Lua、脚本引用和卡片结构，运行时名称别名已由翻译阶段处理；校验通过后下载文件。</p>
-            </div>
-            <div className="guided-actions">
-              <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
-              <button className="primary-button" onClick={onSaveAndExport} disabled={Boolean(busy)}><Download size={16} />保存并导出</button>
-            </div>
-          </>
-        );
-      }
-      return (
-        <>
-          <div className="guided-next-copy">
-            <span className="guided-eyebrow">下一步 · 04</span>
-            <h2>译文已生成，可以一键通过或进入人工审核</h2>
-            <p>{hasFailedJob ? '任务中有失败项，先查看带疑点的字段，再决定是否重新翻译。' : '如果你已经确认无误，可以直接一键通过全部已有译文；也可以先进入人工审核逐条核对。'}</p>
-            <div className="guided-review-tip">
-              <ShieldCheck size={14} />
-              <span>一键通过只会处理已有译文，不会碰未翻译项。</span>
-            </div>
-          </div>
-          <div className="guided-actions">
-            <button className="primary-button" onClick={onOpenReview}><ShieldCheck size={16} />进入审核<ArrowRight size={15} /></button>
-            <button className="secondary-button" onClick={onApproveAll} disabled={Boolean(busy) || pendingWithText.length === 0} title={pendingWithText.length ? `一键通过全部 ${pendingWithText.length} 条已有译文` : '当前没有可一键通过的译文'}>
-              <CheckCheck size={16} />一键通过全部
-            </button>
-          </div>
-        </>
-      );
-    }
-
-    if (workflow.status === 'ready') {
-      return (
-        <>
-          <div className="guided-next-copy">
-            <span className="guided-eyebrow">最后一步 · 05</span>
-            <h2>审核稿已保存，可以继续导出</h2>
-            <p>保存并导出会在下载前再次检查 Lua、脚本引用和卡片结构，运行时名称别名已由翻译阶段处理；之后请在目标客户端实际打开复核。</p>
-          </div>
-          <div className="guided-actions">
-            <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
-            <button className="primary-button" onClick={onSaveAndExport} disabled={Boolean(busy)}><Download size={16} />保存并导出</button>
-          </div>
-        </>
-      );
-    }
-
-    return (
-      <>
-        <div className="guided-next-copy">
-          <span className="guided-eyebrow">审核准备</span>
-          <h2>确认后保存审核稿</h2>
-          <p>保存会校验 Lua 和受保护内容；保存并导出会在此基础上继续执行导出前检查。</p>
-        </div>
-        <div className="guided-actions">
-          <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
-          <button className="primary-button" onClick={onSaveAndExport} disabled={Boolean(busy)}><Download size={16} />保存并导出</button>
-        </div>
-      </>
-    );
+    if (workflow.active) return <>
+      <div className="guided-next-copy">
+        <h2>{workflow.status === 'paused' ? '翻译已暂停' : workflow.stage === 'adaptation' ? '正在执行阶段 2' : '翻译正在进行'}</h2>
+        <p>{workflow.status === 'paused' ? '已完成的结果已保留，继续任务后才会处理剩余内容。' : '任务在后台处理，完成后再进入人工审核。'}{scopeChanged ? ' 所选范围已变化，当前任务仍按原范围执行；完成或取消后才能重新扫描。' : ''}</p>
+        <TranslationStageGuide active={workflow.stage} />
+      </div>
+      <div className="guided-actions">
+        {workflow.status === 'paused' && !scopeChanged && <button className="primary-button" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />继续翻译</button>}
+        <button className="secondary-button" onClick={onOpenJobs}><Layers3 size={16} />查看任务进度</button>
+      </div>
+    </>;
+    if (scopeChanged || workflow.status === 'new') return <>
+      <div className="guided-next-copy"><h2>{scopeChanged ? '范围已变化，需要重新扫描' : '先扫描这张卡片'}</h2>
+        <p>按所选范围整理可翻译内容，保留已有译文和审核记录。扫描不会调用模型，也不会改写原文件。</p></div>
+      <div className="guided-actions"><button className="primary-button" onClick={() => onScan(scope)} disabled={Boolean(busy)}><ScanSearch size={16} />{scopeChanged ? '重新扫描' : '扫描卡片'}</button></div>
+    </>;
+    if (workflow.hasFailures || workflow.resumable) return <>
+      <div className="guided-next-copy">
+        <h2>{workflow.postIncomplete || workflow.latest?.status === 'review_with_errors' && !workflow.latest.failedItems ? '阶段 2 尚未完成，需要处理' : workflow.status === 'cancelled' ? '翻译已取消，可以继续' : '翻译有未完成项，需要处理'}</h2>
+        <p>已有译文和审核结果已保留。请先查看任务中的失败原因并重试；正文审核通过不代表脚本、正则和关键词适配已完成。</p>
+      </div>
+      <div className="guided-actions">
+        {workflow.canStart && <button className="primary-button" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />{workflow.retryAction ? workflow.latest?.failedItems ? '重试失败项与阶段 2' : '重试阶段 2' : '继续翻译'}</button>}
+        <button className="secondary-button" onClick={onOpenJobs}>查看任务</button>
+        <button className="secondary-button" onClick={onOpenReview}>审核已有译文</button>
+      </div>
+    </>;
+    if (workflow.counts.untranslated > 0) return <>
+      <div className="guided-next-copy"><h2>当前范围还有 {workflow.counts.untranslated} 条待翻译</h2><p>已完成的译文会保留。可以先检查字段和协议规则，再启动剩余内容的翻译。</p><TranslationStageGuide active="text" /></div>
+      {!modelReady && <div className="guided-setup-note"><Settings2 size={16} /><span>开始翻译前需要配置模型和 API Key。</span><button className="link-button" onClick={onOpenSettings}>去配置</button></div>}
+      <div className="guided-actions">
+        <button className="primary-button" onClick={onStartTranslation} disabled={Boolean(busy) || !modelReady}><Play size={16} />开始翻译<ArrowRight size={15} /></button>
+        <button className="secondary-button" onClick={onOpenSegments}><FileSearch size={16} />查看扫描结果</button>
+        {workflow.counts.pending > 0 && <button className="secondary-button" onClick={onOpenReview}>审核已有译文</button>}
+      </div>
+    </>;
+    if (workflow.counts.pending > 0) return <>
+      <div className="guided-next-copy"><h2>当前还有 {workflow.counts.pending} 条待审核</h2><p>对照原文核对后再保存。之前保存过的草稿不会使新修改自动通过审核；导出只包含已通过的结果。</p></div>
+      <div className="guided-actions">
+        <button className="primary-button" onClick={onOpenReview}><ShieldCheck size={16} />进入审核<ArrowRight size={15} /></button>
+        <button className="secondary-button" onClick={onApproveAll} disabled={Boolean(busy) || !workflow.counts.reviewable}><CheckCheck size={16} />一键通过已有译文（{workflow.counts.reviewable}）</button>
+      </div>
+    </>;
+    if (workflow.counts.approved > 0) return <>
+      <div className="guided-next-copy"><h2>当前范围审核已通过，保存后导出</h2><p>保存并导出会应用当前有效的审核结果，并检查 Lua、脚本引用和卡片结构。范围外已审核的成果继续保留；未审核内容保留原文。请在目标客户端打开复核。</p></div>
+      <div className="guided-actions">
+        <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
+        <button className="primary-button" onClick={onSaveAndExport} disabled={Boolean(busy)}><Download size={16} />保存并导出</button>
+      </div>
+    </>;
+    return <>
+      <div className="guided-next-copy"><h2>当前范围没有待处理的翻译项</h2><p>可以检查扫描结果、勾选需要翻译的字段，或调整范围后重新扫描。</p></div>
+      <div className="guided-actions"><button className="primary-button" onClick={onOpenSegments}><FileSearch size={16} />查看扫描结果</button></div>
+    </>;
   };
 
   const showPresets = workflow.status === 'new' || workflow.status === 'scanned';

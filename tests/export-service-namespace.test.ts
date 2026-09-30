@@ -18,12 +18,16 @@ async function createNamespaceDatabase(): Promise<{ database: AsyncDatabase; dir
   const database = new AsyncDatabase(path.join(directory, 'test.sqlite'));
   await database.exec(`
     CREATE TABLE projects (
+      source_language TEXT NOT NULL DEFAULT 'auto',
       id TEXT PRIMARY KEY,
       name TEXT,
       original_json TEXT NOT NULL,
       draft_json TEXT NOT NULL,
       original_module_json TEXT,
       draft_module_json TEXT,
+      module_review_state TEXT,
+      preset_review_state TEXT,
+      target_language TEXT,
       source_format TEXT NOT NULL,
       source_filename TEXT,
       regex_validation_overrides TEXT,
@@ -40,6 +44,7 @@ async function createNamespaceDatabase(): Promise<{ database: AsyncDatabase; dir
       updated_at TEXT NOT NULL
     );
     CREATE TABLE segments (
+      in_scope INTEGER NOT NULL DEFAULT 1,
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
       path_json TEXT NOT NULL,
@@ -224,7 +229,7 @@ test('manual namespace confirmation preserves an internal key or applies a confi
 test('approved manual foreign-language examples survive save and export while structure remains protected', async () => {
   const { database, directory } = await createNamespaceDatabase();
   try {
-    await database.exec(`ALTER TABLE projects ADD COLUMN target_language TEXT DEFAULT 'zh-CN';
+    await database.exec(`UPDATE projects SET target_language = 'zh-CN';
       ALTER TABLE projects ADD COLUMN language_behavior_mode TEXT DEFAULT 'preserve';`);
     const source = 'For a self-pointing 나 use its_me; ㅋㅋ이가 maps to female_tyrant_troubled.';
     const finalText = '指向自己的 나 使用 its_me；ㅋㅋ이가 对应 female_tyrant_troubled。';

@@ -38,7 +38,7 @@ export function SettingsDialog({ settings, onClose, onSave }: { settings: Settin
           <label><span>图片编辑 API 完整地址</span><input value={value.imageApiUrl} onChange={(event) => setValue({ ...value, imageApiUrl: event.target.value })} placeholder="https://api.openai.com/v1/images/edits" /></label>
           <label><span>图片编辑模型</span><input value={value.imageModel} onChange={(event) => setValue({ ...value, imageModel: event.target.value })} placeholder="例如 gpt-image-1" /></label>
           <label className="wide"><span>图片编辑 API Key</span><input type="password" value={value.imageApiKey} onChange={(event) => setValue({ ...value, imageApiKey: event.target.value })} placeholder={settings.imageApiKeyConfigured ? '留空则保持现有密钥' : '输入图片编辑 API Key'} /></label>
-          <div className="wide settings-section-label"><strong>语言路由</strong><small>源语言、备用语言和目标语言均按名称传递，不限定语言族；卡片级保留/跟随规则仍单独生效。</small></div>
+          <div className="wide settings-section-label"><strong>语言路由</strong><small>源语言和目标语言作为新导入项目的默认值；备用语言供新任务使用。已有项目保留自身语言，任务开始后语言配置固定，暂停、重试和阶段 2 均不随全局设置改变。</small></div>
           <label><span>源语言</span><input value={value.sourceLanguage} onChange={(event) => setValue({ ...value, sourceLanguage: event.target.value })} placeholder="auto" /></label>
           <label><span>备用语言</span><input value={value.fallbackLanguage} onChange={(event) => setValue({ ...value, fallbackLanguage: event.target.value })} placeholder="en" /></label>
           <label><span>目标语言</span><input value={value.targetLanguage} onChange={(event) => setValue({ ...value, targetLanguage: event.target.value })} placeholder="zh-CN" /></label>

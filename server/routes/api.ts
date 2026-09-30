@@ -1,10 +1,14 @@
 import { createJobLifecycleService } from '../application/translation/job-lifecycle-service.js';
+import { projectJobLanguage } from '../application/translation/job-language.js';
 import { registerJobRoutes } from './jobs.js';
 import { loadReviewedDraft } from '../application/export/reviewed-draft.js';
+import { ModuleReviewConflict } from '../domain/lua/module-review-base.js';
 import { saveImageCandidate } from '../application/resources/image-candidate-service.js';
 import { validateUploadedImage } from '../domain/resources/image-upload.js';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { readWorkflowProgress } from '../repositories/workflow-progress.js';
+import { publicJobLanguage } from '../application/translation/job-language.js';
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import Fastify, { type FastifyReply } from 'fastify';
@@ -116,7 +120,9 @@ const uploadBytes = uploadLimitBytes(uploadLimitMib);
 const app = Fastify({ logger: true, bodyLimit: uploadBytes });
 await app.register(multipart, { limits: { fileSize: uploadBytes, files: 1 } });
 const controlReferenceCache = new Map<string, RisuControlReference[]>();
-const translationJobs = createTranslationJobService({ database: db, createId: id, clock: now });
+const translationJobs = createTranslationJobService({ database: db, createId: id, clock: now,
+  captureLanguage: projectId => projectJobLanguage(db, projectId, publicSettings()),
+});
 const scanService = createScanService({
   database: db,
   createId: id,
@@ -248,7 +254,7 @@ app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('
     : [];
   const jobs = await db.prepare(`
     SELECT
-      id, status, scope, model,
+      id, project_id AS projectId, status, scope, model, language_config AS languageConfig,
       total_items AS totalItems,
       completed_items AS completedItems,
       failed_items AS failedItems,
@@ -258,7 +264,7 @@ app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('
       last_error AS lastError,
       created_at AS createdAt,
       updated_at AS updatedAt
-    FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 20
+    FROM jobs WHERE project_id = ? ORDER BY CASE WHEN status IN ('queued','running','paused') THEN 0 ELSE 1 END, created_at DESC, rowid DESC LIMIT 20
   `).all(request.params.projectId);
   const originalModuleRow = await db.prepare('SELECT original_module_json AS originalModuleJson FROM projects WHERE id = ?')
     .get(request.params.projectId) as { originalModuleJson?: string | null } | undefined;
@@ -273,8 +279,10 @@ app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('
   const scanSummary = includeSegments
     ? scanSummaryFromSegments(segments)
     : await projectSegmentSummary(request.params.projectId);
+  const progress = (await readWorkflowProgress(db, request.params.projectId)).get(request.params.projectId);
   return {
     ...project,
+    ...progress,
     controlReferences: controlReferences.map((reference) => ({
       literal: reference.literal,
       kind: reference.kind,
@@ -282,7 +290,7 @@ app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('
       pattern: reference.pattern,
     })),
     segments,
-    jobs,
+    jobs: jobs.map(job => ({ ...job, languageConfig: publicJobLanguage(job.languageConfig) })),
     scanSummary: {
       ...scanSummary,
       runtimeRiskCount: runtimeRisks.length,
@@ -386,6 +394,7 @@ app.get<{
 
 app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/language-rule', async (request, reply) => {
   if (!await projectById(request.params.projectId)) return reply.code(404).send({ error: '项目不存在。' });
+  if (await translationJobs.hasActiveTranslationJob(request.params.projectId)) return reply.code(409).send({ error: '请先完成或取消当前任务，再修改项目语言设定。' });
   const body = asRecord(request.body);
   const mode = body.mode === 'preserve' ? 'preserve' : body.mode === 'target' ? 'target' : '';
   if (!mode) return reply.code(400).send({ error: '卡片语言设定模式无效。' });
@@ -735,12 +744,20 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
       translatedText: string | null;
     }>;
     const originalCard = JSON.parse(row.originalJson) as Record<string, unknown>;
-    const { draftCard, draftModule } = await loadReviewedDraft(db, request.params.projectId);
+    let draftCard: Record<string, unknown>, draftModule: Record<string, unknown> | null;
+    let reviewConflict: ModuleReviewConflict | undefined;
+    try { ({ draftCard, draftModule } = await loadReviewedDraft(db, request.params.projectId)); }
+    catch (error) {
+      if (!(error instanceof ModuleReviewConflict)) throw error;
+      reviewConflict = error;
+      draftCard = JSON.parse(row.draftJson || row.originalJson);
+      draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) : null;
+    }
     const originalModule = row.originalModuleJson
       ? JSON.parse(row.originalModuleJson) as Record<string, unknown>
       : null;
 
-    return buildLuaManagementReport({
+    const report = buildLuaManagementReport({
       originalCard,
       draftCard,
       originalModule,
@@ -750,6 +767,13 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/diagnos
       targetLanguage: row.targetLanguage,
       regexValidationOverrides: parseRegexValidationOverrides(row.regexValidationOverrides),
     });
+    if (reviewConflict) {
+      report.blockerCount += 1;
+      report.issues.push({ kind: 'control', pathLabel: reviewConflict.pathLabel, message: reviewConflict.message, blocking: true, segmentIds: [] });
+      report.steps = report.steps.map(step => ['validate', 'export'].includes(step.id)
+        ? { ...step, status: 'blocked' as const, message: reviewConflict!.message } : step);
+    }
+    return report;
   } catch (error) {
     return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
   }
@@ -1564,7 +1588,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/reset-
   if (!hasDraftChanges) return { ok: true, reset: false };
   await db.prepare(`
     UPDATE projects
-    SET draft_module_json = original_module_json, regex_validation_overrides = NULL, updated_at = ?
+    SET draft_module_json = original_module_json, module_review_state = NULL, regex_validation_overrides = NULL, updated_at = ?
     WHERE id = ?
   `).run(now(), request.params.projectId);
   return { ok: true, reset: true };
@@ -1616,7 +1640,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
   const body = asRecord(request.body);
   const scope = normalizeScope(text(body.scope));
   const row = await db.prepare(`
-    SELECT original_json, original_module_json, source_format, source_blob,
+    SELECT original_json, original_module_json, source_format, source_blob, source_language AS sourceLanguage,
       source_storage_path AS sourceStoragePath
     FROM projects WHERE id = ?
   `).get(request.params.projectId) as {
@@ -1624,6 +1648,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
     original_module_json: string | null;
     source_format: string;
     source_blob: Uint8Array | null;
+    sourceLanguage: string;
     sourceStoragePath: string | null;
   } | undefined;
   if (!row) return reply.code(404).send({ error: '项目不存在。' });
@@ -1648,25 +1673,30 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
   const protocolDiscovery = await discoverAndStoreProtocols(request.params.projectId, card, module);
   const protocolRules = await approvedProtocolRules(request.params.projectId);
   const runtimeRisks = module ? detectRisuRuntimeRisks(module) : [];
-  const moduleSegments = module
-    ? scanRisuModule(module, scope).filter((segment) => !(
-        row.source_format === 'charx' && isRisuModuleLorebookMirrorPath(card, segment.path)
-      ))
-    : [];
-  const segments = [
-    ...(row.source_format === 'risum'
-      ? []
-      : row.source_format === 'st-preset'
-        // The generic walker would also offer `role` / `identifier` / sampler
-        // keywords for translation, which corrupts the preset.
-        ? scanStPreset(card, scope)
-        : scanCard(card, scope, controlLiterals, protocolRules, publicSettings().sourceLanguage)),
-    ...moduleSegments,
-    ...(row.source_format === 'charx' && sourceBlob
-      ? scanCharxResourceJson(sourceBlob, scope === 'all')
-      : []),
-  ];
-  const replacement = await scanService.replaceScannedSegments(request.params.projectId, scope, segments);
+  const scanInventory = (scanScope: ScopePreset) => {
+    const moduleSegments = module
+      ? scanRisuModule(module, scanScope, protocolRules).filter((segment) => !(
+          row.source_format === 'charx' && isRisuModuleLorebookMirrorPath(card, segment.path)
+        ))
+      : [];
+    const segments = [
+      ...(row.source_format === 'risum'
+        ? []
+        : row.source_format === 'st-preset'
+          // The generic walker would also offer `role` / `identifier` / sampler
+          // keywords for translation, which corrupts the preset.
+          ? scanStPreset(card, scanScope)
+          : scanCard(card, scanScope, controlLiterals, protocolRules, row.sourceLanguage)),
+      ...moduleSegments,
+      ...(row.source_format === 'charx' && sourceBlob
+        ? scanCharxResourceJson(sourceBlob, scanScope === 'all')
+        : []),
+    ];
+    return segments;
+  };
+  const segments = scanInventory(scope);
+  const replacement = await scanService.replaceScannedSegments(request.params.projectId, scope, segments,
+    scope === 'all' ? segments : scanInventory('all'));
   await namespaceReviewService.ensureReviewItem(request.params.projectId);
   return {
     ok: true,
@@ -1682,6 +1712,10 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/scan', asy
 app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/jobs', async (request, reply) => {
   const project = await projectById(request.params.projectId);
   if (!project) return reply.code(404).send({ error: '项目不存在。' });
+  const expectedScope = text(asRecord(request.body).scope);
+  if (project.status === 'new' || (expectedScope && expectedScope !== project.scope)) {
+    return reply.code(409).send({ error: '翻译范围已变化，请先按所选范围重新扫描。', code: 'SCAN_SCOPE_CHANGED' });
+  }
   const settings = publicSettings();
   if (!settings.apiKeyConfigured || !settings.model) {
     return reply.code(400).send({ error: '请先在模型设置中配置 API Key 和模型名称。' });
@@ -1689,7 +1723,7 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/jobs', asy
 
   const segmentRows = await db.prepare(`
     SELECT id FROM segments
-    WHERE project_id = ? AND included = 1 AND review_status IN ('untranslated', 'rejected')
+    WHERE project_id = ? AND in_scope = 1 AND included = 1 AND review_status IN ('untranslated', 'rejected')
       AND path_label <> '$module.namespace'
     ORDER BY sort_order
   `).all(request.params.projectId) as Array<{ id: string }>;
@@ -2372,7 +2406,7 @@ async function projectSegments(
         LIMIT 1
       ) AS translationError
     FROM segments s
-    WHERE s.project_id = ?
+    WHERE s.project_id = ? AND s.in_scope = 1
     ORDER BY s.sort_order, s.id${pagination}
   `).all(...params) as Array<Record<string, unknown>>;
   return rows.map((row) => normalizeSegment(row, references));
@@ -2395,7 +2429,7 @@ async function projectSegmentSummary(projectId: string): Promise<{
       COALESCE(SUM(CASE WHEN kind = 'protocol-field' THEN 1 ELSE 0 END), 0) AS protocolSegments,
       COALESCE(SUM(CASE WHEN kind LIKE 'lua-%' OR kind = 'runtime-message' THEN 1 ELSE 0 END), 0) AS luaSegments
     FROM segments
-    WHERE project_id = ?
+    WHERE project_id = ? AND in_scope = 1
   `).get(projectId) as Record<string, unknown>;
   return {
     totalSegments: Number(row.totalSegments) || 0,

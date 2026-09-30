@@ -3,6 +3,7 @@ import { applyApprovedSegments, isProtectedStoredPath, restoreProtectedModuleDra
 import { synchronizeRisuModuleLorebook } from '../../domain/card/charx.js';
 import { applyRisuModuleSegments } from '../../domain/lua/risu-lua.js';
 import { isProtectedResourceJsonSegment } from '../../domain/resources/resources.js';
+import { restoreModuleReviewBase, type ModuleReviewState } from '../../domain/lua/module-review-base.js';
 
 function isModuleNamespaceSegment(
   segment: ApplicableSegment,
@@ -22,6 +23,7 @@ export function buildReviewedDraft(
   existingDraftModule: Record<string, unknown> | null,
   segments: ApplicableSegment[],
   sourceFormat: string,
+  reviewState?: ModuleReviewState | null,
 ) {
   const cardSegments: ApplicableSegment[] = [];
   const moduleSegments: ApplicableSegment[] = [];
@@ -46,11 +48,16 @@ export function buildReviewedDraft(
   }
 
   const draft = applyApprovedSegments(originalCard, cardSegments);
-  const moduleBase = existingDraftModule
-    ? (originalModule
-      ? restoreProtectedModuleDraft(originalModule, existingDraftModule, segments)
-      : existingDraftModule)
-    : originalModule;
+  let moduleBase = originalModule ?? existingDraftModule;
+  if (originalModule && existingDraftModule) {
+    // Legacy drafts have no stored overlay. Reconstruct it from retained text
+    // candidates, including withdrawn reviews, before removing applied text.
+    const legacyApplied = reviewState?.applied ?? applyRisuModuleSegments(originalModule,
+      moduleSegments.filter(segment => segment.finalText || segment.translatedText)
+        .map(segment => ({ ...segment, reviewStatus: 'approved' })), '', undefined, {}).draft;
+    moduleBase = restoreModuleReviewBase(reviewState?.base ?? originalModule, legacyApplied,
+      restoreProtectedModuleDraft(originalModule, existingDraftModule, segments));
+  }
   const moduleResult = moduleBase ? applyRisuModuleSegments(
     moduleBase,
     moduleSegments,
@@ -62,15 +69,15 @@ export function buildReviewedDraft(
   const draftModule = appliedModule && sourceFormat === 'charx'
     ? synchronizeRisuModuleLorebook(draft, appliedModule)
     : appliedModule;
-  return { draftCard: draft, draftModule, moduleResult, cardSegments, moduleSegments, resourceSegments, ignoredProtectedPaths };
+  return { draftCard: draft, draftModule, moduleBase, moduleResult, cardSegments, moduleSegments, resourceSegments, ignoredProtectedPaths };
 }
 
 export async function loadReviewedDraft(database: AsyncDatabase, projectId: string) {
   const row = await database.prepare(`
     SELECT original_json AS originalJson, original_module_json AS originalModuleJson,
-      draft_module_json AS draftModuleJson, source_format AS sourceFormat
+      draft_module_json AS draftModuleJson, source_format AS sourceFormat, module_review_state AS moduleReviewState
     FROM projects WHERE id = ?
-  `).get(projectId) as { originalJson: string; originalModuleJson: string | null; draftModuleJson: string | null; sourceFormat: string } | undefined;
+  `).get(projectId) as { originalJson: string; originalModuleJson: string | null; draftModuleJson: string | null; sourceFormat: string; moduleReviewState: string | null } | undefined;
   if (!row) throw new Error('项目不存在。');
   const segments = await database.prepare(`
     SELECT id, path_json AS pathJson, path_label AS pathLabel, kind, source_text AS sourceText,
@@ -79,5 +86,6 @@ export async function loadReviewedDraft(database: AsyncDatabase, projectId: stri
     FROM segments WHERE project_id = ?
   `).all(projectId) as unknown as ApplicableSegment[];
   return buildReviewedDraft(JSON.parse(row.originalJson), row.originalModuleJson ? JSON.parse(row.originalModuleJson) : null,
-    row.draftModuleJson ? JSON.parse(row.draftModuleJson) : null, segments, row.sourceFormat);
+    row.draftModuleJson ? JSON.parse(row.draftModuleJson) : null, segments, row.sourceFormat,
+    row.moduleReviewState ? JSON.parse(row.moduleReviewState) : null);
 }

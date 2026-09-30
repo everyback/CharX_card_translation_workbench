@@ -1,4 +1,5 @@
 import { savePostprocessingDraft } from './application/translation/postprocessing-store.js';
+import { loadJobLanguage } from './application/translation/job-language.js';
 import { JobRunner } from './application/translation/job-runner.js';
 import { buildRuntimeAliasDraft } from './application/translation/runtime-alias-stage.js';
 import { saveRejectedTranslation } from './application/review/rejected-translation.js';
@@ -736,7 +737,8 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
 
   try {
     const jobProject = await db.prepare('SELECT project_id AS projectId FROM jobs WHERE id = ?').get(jobId) as { projectId?: string } | undefined;
-    const initialSettings = await runtimeSettingsSnapshot(jobProject?.projectId);
+    const language = await loadJobLanguage(db, jobId, runtimeSettings());
+    const initialSettings = { ...runtimeSettings(), ...language };
     assertProviderReady(initialSettings);
     const controlLiterals = await controlLiteralsForJob(jobId);
     const runtimeAliasCandidates = jobProject?.projectId
@@ -749,9 +751,9 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
       const current = await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId) as { status: string } | undefined;
       if (!current || current.status === 'paused' || current.status === 'cancelled') return;
 
-      // A batch receives one immutable-in-practice snapshot. Global settings
-      // changes are picked up before the next batch, never halfway through it.
-      const settings = await runtimeSettingsSnapshot(jobProject?.projectId);
+      // Provider limits may change between batches; the task's language policy
+      // remains fixed across batches, retries, restarts and postprocessing.
+      const settings = { ...runtimeSettings(), ...language };
       assertProviderReady(settings);
       // Each in-flight item below is one provider HTTP request. The fair
       // provider queue, rather than project order, decides which request gets
@@ -787,7 +789,7 @@ async function runJob(jobId: string, signal: AbortSignal): Promise<void> {
       const stage2Current = await db.prepare('SELECT status FROM jobs WHERE id = ?').get(jobId) as { status?: string } | undefined;
       if (!stage2Current || !['queued', 'running'].includes(stage2Current.status ?? '')) return;
       await log(jobId, 'info', '阶段 2 开始：处理 Lua 正则语言并列项与关键词适配。');
-      const followUpSettings = await runtimeSettingsSnapshot(jobProject?.projectId);
+      const followUpSettings = { ...runtimeSettings(), ...language };
       const regexLanguageFollowUp = jobProject?.projectId
         ? await translateProjectRegexLanguageAlternatives(jobId, jobProject.projectId, followUpSettings, signal)
         : { total: 0, added: 0, adapted: 0, failed: 0 };
@@ -1812,12 +1814,6 @@ function regexContextExcerpt(text: string, matchIndex: number | null, fallbackRe
 export function privateImageSettings() {
   const settings = runtimeSettings();
   return { apiUrl: settings.imageApiUrl, apiKey: settings.imageApiKey, model: settings.imageModel };
-}
-
-async function runtimeSettingsSnapshot(projectId?: string): Promise<RuntimeSettings> {
-  const snapshot = runtimeSettings();
-  snapshot.languageBehaviorMode = await projectLanguageBehaviorMode(projectId || '', snapshot.languageBehaviorMode);
-  return snapshot;
 }
 
 export async function listAvailableModels(): Promise<{ models: string[] }> {

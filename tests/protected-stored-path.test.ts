@@ -21,12 +21,16 @@ async function createDatabase(): Promise<{ database: AsyncDatabase; directory: s
   const database = new AsyncDatabase(path.join(directory, 'test.sqlite'));
   await database.exec(`
     CREATE TABLE projects (
+      source_language TEXT NOT NULL DEFAULT 'en',
       id TEXT PRIMARY KEY,
       name TEXT,
       original_json TEXT NOT NULL,
       draft_json TEXT NOT NULL,
       original_module_json TEXT,
       draft_module_json TEXT,
+      module_review_state TEXT,
+      preset_review_state TEXT,
+      target_language TEXT,
       source_format TEXT NOT NULL,
       source_filename TEXT,
       regex_validation_overrides TEXT,
@@ -43,6 +47,7 @@ async function createDatabase(): Promise<{ database: AsyncDatabase; directory: s
       updated_at TEXT NOT NULL
     );
     CREATE TABLE segments (
+      in_scope INTEGER NOT NULL DEFAULT 1,
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
       path_json TEXT NOT NULL,
