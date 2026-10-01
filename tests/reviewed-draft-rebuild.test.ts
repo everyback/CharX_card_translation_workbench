@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildReviewedDraft } from '../server/application/export/reviewed-draft.js';
-import { ModuleReviewConflict } from '../server/domain/lua/module-review-base.js';
+import { ModuleReviewConflict, restoreModuleReviewBase } from '../server/domain/lua/module-review-base.js';
 import { scanRisuModule, type ApplicableSegment } from '../server/domain/card/card.js';
 
 test('withdrawing Lua approval removes the old translation while preserving a nearby manual repair', () => {
@@ -47,4 +47,27 @@ test('withdrawn legacy writes cannot persist in protected module trigger fields'
     sourceText: 'user', start: null, end: null, translatedText: '用户', finalText: null, reviewStatus: 'rejected' };
   const result = buildReviewedDraft({}, original, current, [segment], 'risum');
   assert.deepEqual(result.draftModule, original);
+});
+
+test('large Lua scripts keep distant translations separate from manual repairs', () => {
+  const base = Array.from({ length: 3000 }, (_, i) => `local value${i} = "source ${i}"\n`).join('');
+  const applied = base.replace('source 100', '译文 100').replace('source 2800', '译文 2800');
+  const current = applied.replace('value1500 =', 'repaired1500 =');
+  assert.equal(restoreModuleReviewBase(base, applied, current), base.replace('value1500 =', 'repaired1500 ='));
+  assert.throws(() => restoreModuleReviewBase(base, applied, current.replace('译文 100', '人工内容')), ModuleReviewConflict);
+});
+
+test('large Lua scripts preserve inserted and deleted lines between translated regions', () => {
+  const base = Array.from({ length: 3000 }, (_, i) => `local value${i} = "source ${i}"\n`).join('');
+  const applied = base.replace('source 100', '译文 100').replace('source 2800', '译文 2800');
+  const repair = (code: string) => code.replace('local value1500', '-- manual repair\nlocal value1500').replace('local value1700 = "source 1700"\n', '');
+  assert.equal(restoreModuleReviewBase(base, applied, repair(applied)), repair(base));
+});
+
+test('a long embedded single-line UI keeps separate label translations and manual style repairs', () => {
+  const base = 'return [[' + Array.from({ length: 3000 }, (_, i) => `<div id="item${i}">Label ${i}</div>`).join('') + ']]';
+  const applied = base.replace('Label 100<', '标签 100<').replace('Label 2800<', '标签 2800<');
+  const repair = (code: string) => code.replace('id="item1500"', 'id="item1500" class="fixed"');
+  assert.equal(restoreModuleReviewBase(base, applied, repair(applied)), repair(base));
+  assert.throws(() => restoreModuleReviewBase(base, applied, applied.replace('标签 100<', '人工文字<')), ModuleReviewConflict);
 });

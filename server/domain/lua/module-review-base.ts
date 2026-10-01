@@ -6,12 +6,57 @@ export class ModuleReviewConflict extends Error {
   }
 }
 
+/** Unique unchanged lines partition long scripts without a quadratic matrix. */
+function lineAnchors(a: string[], b: string[]): Array<[number, number]> {
+  const unique = (lines: string[]) => {
+    const positions = new Map<string, number>();
+    lines.forEach((line, index) => positions.set(line, positions.has(line) ? -1 : index));
+    return positions;
+  };
+  const left = unique(a), right = unique(b);
+  const pairs: Array<[number, number]> = [];
+  for (const [line, i] of left) {
+    const j = right.get(line);
+    if (i >= 0 && j !== undefined && j >= 0) pairs.push([i, j]);
+  }
+  // Longest increasing subsequence keeps anchors in order even after moves.
+  const tails: number[] = [], previous = new Int32Array(pairs.length).fill(-1);
+  pairs.forEach((pair, index) => {
+    let low = 0, high = tails.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (pairs[tails[mid]][1] < pair[1]) low = mid + 1; else high = mid;
+    }
+    if (low) previous[index] = tails[low - 1];
+    tails[low] = index;
+  });
+  const result: Array<[number, number]> = [];
+  for (let index = tails.at(-1) ?? -1; index >= 0; index = previous[index]) result.push(pairs[index]);
+  return result.reverse();
+}
+
 /** Line alignment keeps independent nearby repairs separate from translations. */
-function edits(before: string, after: string, characters = false): Edit[] {
+function edits(before: string, after: string, mode: 'lines' | 'tokens' | 'characters' = 'lines'): Edit[] {
   if (before === after) return [];
-  const a = characters ? before.split('') : before.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-  const b = characters ? after.split('') : after.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-  if (a.length * b.length > 2_000_000) return [trimEdit(before, after, 0)];
+  const split = (text: string) => mode === 'characters' ? text.split('')
+    : mode === 'tokens' ? text.match(/[\p{L}\p{N}_]+|\s+|[^\s\p{L}\p{N}_]/gu) ?? []
+      : text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const a = split(before), b = split(after);
+  if (a.length * b.length > 2_000_000) {
+    // A minified HTML/JS string inside Lua can itself be hundreds of KB.
+    if (mode === 'characters') return edits(before, after, 'tokens');
+    const anchors = lineAnchors(a, b);
+    if (!anchors.length) return [trimEdit(before, after, 0)];
+    const result: Edit[] = [];
+    let ai = 0, bi = 0, offset = 0;
+    for (const [i, j] of [...anchors, [a.length, b.length]]) {
+      const removed = a.slice(ai, i).join(''), added = b.slice(bi, j).join('');
+      result.push(...edits(removed, added, mode).map(edit => ({ ...edit, start: edit.start + offset, end: edit.end + offset })));
+      offset += removed.length + (a[i]?.length ?? 0);
+      ai = i + 1; bi = j + 1;
+    }
+    return result;
+  }
   const rows = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
   for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) {
     rows[i][j] = a[i] === b[j] ? rows[i + 1][j + 1] + 1 : Math.max(rows[i + 1][j], rows[i][j + 1]);
@@ -27,8 +72,8 @@ function edits(before: string, after: string, characters = false): Edit[] {
       else { removed += a[i]; offset += a[i++].length; }
     }
     const trimmed = trimEdit(removed, added, start);
-    if (characters) result.push(trimmed);
-    else result.push(...edits(before.slice(trimmed.start, trimmed.end), trimmed.text, true)
+    if (mode === 'characters' || (mode === 'tokens' && (trimmed.end - trimmed.start) * trimmed.text.length > 2_000_000)) result.push(trimmed);
+    else result.push(...edits(before.slice(trimmed.start, trimmed.end), trimmed.text, 'characters')
       .map(edit => ({ ...edit, start: edit.start + trimmed.start, end: edit.end + trimmed.start })));
   }
   return result;
