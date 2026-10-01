@@ -178,22 +178,6 @@ await db.exec(`
 
   CREATE INDEX IF NOT EXISTS glossary_project_idx ON glossary_terms(project_id, source_text);
 
-  CREATE TABLE IF NOT EXISTS resource_ocr_candidates (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    resource_path TEXT NOT NULL,
-    text TEXT NOT NULL DEFAULT '',
-    confidence REAL,
-    engine TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'draft',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(project_id, resource_path)
-  );
-
-  CREATE INDEX IF NOT EXISTS resource_ocr_project_idx
-    ON resource_ocr_candidates(project_id, updated_at DESC);
-
   CREATE TABLE IF NOT EXISTS resource_image_candidates (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

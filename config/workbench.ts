@@ -14,7 +14,6 @@ export const WORKBENCH_DEFAULTS = {
   databaseFile: 'workbench.sqlite',
   unpackSessionsDirectory: 'unpack-sessions',
   tavernCardSessionsDirectory: 'tavern-card-sessions',
-  ocrCacheDirectory: 'ocr-cache',
   webDirectory: 'dist',
   translation: {
     apiBaseUrl: 'https://api.openai.com/v1',
@@ -98,10 +97,6 @@ export const workbenchConfig = Object.freeze({
     tavernCardSessions: resolveConfiguredDirectory(
       'WORKBENCH_TAVERN_CARD_SESSIONS_DIR',
       path.join(dataRoot, WORKBENCH_DEFAULTS.tavernCardSessionsDirectory),
-    ),
-    ocrCache: resolveConfiguredDirectory(
-      'WORKBENCH_OCR_CACHE_DIR',
-      path.join(dataRoot, WORKBENCH_DEFAULTS.ocrCacheDirectory),
     ),
     webRoot: resolveConfiguredDirectory('WORKBENCH_WEB_DIR', WORKBENCH_DEFAULTS.webDirectory),
     nodeModulesRoot,

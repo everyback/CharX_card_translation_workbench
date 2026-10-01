@@ -528,9 +528,9 @@ select { padding: 0 9px; }
 .resource-status.is-confirmed { background: #e6efe8; color: #315f49; }
 .resource-replacement-actions { display: grid; gap: 8px; margin-top: 14px; }
 .resource-approval { margin-top: 16px; padding-top: 14px; border-top: 1px solid #dce5df; }
-.resource-ocr-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.resource-ocr-error { display: flex; align-items: flex-start; gap: 6px; margin-top: 10px; color: #ad413b; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-.resource-ocr-error svg { flex-shrink: 0; }
+.resource-image-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.resource-image-error { display: flex; align-items: flex-start; gap: 6px; margin-top: 10px; color: #ad413b; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.resource-image-error svg { flex-shrink: 0; }
 .resource-metadata dl { display: grid; gap: 10px; margin: 14px 0; font-size: 12px; }
 .resource-metadata dl > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; }
 .resource-metadata dt { color: #74807c; }

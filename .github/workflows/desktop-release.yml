@@ -55,6 +55,19 @@ jobs:
       - name: Build portable package
         run: npx electron-builder --win portable --publish never
 
+      - name: Verify desktop package excludes OCR
+        shell: pwsh
+        run: |
+          $appRoot = 'release/win-unpacked/resources/app'
+          if (-not (Test-Path "$appRoot/dist-server/server/index.js")) {
+            throw 'Packaged backend entry is missing'
+          }
+          foreach ($removedPath in @('node_modules/tesseract.js', 'node_modules/tesseract.js-core', 'dist-server/server/domain/resources/ocr.js')) {
+            if (Test-Path "$appRoot/$removedPath") {
+              throw "Removed OCR component is still packaged: $removedPath"
+            }
+          }
+
       - name: Upload portable EXE
         uses: actions/upload-artifact@v6
         with:

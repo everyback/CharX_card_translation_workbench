@@ -14,21 +14,13 @@ import {
 export type ResourceKind = 'image' | 'audio' | 'video' | 'font' | 'data' | 'other';
 export type ResourceTextRisk = 'none' | 'path' | 'unknown';
 
-export type ResourceOcrStatus = 'draft' | 'confirmed';
-
-export interface ResourceOcrCandidate {
-  text: string;
-  confidence: number | null;
-  engine: string;
-  status: ResourceOcrStatus;
-  updatedAt: string;
-}
+export type ResourceImageStatus = 'draft' | 'confirmed';
 
 export interface ResourceImageCandidate {
   mimeType: string;
   model: string;
   prompt: string;
-  status: ResourceOcrStatus;
+  status: ResourceImageStatus;
   updatedAt: string;
 }
 
@@ -53,7 +45,6 @@ export interface ResourceItem {
   languageHint: string | null;
   references: ResourceReference[];
   previewable: boolean;
-  ocrCandidate?: ResourceOcrCandidate;
   imageCandidate?: ResourceImageCandidate;
 }
 

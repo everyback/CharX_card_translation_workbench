@@ -155,9 +155,9 @@ export function ResourcesPage({
                         {imageBusy ? '正在处理替换稿…' : imageCandidate ? '重新生成 AI 替换稿' : '生成 AI 图片替换稿'}
                       </Button>
                     </div>
-                    {imageError && <div className="resource-ocr-error" role="alert"><CircleAlert size={14} />{imageError}</div>}
+                    {imageError && <div className="resource-image-error" role="alert"><CircleAlert size={14} />{imageError}</div>}
                     {imageCandidate && <div className="resource-approval">
-                      <div className="resource-ocr-actions">
+                      <div className="resource-image-actions">
                         <Button variant="outline" onClick={() => void setImageCandidateStatus('draft')} disabled={imageBusy}>保留待审</Button>
                         <Button variant="default" onClick={() => void setImageCandidateStatus('confirmed')} disabled={imageBusy}><Check size={15} />确认用于导出</Button>
                       </div>

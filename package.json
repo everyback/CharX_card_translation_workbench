@@ -1,6 +1,6 @@
 {
   "name": "card-translation-workbench",
-  "version": "0.2.0",
+  "version": "0.2.1-ocr-free.1",
   "private": true,
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -9,7 +9,7 @@
     "dev": "concurrently -k -n api,web -c cyan,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "tsx watch server/index.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "npm run typecheck && vite build && tsc -p tsconfig.server.json",
+    "build": "npm run typecheck && vite build && node scripts/clean-server.mjs && tsc -p tsconfig.server.json",
     "build:electron": "node scripts/clean-electron.mjs && tsc -p tsconfig.electron.json",
     "desktop:prepare": "npm run build && npm run build:electron",
     "desktop:portable": "npm run desktop:prepare && electron-builder --win portable",
@@ -32,8 +32,7 @@
     "png-chunks-encode": "^1.0.0",
     "png-chunks-extract": "^1.0.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "tesseract.js": "^7.0.0"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
     "@types/luaparse": "^0.2.13",

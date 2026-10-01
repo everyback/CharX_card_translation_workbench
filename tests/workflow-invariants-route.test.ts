@@ -93,6 +93,41 @@ test('workflow invariants through isolated HTTP and mock-model requests', async 
       assert.deepEqual(JSON.parse(String((await db.prepare('SELECT draft_module_json FROM projects WHERE id=?').get(id))?.draft_module_json)), module);
     });
 
+    await t.test('OCR removal keeps manual image approval and export working and ignores legacy OCR data', async () => {
+      assert.equal(await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='resource_ocr_candidates'").get(), undefined);
+      const original = Buffer.alloc(24);
+      original.set([137, 80, 78, 71, 13, 10, 26, 10]);
+      original.writeUInt32BE(32, 16); original.writeUInt32BE(16, 20);
+      const replacement = Buffer.from(original); replacement.writeUInt32BE(64, 16);
+      const source = zipSync({ 'card.json': strToU8(JSON.stringify({ name: 'Image fixture', description: '<img src="assets/ui.png">' })), 'assets/ui.png': original });
+      const form = new FormData(); form.append('file', new Blob([source]), 'image-fixture.charx');
+      const imported = await fetch(address + '/api/projects/import', { method: 'POST', body: form });
+      assert.equal(imported.status, 201);
+      const { id } = await imported.json() as { id: string };
+      for (const method of ['POST', 'PATCH']) assert.equal((await request(`/api/projects/${id}/resources/ocr`, method, { path: 'assets/ui.png' })).status, 404);
+      // A legacy table may still exist on upgraded installations, but is no longer read or modified.
+      await db.exec("CREATE TABLE resource_ocr_candidates (id TEXT PRIMARY KEY, text TEXT); INSERT INTO resource_ocr_candidates VALUES ('legacy', 'retained');");
+      const upload = new FormData(); upload.append('file', new Blob([replacement], { type: 'image/png' }), 'replacement.png');
+      const response = await fetch(`${address}/api/projects/${id}/resources/image-edit?path=assets%2Fui.png`, { method: 'POST', body: upload });
+      assert.equal(response.status, 200);
+      const candidate = await response.json() as { status: string; model: string };
+      assert.equal(candidate.status, 'draft'); assert.equal(candidate.model, 'manual-upload');
+      const inspection = await json(`/api/projects/${id}/resources`);
+      const image = inspection.resources.find((item: any) => item.path === 'assets/ui.png');
+      assert.equal(image.imageCandidate.status, 'draft'); assert.equal('ocrCandidate' in image, false);
+      const exportImage = async () => {
+        const result = await request(`/api/projects/${id}/export`);
+        assert.equal(result.status, 200);
+        return Buffer.from(unzipSync(new Uint8Array(await result.arrayBuffer()))['assets/ui.png']);
+      };
+      assert.deepEqual(await exportImage(), original, 'unconfirmed image stays out of export');
+      await json(`/api/projects/${id}/resources/image-edit`, 'PATCH', { path: 'assets/ui.png', status: 'confirmed' });
+      assert.deepEqual(await exportImage(), replacement);
+      await json(`/api/projects/${id}/resources/image-edit`, 'PATCH', { path: 'assets/ui.png', status: 'draft' });
+      assert.deepEqual(await exportImage(), original, 'withdrawal restores original image');
+      assert.deepEqual(await db.prepare('SELECT * FROM resource_ocr_candidates').all(), [{ id: 'legacy', text: 'retained' }]);
+    });
+
     await t.test('resource withdrawal rebuilds the archive from original bytes, including when every approval is withdrawn', async () => {
       const source = zipSync({ 'card.json': strToU8(JSON.stringify({ spec: 'chara_card_v3', data: { name: 'Fixture' } })),
         'assets/ui.json': strToU8(JSON.stringify({ id: 'start_button', label: 'Start', description: 'New adventure' })) });

@@ -68,7 +68,6 @@ import {
 } from '../domain/lua/portrait-router-repair.js';
 import { applyRisuModuleSegments, detectRisuPortraitRouting, replaceRisuLuaLine, validateRisuLuaChanges } from '../domain/lua/risu-lua.js';
 import { inspectCharxResources, inspectRisuModuleResourcesStreaming, readResourceBytes, resourceContentType, scanCharxResourceJson } from '../domain/resources/resources.js';
-import { recognizeImage, type OcrLanguage } from '../domain/resources/ocr.js';
 import { editImageText } from '../domain/resources/image-edit.js';
 import { protocolFieldReplacementIssue } from '../domain/protocol/protocol.js';
 import {
@@ -470,18 +469,6 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/resources',
       summary: { total: 0, images: 0, suspectedText: 0, referenced: 0 },
       };
     }
-    const candidates = await db.prepare(`
-      SELECT resource_path AS resourcePath, text, confidence, engine, status, updated_at AS updatedAt
-      FROM resource_ocr_candidates WHERE project_id = ?
-    `).all(request.params.projectId) as Array<{
-      resourcePath: string;
-      text: string;
-      confidence: number | null;
-      engine: string;
-      status: 'draft' | 'confirmed';
-      updatedAt: string;
-    }>;
-    const candidateMap = new Map(candidates.map((candidate) => [candidate.resourcePath, candidate]));
     const imageCandidates = await db.prepare(`
       SELECT resource_path AS resourcePath, mime_type AS mimeType, model, prompt, status, updated_at AS updatedAt
       FROM resource_image_candidates WHERE project_id = ?
@@ -497,17 +484,9 @@ app.get<{ Params: { projectId: string } }>('/api/projects/:projectId/resources',
     return {
       ...inspection,
       resources: inspection.resources.map((resource) => {
-        const candidate = candidateMap.get(resource.path);
         const imageCandidate = imageCandidateMap.get(resource.path);
-        return candidate || imageCandidate ? {
+        return imageCandidate ? {
           ...resource,
-          ...(candidate ? { ocrCandidate: {
-            text: candidate.text,
-            confidence: candidate.confidence,
-            engine: candidate.engine,
-            status: candidate.status,
-            updatedAt: candidate.updatedAt,
-          } } : {}),
           ...(imageCandidate ? { imageCandidate: {
             mimeType: imageCandidate.mimeType,
             model: imageCandidate.model,
@@ -585,63 +564,6 @@ app.get<{ Params: { projectId: string }; Querystring: { path?: string } }>('/api
   const imageBlob = row?.storagePath ? await readStoredFile(row.storagePath) : row?.imageBlob;
   if (!imageBlob) return reply.code(404).send({ error: '图片替换稿不存在。' });
   return reply.header('Content-Type', row?.mimeType || 'image/png').send(Buffer.from(imageBlob));
-});
-
-app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/ocr', async (request, reply) => {
-  const body = asRecord(request.body);
-  const resourcePath = text(body.path);
-  const language = body.language === 'zh-CN' || body.language === 'ko' || body.language === 'ja' || body.language === 'en' ? body.language as OcrLanguage : 'auto';
-  if (!resourcePath) return reply.code(400).send({ error: '缺少资源路径。' });
-  const row = await db.prepare(`
-    SELECT source_format AS sourceFormat,
-      CASE WHEN source_format = 'risum' THEN NULL ELSE source_blob END AS sourceBlob,
-      source_storage_path AS sourceStoragePath,
-      COALESCE(source_storage_bytes, length(source_blob)) AS sourceBytes
-    FROM projects WHERE id = ?
-  `).get(request.params.projectId) as { sourceFormat?: string; sourceBlob?: Uint8Array | null; sourceStoragePath?: string | null; sourceBytes?: number } | undefined;
-  if (!row) return reply.code(404).send({ error: '项目不存在。' });
-  if (!row.sourceFormat || (!row.sourceBlob && !row.sourceBytes)) return reply.code(409).send({ error: '当前项目没有保存原始资源。' });
-  try {
-    const bytes = await projectResourceBytes(request.params.projectId, row.sourceFormat, row.sourceBlob, row.sourceBytes, resourcePath);
-    const mimeType = resourceContentType(resourcePath, bytes);
-    if (!mimeType.startsWith('image/')) return reply.code(400).send({ error: '只有图片资源支持 OCR 候选。' });
-    const result = await recognizeImage(bytes, resourcePath, language);
-    const timestamp = now();
-    await db.prepare(`
-      INSERT INTO resource_ocr_candidates(id, project_id, resource_path, text, confidence, engine, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?)
-      ON CONFLICT(project_id, resource_path) DO UPDATE SET text = excluded.text, confidence = excluded.confidence,
-        engine = excluded.engine, status = 'draft', updated_at = excluded.updated_at
-    `).run(id(), request.params.projectId, resourcePath, result.text, result.confidence, result.engine, timestamp, timestamp);
-    return {
-      path: resourcePath,
-      text: result.text,
-      confidence: result.confidence,
-      engine: result.engine,
-      language: result.language,
-      status: 'draft',
-      updatedAt: timestamp,
-    };
-  } catch (error) {
-    return reply.code(422).send({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/resources/ocr', async (request, reply) => {
-  const body = asRecord(request.body);
-  const resourcePath = text(body.path);
-  const candidateText = typeof body.text === 'string' ? body.text.replace(/\r\n?/gu, '\n').trim() : '';
-  const status = body.status === 'confirmed' ? 'confirmed' : 'draft';
-  if (!resourcePath) return reply.code(400).send({ error: '缺少资源路径。' });
-  if (!candidateText) return reply.code(400).send({ error: 'OCR 候选不能为空。' });
-  const existing = await db.prepare(`
-    SELECT id, confidence, engine FROM resource_ocr_candidates WHERE project_id = ? AND resource_path = ?
-  `).get(request.params.projectId, resourcePath) as { id: string; confidence: number | null; engine: string } | undefined;
-  if (!existing) return reply.code(404).send({ error: '请先生成 OCR 候选。' });
-  const timestamp = now();
-  await db.prepare(`UPDATE resource_ocr_candidates SET text = ?, status = ?, updated_at = ? WHERE project_id = ? AND resource_path = ?`)
-    .run(candidateText, status, timestamp, request.params.projectId, resourcePath);
-  return { path: resourcePath, text: candidateText, confidence: existing.confidence, engine: existing.engine, status, updatedAt: timestamp };
 });
 
 app.get<{ Params: { projectId: string }; Querystring: { path?: string; name?: string } }>(

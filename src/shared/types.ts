@@ -58,8 +58,7 @@ export type {
   ResourceInspection,
   ResourceItem,
   ResourceKind,
-  ResourceOcrCandidate,
-  ResourceOcrStatus,
+  ResourceImageStatus,
   ResourceReference,
   ResourceTextRisk,
 } from '@/entities/resource/model/types';
