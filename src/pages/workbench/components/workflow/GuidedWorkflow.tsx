@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { workflowState } from '@/features/translation/model/workflow-state';
 import {
   ArrowRight,
@@ -125,14 +126,14 @@ export function GuidedWorkflow({
         <TranslationStageGuide active={workflow.stage} />
       </div>
       <div className="guided-actions">
-        {workflow.status === 'paused' && !scopeChanged && <button className="primary-button" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />继续翻译</button>}
-        <button className="secondary-button" onClick={onOpenJobs}><Layers3 size={16} />查看任务进度</button>
+        {workflow.status === 'paused' && !scopeChanged && <Button variant="default" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />继续翻译</Button>}
+        <Button variant="outline" onClick={onOpenJobs}><Layers3 size={16} />查看任务进度</Button>
       </div>
     </>;
     if (scopeChanged || workflow.status === 'new') return <>
       <div className="guided-next-copy"><h2>{scopeChanged ? '范围已变化，需要重新扫描' : '先扫描这张卡片'}</h2>
         <p>按所选范围整理可翻译内容，保留已有译文和审核记录。扫描不会调用模型，也不会改写原文件。</p></div>
-      <div className="guided-actions"><button className="primary-button" onClick={() => onScan(scope)} disabled={Boolean(busy)}><ScanSearch size={16} />{scopeChanged ? '重新扫描' : '扫描卡片'}</button></div>
+      <div className="guided-actions"><Button variant="default" onClick={() => onScan(scope)} disabled={Boolean(busy)}><ScanSearch size={16} />{scopeChanged ? '重新扫描' : '扫描卡片'}</Button></div>
     </>;
     if (workflow.hasFailures || workflow.resumable) return <>
       <div className="guided-next-copy">
@@ -140,37 +141,37 @@ export function GuidedWorkflow({
         <p>已有译文和审核结果已保留。请先查看任务中的失败原因并重试；正文审核通过不代表脚本、正则和关键词适配已完成。</p>
       </div>
       <div className="guided-actions">
-        {workflow.canStart && <button className="primary-button" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />{workflow.retryAction ? workflow.latest?.failedItems ? '重试失败项与阶段 2' : '重试阶段 2' : '继续翻译'}</button>}
-        <button className="secondary-button" onClick={onOpenJobs}>查看任务</button>
-        <button className="secondary-button" onClick={onOpenReview}>审核已有译文</button>
+        {workflow.canStart && <Button variant="default" disabled={Boolean(busy)} onClick={onStartTranslation}><Play size={16} />{workflow.retryAction ? workflow.latest?.failedItems ? '重试失败项与阶段 2' : '重试阶段 2' : '继续翻译'}</Button>}
+        <Button variant="outline" onClick={onOpenJobs}>查看任务</Button>
+        <Button variant="outline" onClick={onOpenReview}>审核已有译文</Button>
       </div>
     </>;
     if (workflow.counts.untranslated > 0) return <>
       <div className="guided-next-copy"><h2>当前范围还有 {workflow.counts.untranslated} 条待翻译</h2><p>已完成的译文会保留。可以先检查字段和协议规则，再启动剩余内容的翻译。</p><TranslationStageGuide active="text" /></div>
       {!modelReady && <div className="guided-setup-note"><Settings2 size={16} /><span>开始翻译前需要配置模型和 API Key。</span><button className="link-button" onClick={onOpenSettings}>去配置</button></div>}
       <div className="guided-actions">
-        <button className="primary-button" onClick={onStartTranslation} disabled={Boolean(busy) || !modelReady}><Play size={16} />开始翻译<ArrowRight size={15} /></button>
-        <button className="secondary-button" onClick={onOpenSegments}><FileSearch size={16} />查看扫描结果</button>
-        {workflow.counts.pending > 0 && <button className="secondary-button" onClick={onOpenReview}>审核已有译文</button>}
+        <Button variant="default" onClick={onStartTranslation} disabled={Boolean(busy) || !modelReady}><Play size={16} />开始翻译<ArrowRight size={15} /></Button>
+        <Button variant="outline" onClick={onOpenSegments}><FileSearch size={16} />查看扫描结果</Button>
+        {workflow.counts.pending > 0 && <Button variant="outline" onClick={onOpenReview}>审核已有译文</Button>}
       </div>
     </>;
     if (workflow.counts.pending > 0) return <>
       <div className="guided-next-copy"><h2>当前还有 {workflow.counts.pending} 条待审核</h2><p>对照原文核对后再保存。之前保存过的草稿不会使新修改自动通过审核；导出只包含已通过的结果。</p></div>
       <div className="guided-actions">
-        <button className="primary-button" onClick={onOpenReview}><ShieldCheck size={16} />进入审核<ArrowRight size={15} /></button>
-        <button className="secondary-button" onClick={onApproveAll} disabled={Boolean(busy) || !workflow.counts.reviewable}><CheckCheck size={16} />一键通过已有译文（{workflow.counts.reviewable}）</button>
+        <Button variant="default" onClick={onOpenReview}><ShieldCheck size={16} />进入审核<ArrowRight size={15} /></Button>
+        <Button variant="outline" onClick={onApproveAll} disabled={Boolean(busy) || !workflow.counts.reviewable}><CheckCheck size={16} />一键通过已有译文（{workflow.counts.reviewable}）</Button>
       </div>
     </>;
     if (workflow.counts.approved > 0) return <>
       <div className="guided-next-copy"><h2>当前范围审核已通过，保存后导出</h2><p>保存并导出会应用当前有效的审核结果，并检查 Lua、脚本引用和卡片结构。范围外已审核的成果继续保留；未审核内容保留原文。请在目标客户端打开复核。</p></div>
       <div className="guided-actions">
-        <button className="secondary-button" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</button>
-        <button className="primary-button" onClick={onSaveAndExport} disabled={Boolean(busy)}><Download size={16} />保存并导出</button>
+        <Button variant="outline" onClick={onApplyDraft} disabled={Boolean(busy)}><ShieldCheck size={16} />保存</Button>
+        <Button variant="default" onClick={onSaveAndExport} disabled={Boolean(busy)}><Download size={16} />保存并导出</Button>
       </div>
     </>;
     return <>
       <div className="guided-next-copy"><h2>当前范围没有待处理的翻译项</h2><p>可以检查扫描结果、勾选需要翻译的字段，或调整范围后重新扫描。</p></div>
-      <div className="guided-actions"><button className="primary-button" onClick={onOpenSegments}><FileSearch size={16} />查看扫描结果</button></div>
+      <div className="guided-actions"><Button variant="default" onClick={onOpenSegments}><FileSearch size={16} />查看扫描结果</Button></div>
     </>;
   };
 
@@ -217,7 +218,7 @@ export function GuidedWorkflow({
         <div className="guided-lua-tip">
           <Code2 size={16} />
           <div><strong>检测到 Lua 脚本</strong><span>运行时名称别名在翻译阶段补全；保存和导出只应用已有结果并检查脚本。补全失败请在任务页重试阶段 2，或到脚本管理页检查。</span></div>
-          <button className="secondary-button" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 脚本管理</button>
+          <Button variant="outline" onClick={onOpenLuaManagement}><SlidersHorizontal size={15} />打开 脚本管理</Button>
         </div>
       ) : null}
       {protocols.length > 0 && <div className="guided-lua-tip">
@@ -227,7 +228,7 @@ export function GuidedWorkflow({
             ? '有待确认的协议。建议翻译前核对哪些槽位可翻译、哪些需保护；后续采用规则会重新扫描，重叠的旧译文可能需要重译。'
             : '协议规则决定结构化文本的翻译范围。需要检查漏译或调整槽位时，可打开协议页。'}
         </span></div>
-        <button className="secondary-button" onClick={onOpenProtocols}>检查协议规则</button>
+        <Button variant="outline" onClick={onOpenProtocols}>检查协议规则</Button>
       </div>}
       {workflow.status === 'new' && (
         <div className="guided-scan-note"><CircleAlert size={14} />扫描完成后，你还可以在这里切换翻译预设。</div>

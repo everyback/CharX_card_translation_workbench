@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { useEffect, useState } from 'react';
 import { History, RefreshCw, Undo2 } from 'lucide-react';
 import { patchCatalog } from './patch-catalog';
@@ -34,7 +35,7 @@ export function InstallationHistory({ endpoint, root, onChanged, onInspect }: { 
     finally { setBusy(false); }
   }
   return <section className="patch-history" aria-label="安装记录">
-    <div className="patch-section-title"><h3><History size={17} />安装记录</h3><button className="secondary-button" disabled={busy} onClick={() => void refresh()}><RefreshCw size={15} />重新核验</button></div>
+    <div className="patch-section-title"><h3><History size={17} />安装记录</h3><Button variant="outline" disabled={busy} onClick={() => void refresh()}><RefreshCw size={15} />重新核验</Button></div>
     {error && <div className="patch-status error" role="alert">{error}</div>}
     {busy && <p role="status">正在处理目标与备份，请勿关闭工作台…</p>}
     {result?.image && <p className="patch-identity">运行镜像 <code>{result.image}</code></p>}
@@ -43,8 +44,8 @@ export function InstallationHistory({ endpoint, root, onChanged, onInspect }: { 
       <div className="patch-section-title"><div><h4>{patchCatalog.find((item) => item.id === record.patch)?.name || record.patch}</h4><time>{record.installedAt}</time></div><span className={`patch-badge ${record.canRemove ? 'success' : ''}`}>{labels[record.state] || record.state}</span></div>
       <dl className="patch-facts"><div><dt>脚本修订</dt><dd><code>{record.revision?.slice(0, 12) || '旧记录，未记录修订'}</code>{record.updateAvailable && <strong> · 工作台脚本已更新，需重新预检</strong>}</dd></div><div><dt>恢复条件</dt><dd>{record.canRemove ? '当前目标与备份匹配，可恢复' : record.reason || '不能自动恢复'}</dd></div></dl>
       <details><summary>文件与备份</summary>{record.backup && <code>{record.backup}</code>}{record.targets?.map((target) => <div className="patch-record-file" key={target.file}><code>{target.file}</code><small>备份：{target.backup}</small><small>{target.before.slice(0, 12)} → {target.after.slice(0, 12)}</small></div>)}</details>
-      <button className="secondary-button" disabled={busy || !record.canRemove || !record.removeToken} onClick={() => void remove(record)}><Undo2 size={15} />{result?.deployment === 'docker' ? '回滚此镜像安装' : '卸载并恢复备份'}</button>
-      {record.updateAvailable && onInspect && <button className="secondary-button" disabled={busy} onClick={() => onInspect(record.patch)}><RefreshCw size={15} />核对更新</button>}
+      <Button variant="outline" disabled={busy || !record.canRemove || !record.removeToken} onClick={() => void remove(record)}><Undo2 size={15} />{result?.deployment === 'docker' ? '回滚此镜像安装' : '卸载并恢复备份'}</Button>
+      {record.updateAvailable && onInspect && <Button variant="outline" disabled={busy} onClick={() => onInspect(record.patch)}><RefreshCw size={15} />核对更新</Button>}
     </article>)}
   </section>;
 }

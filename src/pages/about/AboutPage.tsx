@@ -62,6 +62,7 @@ export function AboutPage() {
           <p>纯正的vibe coding产物，断断续续拷打了数周GPT-5.6sol。没有任何的人工介入代码，所以作者根本看不懂写了啥，有bug很正常，祈祷不要报错就好。</p>
           <p>参与开发前请先阅读 README、AGENTS.md 和部署说明。提交问题或代码时，必须移除真实卡片、API Key、聊天记录和本机路径，并补充必要的复现信息。</p>
           <p className="about-muted">项目不提供登录功能，定位为个人电脑或受控内网中的本地工具，请勿绑定0.0.0.0或者公网端口。</p>
+          <p>update by: GPT-6astra xhigh </p>
         </article>
       </div>
     </section>

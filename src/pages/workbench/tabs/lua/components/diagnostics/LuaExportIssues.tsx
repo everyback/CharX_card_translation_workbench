@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { AlertTriangle, CircleAlert, Code2 } from 'lucide-react';
 import type { LuaManagementReport } from '@/shared/types';
 import { LUA_ISSUE_LABELS } from '../../model/constants';
@@ -23,7 +24,7 @@ export function LuaExportIssues({ report, onOpenRegex }: LuaExportIssuesProps) {
             <div className="lua-issue-content">
               <strong>{LUA_ISSUE_LABELS[issue.kind]} · {issue.pathLabel}</strong>
               <span>{issue.message}</span>
-              {reference?.kind === 'regex' && <button type="button" className="secondary-button lua-issue-open-rule" data-probe="lua-open-rule" onClick={() => onOpenRegex(reference)}><Code2 size={14} />打开规则</button>}
+              {reference?.kind === 'regex' && <Button type="button" variant="outline" className="lua-issue-open-rule" data-probe="lua-open-rule" onClick={() => onOpenRegex(reference)}><Code2 size={14} />打开规则</Button>}
             </div>
           </div>;
         })}

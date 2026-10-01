@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { useState } from 'react';
 import { Check, Code2, Minus, Plus, RefreshCw } from 'lucide-react';
 import type { LuaManagementReport } from '@/shared/types';
@@ -79,12 +80,12 @@ export function LuaSyntaxDetails({
               spellCheck={false}
               aria-label={`编辑 Lua 第 ${issue.line ?? '?'} 行`}
             />}
-            {expandedContext ? <button type="button" className="secondary-button lua-context-expand" onClick={() => onToggleContext(issueKey, false)}><Minus size={14} />收起附近代码</button> : canExpandContext ? <button type="button" className="secondary-button lua-context-expand" onClick={() => onToggleContext(issueKey, true)} title="查看错误行附近更多原始 Lua 代码"><Plus size={14} />展开附近更多行</button> : null}
+            {expandedContext ? <Button type="button" variant="outline" className="lua-context-expand" onClick={() => onToggleContext(issueKey, false)}><Minus size={14} />收起附近代码</Button> : canExpandContext ? <Button type="button" variant="outline" className="lua-context-expand" onClick={() => onToggleContext(issueKey, true)} title="查看错误行附近更多原始 Lua 代码"><Plus size={14} />展开附近更多行</Button> : null}
             {!contextLines.length && <div className="lua-syntax-actions">
-              <button type="button" className="primary-button" disabled={loading || !issue.pathJson || !issue.line || savingSyntaxKey !== null} onClick={() => onSaveSyntaxLine(issue, issueKey)}>
+              <Button type="button" variant="default" disabled={loading || !issue.pathJson || !issue.line || savingSyntaxKey !== null} onClick={() => onSaveSyntaxLine(issue, issueKey)}>
                 {savingSyntaxKey === issueKey ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}
                 保存错误行并重新校验
-              </button>
+              </Button>
             </div>}
             </div></div>
           </details>;
@@ -112,9 +113,9 @@ export function EditableSyntaxLine({ line, text, errorLine, column, disabled, sa
       <textarea autoFocus value={draft} disabled={disabled} rows={2} spellCheck={false}
         aria-label={`编辑 Lua 第 ${line} 行`} onChange={event => setDraft(event.target.value)} />
       <div className="lua-line-actions">
-        <button type="button" className="primary-button" disabled={disabled || draft === baseline}
-          onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}保存第 {line} 行并校验</button>
-        <button type="button" className="secondary-button" disabled={disabled} onClick={end}>取消</button>
+        <Button type="button" variant="default" disabled={disabled || draft === baseline}
+          onClick={() => void save()}>{saving ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}保存第 {line} 行并校验</Button>
+        <Button type="button" variant="outline" disabled={disabled} onClick={end}>取消</Button>
       </div>
       {column && <small className="lua-code-column-marker">解析器错误列：{column}</small>}
     </div> : <button type="button" className="lua-line-edit-trigger" disabled={disabled}

@@ -98,3 +98,18 @@ test('scope changes keep active task navigation available and cannot silently sc
   assert.match(guide(empty), /没有待处理的翻译项/);
   assert.doesNotMatch(guide(empty), /开始翻译/);
 });
+
+
+test('large task history mounts one page while a selected task outside that page keeps its detail', () => {
+  const history = Array.from({ length: 2000 }, (_, i) => ({ ...job(), id: `job-${i}`, model: `model-${i}` }));
+  const html = renderToStaticMarkup(React.createElement(JobsPage, {
+    jobs: history, selected: history[1999], loadingJobId: history[1999].id,
+    onSelect: noop, onAction: noop, onOpenReview: noop,
+    languageBehaviorMode: 'target', targetLanguage: 'zh-CN',
+  }));
+  assert.equal((html.match(/class="job-list-item /g) ?? []).length, 50);
+  assert.match(html, /共 2000 个任务/);
+  assert.match(html, /model-1999/);
+  assert.match(html, /正在读取任务详情与运行日志/);
+  assert.match(html, /aria-busy="true"/);
+});

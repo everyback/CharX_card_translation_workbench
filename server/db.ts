@@ -4,6 +4,7 @@ import { AsyncDatabase } from './async-db.js';
 import { workbenchConfig } from '../config/workbench.js';
 import { migrateLegacyStorage } from './repositories/storage-migration.js';
 import { addColumnIfMissing as migrateColumn } from './repositories/schema-migration.js';
+import { migrateProjectVersions } from './repositories/project-version-schema.js';
 
 mkdirSync(workbenchConfig.paths.dataRoot, { recursive: true });
 
@@ -237,6 +238,7 @@ await addColumnIfMissing('job_items', 'cancel_reason', 'TEXT');
 await addColumnIfMissing('jobs', 'language_config', 'TEXT');
 await addColumnIfMissing('projects', 'module_review_state', 'TEXT');
 await addColumnIfMissing('projects', 'preset_review_state', 'TEXT');
+await migrateProjectVersions(db);
 await db.exec(`UPDATE job_items SET cancel_reason = CASE
   WHEN last_error = '片段已转移到新的翻译任务' THEN 'transferred'
   WHEN last_error LIKE '人工审核已接管段落：%' THEN 'manual-review'

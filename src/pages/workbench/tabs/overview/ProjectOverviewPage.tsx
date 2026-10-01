@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { BookOpenText, Braces, CircleAlert, FileArchive, FileImage, FileJson, Gauge, ListChecks, RefreshCw, Settings2 } from 'lucide-react';
 import { LoadingMask, Stat } from '@/shared/ui';
 import type { ProjectOverview } from '@/shared/types';
@@ -21,7 +22,7 @@ export function ProjectOverviewPage({ info, loading, onRefresh, onViewResources 
         <BookOpenText size={42} />
         <h2>项目概要</h2>
         <p>{loading ? '正在读取原始卡片结构…' : '暂时无法读取该项目的概要。'}</p>
-        {!loading && <button className="secondary-button" onClick={onRefresh}><RefreshCw size={16} />重新读取</button>}
+        {!loading && <Button variant="outline" onClick={onRefresh}><RefreshCw size={16} />重新读取</Button>}
         {loading && <LoadingMask label="正在读取项目概要" />}
       </section>
     );
@@ -49,8 +50,8 @@ export function ProjectOverviewPage({ info, loading, onRefresh, onViewResources 
           <p>{cardMeta || '未声明作者与卡片版本'}</p>
           {info.filename && <small className="project-overview-filename">{info.filename}</small>}
           <div className="tavern-card-overview-actions">
-            <button className="secondary-button" onClick={onViewResources}><FileImage size={16} />查看资源</button>
-            <button className="icon-button" title="重新读取概要" onClick={onRefresh} disabled={loading}><RefreshCw size={16} /></button>
+            <Button variant="outline" onClick={onViewResources}><FileImage size={16} />查看资源</Button>
+            <Button variant="outline" size="icon" title="重新读取概要" onClick={onRefresh} disabled={loading}><RefreshCw size={16} /></Button>
           </div>
         </div>
       </div>

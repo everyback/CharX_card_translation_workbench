@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Check, CircleAlert, Download, FileImage, Languages, Link2, LoaderCircle, RefreshCw, Search, Upload } from 'lucide-react';
 import { useEffect, useMemo, useState, useRef } from 'react';
 import { LoadingMask, Stat } from '@/shared/ui';
@@ -94,7 +95,7 @@ export function ResourcesPage({
   }
 
   if (!inspection) {
-    return <section className="resource-workspace"><div className="resource-empty"><FileImage size={38} /><h2>资源工作台</h2><p>点击“刷新资源”扫描卡片图片、音频、视频、字体和数据文件。</p><button className="primary-button" onClick={onRefresh}><Search size={16} />扫描资源</button></div>{loading && <LoadingMask label="正在读取资源" />}</section>;
+    return <section className="resource-workspace"><div className="resource-empty"><FileImage size={38} /><h2>资源工作台</h2><p>点击“刷新资源”扫描卡片图片、音频、视频、字体和数据文件。</p><Button variant="default" onClick={onRefresh}><Search size={16} />扫描资源</Button></div>{loading && <LoadingMask label="正在读取资源" />}</section>;
   }
 
   return (
@@ -104,7 +105,7 @@ export function ResourcesPage({
         <Stat icon={<FileImage size={17} />} label="资源总数" value={inspection.summary.total} />
         <Stat icon={<Languages size={17} />} label="图片" value={inspection.summary.images} />
         <Stat icon={<Link2 size={17} />} label="已有引用" value={inspection.summary.referenced} />
-        <button className="secondary-button resource-refresh" onClick={onRefresh}><RefreshCw size={15} />重新扫描</button>
+        <Button variant="outline" className="resource-refresh" onClick={onRefresh}><RefreshCw size={15} />重新扫描</Button>
       </div>
       <div className="resource-toolbar">
         <div className="search-input"><Search size={15} /><input disabled={imageBusy} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索资源名、哈希或引用" /></div>
@@ -125,43 +126,52 @@ export function ResourcesPage({
         </div>
         <div className="resource-detail">
           {current ? <>
-            <div className="resource-detail-heading"><div><span>{RESOURCE_KIND_LABELS[current.kind]} · {RESOURCE_RISK_LABELS[current.textRisk]}</span><h2 title={current.displayName}>{current.displayName}</h2>{current.path !== current.displayName && <small>内部资源：{current.path}</small>}</div>{current.kind === 'image' && <>
-              <input ref={uploadInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={(event) => {
-                const file = event.currentTarget.files?.[0];
-                event.currentTarget.value = '';
-                if (file) void uploadImage(file);
-              }} />
-              <button className="secondary-button" disabled={imageBusy} onClick={() => uploadInput.current?.click()}><Upload size={15} />上传替换图片</button>
-            </>}<a className="secondary-button" href={resourceFileUrl(projectId, current.path, current.displayName)} download={current.displayName}><Download size={15} />下载</a></div>
-            {current.kind === 'image' && current.size > 0 && <img draggable={false} className="resource-preview" src={resourceFileUrl(projectId, current.path, current.displayName)} alt={current.displayName} />}
-            <div className="resource-properties"><span>SHA-256 <code>{current.sha256 || '模块内资源暂未展开'}</code></span><span>识别格式 <code>{current.detectedFormat} · {current.mimeType}</code></span>{current.declaredType && <span>模块声明 <code>{current.declaredType}</code></span>}<span>尺寸 <code>{current.width && current.height ? `${current.width} × ${current.height}` : '未知'}</code></span></div>
-            <div className="resource-review-card">
-              <strong>翻译状态</strong>
-              <p>{current.textRisk === 'unknown' ? '图片可能包含画面内文字，可按需生成 AI 图片替换稿并在导出前确认。' : current.textRisk === 'path' ? `文件名包含 ${current.languageHint} 文字，可在资源审核中确认是否需要保留原引用。` : '当前资源未从文件名检测到可疑文字。'}</p>
-              {current.kind === 'image' ? <>
-                <div className="resource-image-edit">
-                  <div className="resource-mode-heading"><strong>图片替换</strong><span>手动上传或 AI 图片汉化</span></div>
-                  <p>可上传 PNG、JPEG、WebP、GIF 图片，也可用 AI 替换画面文字。上传或生成后先对比，确认后才写入导出包；保留原资源路径和引用。</p>
-                  <button className="secondary-button" onClick={() => void generateImageCandidate()} disabled={imageBusy}>
-                    {imageBusy ? <LoaderCircle size={15} className="spin" /> : <FileImage size={15} />}
-                    {imageBusy ? '正在处理替换稿…' : imageCandidate ? '重新生成 AI 替换稿' : '生成 AI 图片替换稿'}
-                  </button>
-                  {imageError && <div className="resource-ocr-error"><CircleAlert size={14} />{imageError}</div>}
-                  {imageCandidate && <>
-                    <div className="resource-image-comparison">
-                      <figure><img draggable={false} src={resourceFileUrl(projectId, current.path)} alt="原图" /><figcaption>原图</figcaption></figure>
-                      <figure><img draggable={false} src={resourceImageCandidateUrl(projectId, current.path, imageCandidate.updatedAt)} alt="图片替换稿" /><figcaption>{imageCandidate.model === 'manual-upload' ? '手动上传替换稿' : `AI 替换稿 · ${imageCandidate.model}`} </figcaption></figure>
+            <header className="resource-detail-heading">
+              <div><span>{RESOURCE_KIND_LABELS[current.kind]} · {RESOURCE_RISK_LABELS[current.textRisk]}</span><h2 title={current.displayName}>{current.displayName}</h2>{current.path !== current.displayName && <small>内部资源：{current.path}</small>}</div>
+              <a className="secondary-button" href={resourceFileUrl(projectId, current.path, current.displayName)} download={current.displayName}><Download size={15} />下载原资源</a>
+            </header>
+            <div className="resource-detail-body">
+              <section className="resource-preview-panel" aria-label="资源预览">
+                <div className="resource-preview-heading"><strong>{imageCandidate ? '替换前后对比' : '资源预览'}</strong><span>{formatBytes(current.size)}{current.width && current.height ? ` · ${current.width} × ${current.height}` : ''}</span></div>
+                {current.kind === 'image' && current.size > 0 ? <div className={`resource-image-comparison${imageCandidate ? '' : ' resource-image-single'}`}>
+                  <figure><figcaption>原图</figcaption><div className="resource-image-stage"><img draggable={false} src={resourceFileUrl(projectId, current.path, current.displayName)} alt={current.displayName} /></div></figure>
+                  {imageCandidate && <figure><figcaption>{imageCandidate.model === 'manual-upload' ? '手动上传替换稿' : `AI 替换稿 · ${imageCandidate.model}`}</figcaption><div className="resource-image-stage"><img draggable={false} src={resourceImageCandidateUrl(projectId, current.path, imageCandidate.updatedAt)} alt="图片替换稿" /></div></figure>}
+                </div> : <div className="resource-preview-unavailable"><FileImage size={36} /><p>{current.kind === 'image' ? '模块内资源尚未展开，暂无法预览。' : '此类型暂不支持预览，可下载原资源查看。'}</p></div>}
+              </section>
+              <aside className="resource-inspector" aria-label="资源信息与审核">
+                <section className="resource-review-card">
+                  <div className="resource-review-heading"><strong>{current.kind === 'image' ? '图片替换' : '资源状态'}</strong>{current.kind === 'image' && <span className={`resource-status ${imageCandidate?.status === 'confirmed' ? 'is-confirmed' : ''}`}>{imageCandidate ? imageCandidate.status === 'confirmed' ? '已确认' : '待审核' : '使用原图'}</span>}</div>
+                  <p>{current.kind === 'image' ? '上传替换图片或用 AI 翻译画面文字，对比确认后用于导出。原路径和引用保持不变。' : current.textRisk === 'path' ? `文件名包含 ${current.languageHint} 文字，请确认是否需要保留原引用。` : '当前资源无需图片翻译。'}</p>
+                  {current.kind === 'image' && <>
+                    <input ref={uploadInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={(event) => {
+                      const file = event.currentTarget.files?.[0];
+                      event.currentTarget.value = '';
+                      if (file) void uploadImage(file);
+                    }} />
+                    <div className="resource-replacement-actions">
+                      <Button variant="outline" disabled={imageBusy} onClick={() => uploadInput.current?.click()}><Upload size={15} />上传替换图片</Button>
+                      <Button variant="outline" onClick={() => void generateImageCandidate()} disabled={imageBusy}>
+                        {imageBusy ? <LoaderCircle size={15} className="spin" /> : <Languages size={15} />}
+                        {imageBusy ? '正在处理替换稿…' : imageCandidate ? '重新生成 AI 替换稿' : '生成 AI 图片替换稿'}
+                      </Button>
                     </div>
-                    <div className="resource-ocr-actions">
-                      <button className="secondary-button" onClick={() => void setImageCandidateStatus('draft')} disabled={imageBusy}>保留待审</button>
-                      <button className="primary-button" onClick={() => void setImageCandidateStatus('confirmed')} disabled={imageBusy}><Check size={15} />确认用于导出</button>
-                    </div>
-                    <small>{imageCandidate.status === 'confirmed' ? '已确认：下次“保存”或“保存并导出”时会替换该资源。' : '当前为待审稿，不会进入导出文件。'}</small>
+                    {imageError && <div className="resource-ocr-error" role="alert"><CircleAlert size={14} />{imageError}</div>}
+                    {imageCandidate && <div className="resource-approval">
+                      <div className="resource-ocr-actions">
+                        <Button variant="outline" onClick={() => void setImageCandidateStatus('draft')} disabled={imageBusy}>保留待审</Button>
+                        <Button variant="default" onClick={() => void setImageCandidateStatus('confirmed')} disabled={imageBusy}><Check size={15} />确认用于导出</Button>
+                      </div>
+                      <p role="status">{imageCandidate.status === 'confirmed' ? '已确认：下次“保存”或“保存并导出”时会替换该资源。' : '当前为待审稿，不会进入导出文件。'}</p>
+                    </div>}
                   </>}
-                </div>
-              </> : <span className="resource-ocr-hint">当前资源类型无需图片汉化。</span>}
+                </section>
+                <section className="resource-metadata"><strong>资源信息</strong>
+                  <dl><div><dt>格式</dt><dd>{current.detectedFormat} · {current.mimeType}</dd></div><div><dt>文件大小</dt><dd>{formatBytes(current.size)}</dd></div><div><dt>尺寸</dt><dd>{current.width && current.height ? `${current.width} × ${current.height}` : '未知'}</dd></div>{current.declaredType && <div><dt>模块声明</dt><dd>{current.declaredType}</dd></div>}</dl>
+                  <details><summary>SHA-256 校验值</summary><code>{current.sha256 || '模块内资源暂未展开'}</code></details>
+                </section>
+                <section className="resource-references"><strong>引用位置（{current.references.length}）</strong>{current.references.length ? current.references.map((reference, index) => <div key={`${reference.pathLabel}:${index}`}><span>{reference.pathLabel}</span><code>{reference.sample}</code></div>) : <p>未发现卡片或模块中的直接引用。</p>}</section>
+              </aside>
             </div>
-            <div className="resource-references"><strong>引用位置（{current.references.length}）</strong>{current.references.length ? current.references.map((reference, index) => <div key={`${reference.pathLabel}:${index}`}><span>{reference.pathLabel}</span><code>{reference.sample}</code></div>) : <p>未发现卡片或模块中的直接引用。</p>}</div>
           </> : <div className="table-empty">选择一个资源查看详情</div>}
         </div>
       </div>

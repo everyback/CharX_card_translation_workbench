@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { db } from '../db.js';
-import { PROJECT_TITLE_COLUMNS } from '../repositories/project-queries.js';
+import { PROJECT_TITLE_COLUMNS, PROJECT_VERSION_COLUMNS } from '../repositories/project-queries.js';
 import { readWorkflowProgress } from '../repositories/workflow-progress.js';
 import { listAvailableModels, publicSettings, updateSettings } from '../scheduler.js';
 
@@ -22,7 +22,7 @@ export function registerSystemRoutes(app: FastifyInstance): void {
   app.get<{ Querystring: { fresh?: string } }>('/api/dashboard', async (request) => {
     const currentTime = Date.now();
     if (request.query.fresh !== '1' && dashboardCache && dashboardCache.expiresAt > currentTime) return dashboardCache.value;
-    const projects = Number((await db.prepare('SELECT COUNT(*) AS count FROM projects').get() as { count: number }).count);
+    const projects = Number((await db.prepare('SELECT COUNT(DISTINCT COALESCE(family_id, id)) AS count FROM projects').get() as { count: number }).count);
     const pendingReview = Number((await db.prepare("SELECT COUNT(*) AS count FROM segments WHERE in_scope = 1 AND review_status = 'pending'").get() as { count: number }).count);
     const activeJobs = Number((await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status IN ('queued', 'running', 'paused')").get() as { count: number }).count);
     const value = { projects, pendingReview, activeJobs, settings: publicSettings() };
@@ -44,6 +44,7 @@ export function registerSystemRoutes(app: FastifyInstance): void {
         p.id,
         p.name,
         ${PROJECT_TITLE_COLUMNS},
+        ${PROJECT_VERSION_COLUMNS},
         p.source_format AS sourceFormat,
         p.source_language AS sourceLanguage,
         p.target_language AS targetLanguage,

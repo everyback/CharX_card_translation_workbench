@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Check, Play, RefreshCw, Search, X } from 'lucide-react';
 import type { RegexCoveragePreview, RegexCoverageRule, RegexCoverageRuleStatus, RegexRuleTestResult } from '@/shared/types';
 import { summarizeMatchSamples } from '../../lib/match-samples';
@@ -71,7 +72,7 @@ export function RegexCoverageDialog({
       <section className="regex-coverage-dialog" role="dialog" aria-modal="true" aria-labelledby="regex-coverage-title">
         <header className="dialog-header">
           <div><h2 id="regex-coverage-title">正则规则逐条分析</h2><span>{running ? `正在修正 ${currentPaths.length} 行，排队 ${queuedPaths.length} 行（共享模型通道 ${concurrencyLimit} 路）；其他行仍可编辑。` : '每行都可以先人工编辑，再单独点击“大模型修正”；模型处理期间只锁定当前行。'}</span></div>
-          <button className="icon-button" title="关闭" aria-label="关闭正则规则逐条分析" disabled={running || Boolean(savingPath || testingPath)} onClick={onClose}><X size={16} /></button>
+          <Button variant="outline" size="icon" title="关闭" aria-label="关闭正则规则逐条分析" disabled={running || Boolean(savingPath || testingPath)} onClick={onClose}><X size={16} /></Button>
         </header>
         <div className="regex-coverage-body">
           <div className="regex-coverage-summary">
@@ -93,7 +94,7 @@ export function RegexCoverageDialog({
                   {rule.proposals?.length && rule.status && !['pending', 'queued', 'processing', 'saved', 'saved-with-issues'].includes(rule.status) && <div className="regex-coverage-model-result">模型返回：{proposalSummary(rule.proposals)}</div>}
                   {rule.validation && <div className={`regex-coverage-validation ${rule.validation.passed ? 'passed' : 'failed'}`}>{rule.validation.message || (rule.validation.passed ? `校验通过：候选命中 ${rule.validation.draftMatchCount}，满足原文 ${rule.validation.sourceMatchCount}` : '本地校验未通过，未写入。')}</div>}
                   {rule.error && <div className="regex-coverage-validation failed">{rule.error}</div>}
-                  <div className="regex-coverage-rule-actions"><button type="button" className="secondary-button" disabled={disabled} onClick={() => onQueueAnalysis(rule)}>{rule.status === 'queued' ? <RefreshCw className="spin" size={14} /> : <Search size={14} />}大模型修正</button>{(rule.status === 'queued' || rule.status === 'processing') && <button type="button" className="secondary-button" onClick={() => onCancelAnalysis(rule)}><X size={14} />取消本行</button>}<button type="button" className="secondary-button" disabled={disabled} onClick={() => onTestRule(rule)}>{testingPath === rule.pathLabel ? <RefreshCw className="spin" size={14} /> : <Play size={14} />}测试匹配</button><button type="button" className="primary-button" disabled={disabled} onClick={() => onSaveRule(rule)}>{savingPath === rule.pathLabel ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}保存这条规则</button></div>
+                  <div className="regex-coverage-rule-actions"><Button type="button" variant="outline" disabled={disabled} onClick={() => onQueueAnalysis(rule)}>{rule.status === 'queued' ? <RefreshCw className="spin" size={14} /> : <Search size={14} />}大模型修正</Button>{(rule.status === 'queued' || rule.status === 'processing') && <Button type="button" variant="outline" onClick={() => onCancelAnalysis(rule)}><X size={14} />取消本行</Button>}<Button type="button" variant="outline" disabled={disabled} onClick={() => onTestRule(rule)}>{testingPath === rule.pathLabel ? <RefreshCw className="spin" size={14} /> : <Play size={14} />}测试匹配</Button><Button type="button" variant="default" disabled={disabled} onClick={() => onSaveRule(rule)}>{savingPath === rule.pathLabel ? <RefreshCw className="spin" size={14} /> : <Check size={14} />}保存这条规则</Button></div>
                   {test && <div className={`regex-coverage-validation ${test.compiled ? 'passed' : 'failed'}`}>当前输入测试：命中 {test.sourceMatchCount} → {test.draftMatchCount}；{test.message || '规则可编译。'}</div>}
                 </article>
               );
@@ -102,7 +103,7 @@ export function RegexCoverageDialog({
           </div>
         </div>
         <footer className="dialog-actions regex-coverage-actions">
-          {running ? <button className="secondary-button" onClick={onCancelAll}><X size={16} />取消全部分析</button> : <button className="secondary-button" disabled={Boolean(savingPath || testingPath)} onClick={onClose}><X size={16} />关闭</button>}
+          {running ? <Button variant="outline" onClick={onCancelAll}><X size={16} />取消全部分析</Button> : <Button variant="outline" disabled={Boolean(savingPath || testingPath)} onClick={onClose}><X size={16} />关闭</Button>}
         </footer>
       </section>
     </div>

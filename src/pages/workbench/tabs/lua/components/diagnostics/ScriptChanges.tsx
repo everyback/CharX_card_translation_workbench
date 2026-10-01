@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { useState } from 'react';
 import type { LuaManagementReport } from '@/shared/types';
 import { compactCode, RouterCodePanel } from '../router/RouterCodePanel';
@@ -47,7 +48,7 @@ export function ScriptChanges(props: Props) {
       </nav>
       {selected ? <div className="lua-change-body" key={selected.pathLabel}>
         <div className="lua-change-editor-toolbar"><code>{selected.pathLabel}</code><label><input type="checkbox" checked={full} disabled={locked} onChange={event => setFull(event.target.checked)} />显示完整代码</label>
-          {mode === 'regex' && rule && onOpenRegex && <button type="button" className="secondary-button" disabled={loading || locked} onClick={() => onOpenRegex(rule)}>编辑正则输入 / 输出</button>}</div>
+          {mode === 'regex' && rule && onOpenRegex && <Button type="button" variant="outline" disabled={loading || locked} onClick={() => onOpenRegex(rule)}>编辑正则输入 / 输出</Button>}</div>
         <div className="lua-change-columns">
           <div><strong>修改前 · 原始文件（只读）</strong>{showFull ? <pre>{selected.before || '（空）'}</pre> : <RouterCodePanel source={selected.before} peer={selected.after} tone="before" />}</div>
           <div><strong>修改后 · 当前审核稿{selected.luaPathJson && onSaveLine ? '（点击代码行编辑）' : ''}</strong>

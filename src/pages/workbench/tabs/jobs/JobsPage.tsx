@@ -1,3 +1,5 @@
+import { useState } from 'react';
+import { Button } from '@/shared/ui/button/Button';
 import { CheckCheck, Pause, Play, RefreshCw, ShieldCheck, Square } from 'lucide-react';
 import { STATUS_LABELS } from '@/entities/project/model/status-labels';
 import type { Job } from '@/shared/types';
@@ -5,6 +7,7 @@ import { formatClock, formatTime } from '@/shared/lib/format';
 
 export function JobsPage({
   jobs,
+  loadingJobId,
   selected,
   onSelect,
   onAction,
@@ -14,6 +17,7 @@ export function JobsPage({
   currentScope,
 }: {
   jobs: Job[];
+  loadingJobId?: string;
   selected: Job | null;
   onSelect: (job: Job) => void;
   onAction: (jobId: string, action: 'pause' | 'resume' | 'retry-failed' | 'rerun-postprocessing' | 'cancel') => void;
@@ -22,6 +26,10 @@ export function JobsPage({
   targetLanguage: string;
   currentScope?: string;
 }) {
+  const [page, setPage] = useState(0);
+  const pageSize = 50;
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(jobs.length / pageSize) - 1));
+  const pageStart = currentPage * pageSize;
   const selectedJob = selected && jobs.some((item) => item.id === selected.id) ? selected : null;
   const job = selectedJob ?? jobs[0] ?? null;
   const processedItems = job ? Math.max(0, job.completedItems + job.failedItems) : 0;
@@ -54,7 +62,8 @@ export function JobsPage({
   return (
     <section className="jobs-layout">
       <div className="job-list">
-        {jobs.map((item) => {
+        {jobs.length > pageSize && <div className="job-pagination"><span>共 {jobs.length} 个任务 · {currentPage + 1}/{Math.ceil(jobs.length / pageSize)} 页</span><Button disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button><Button disabled={pageStart + pageSize >= jobs.length} onClick={() => setPage(currentPage + 1)}>下一页</Button></div>}
+        {jobs.slice(pageStart, pageStart + pageSize).map((item) => {
           const itemPostTotal = Math.max(0, item.postTotalItems ?? 0);
           const itemPostProcessed = Math.min(itemPostTotal, Math.max(0, (item.postCompletedItems ?? 0) + (item.postFailedItems ?? 0)));
           return (
@@ -88,7 +97,7 @@ export function JobsPage({
                 <strong>{hasTranslationFailure ? '翻译已完成，但有项目需要留意' : '翻译已完成，下一步进入审核'}</strong>
                 <span>{hasTranslationFailure ? '请先查看失败项和阶段 2 的适配提示，再确认哪些译文可以通过。' : '请在审核页对照原文、译文和风险提示，确认后点击“保存”或“保存并导出”。'}</span>
               </div>
-              <button className="primary-button" type="button" onClick={onOpenReview}><CheckCheck size={16} />进入审核</button>
+              <Button variant="default" type="button" onClick={onOpenReview}><CheckCheck size={16} />进入审核</Button>
             </div>
           )}
           <div className="job-actions">
@@ -100,9 +109,10 @@ export function JobsPage({
             {['queued', 'running', 'paused'].includes(job.status) && <button onClick={() => onAction(job.id, 'cancel')}><Square size={15} />取消</button>}
           </div>
           {job.lastError && <div className="job-error">{job.lastError}</div>}
-          <div className="log-panel">
+          {loadingJobId === job.id && <div className="job-live-status" role="status" aria-live="polite">正在读取任务详情与运行日志…</div>}
+          <div className="log-panel" aria-busy={loadingJobId === job.id}>
             {(job.logs ?? []).map((entry) => <div key={entry.id} className={`log-${entry.level}`}><time>{formatClock(entry.createdAt)}</time><span>{entry.message}</span></div>)}
-            {!job.logs?.length && <div className="muted-text">选择任务后读取运行日志</div>}
+            {!job.logs?.length && loadingJobId !== job.id && <div className="muted-text">暂无运行日志，任务详情会自动刷新</div>}
           </div>
         </> : <div className="table-empty">选择一个任务查看详情</div>}
       </div>

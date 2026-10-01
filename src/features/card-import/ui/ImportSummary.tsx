@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Check, FileText, LoaderCircle, ScanSearch, X } from 'lucide-react';
 import type { CardImportResult } from '../model/useCardImport';
 
@@ -20,7 +21,7 @@ export function ImportSummary({ results, busy, onSelectProject, onScanProject, o
     <section className="import-summary" role="status" aria-label="导入结果">
       <div className="import-summary-header">
         <div><strong>导入结果</strong><span>{imported.length} 个项目已创建</span></div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="关闭导入结果" title="关闭"><X size={16} /></button>
+        <Button variant="outline" size="icon" type="button" onClick={onClose} aria-label="关闭导入结果" title="关闭"><X size={16} /></Button>
       </div>
       <div className="import-summary-list">
         {results.map((item) => (
@@ -31,16 +32,16 @@ export function ImportSummary({ results, busy, onSelectProject, onScanProject, o
               <div className="import-summary-actions">
                 <button className="link-button" type="button" onClick={() => item.projectId && onSelectProject(item.projectId)}>打开</button>
                 {!isConversion(item) && (
-                  <button className="secondary-button compact-button" type="button" disabled={!canScan} onClick={() => item.projectId && onScanProject(item.projectId)}>
+                  <Button variant="outline" className="compact-button" type="button" disabled={!canScan} onClick={() => item.projectId && onScanProject(item.projectId)}>
                     {busy === `scan-${item.projectId}` ? <LoaderCircle className="spin" size={14} /> : <ScanSearch size={14} />}扫描
-                  </button>
+                  </Button>
                 )}
               </div>
             ) : <span className="import-summary-error">{item.error}</span>}
           </div>
         ))}
       </div>
-      {imported.length > 1 && <button className="primary-button compact-button" type="button" disabled={!canScan} onClick={onScanAll}><ScanSearch size={15} />扫描全部项目</button>}
+      {imported.length > 1 && <Button variant="default" className="compact-button" type="button" disabled={!canScan} onClick={onScanAll}><ScanSearch size={15} />扫描全部项目</Button>}
     </section>
   );
 }

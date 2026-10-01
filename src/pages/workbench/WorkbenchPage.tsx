@@ -1,11 +1,14 @@
 import { reconcileTextDraft } from '@/features/review/lib/text-draft';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { UiAlert } from '@/shared/ui';
 import { AboutPage } from '@/pages/about/AboutPage';
 import { SettingsDialog } from '@/features/settings/ui/SettingsDialog';
 import { QuickStartView } from './components/workflow/QuickStartView';
+import { ProjectLibrary } from './components/ProjectLibrary';
+import { api } from '@/shared/api/http';
 import type {
   ReviewFocus,
+  Segment,
   ScopePreset,
   Tab,
 } from '@/shared/types';
@@ -56,7 +59,7 @@ export function WorkbenchPage() {
   const [reviewQaFlagFilter, setReviewQaFlagFilter] = useState('all');
   const [reviewQuery, setReviewQuery] = useState('');
   const [reviewSelectedIds, setReviewSelectedIds] = useState<Set<string>>(new Set());
-  const [reviewFiltersCollapsed, setReviewFiltersCollapsed] = useState(false);
+  const [reviewFiltersCollapsed, setReviewFiltersCollapsed] = useState(true);
   const reviewBases = useRef<Record<string, string>>({});
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, string>>({});
   const feedback = useWorkbenchFeedback();
@@ -107,16 +110,18 @@ export function WorkbenchPage() {
     clearError,
   });
 
-  const { error, notice, uiAlert } = feedback.selectContext(selectedProjectId);
+  const feedbackContextId = isIndependentTab(tab) ? null : selectedProjectId;
+  const { error, notice, uiAlert } = feedback.selectContext(feedbackContextId ?? '');
   const { setError, setNotice, showError, showUiConfirm, runAction } = useMemo(
-    () => feedback.bindContext(selectedProjectId), [feedback.bindContext, selectedProjectId]);
+    () => feedback.bindContext(feedbackContextId), [feedback.bindContext, feedbackContextId]);
 
   const showOverview = useCallback(() => setTab('overview'), []);
   const showJobs = useCallback(() => setTab('jobs'), []);
   const {
     jobDetail,
     clearJobDetail,
-    loadJob,
+    selectJob,
+    loadingJobId,
     startTranslation,
     jobAction,
     retranslateSegments,
@@ -136,6 +141,17 @@ export function WorkbenchPage() {
   });
 
   const showReview = useCallback(() => setTab('review'), []);
+  const openReviewField = useCallback((id: string) => {
+    setReviewFocus(null);
+    setReviewQuery('');
+    setReviewProblemFilter('all');
+    setReviewCategoryFilter('all');
+    setReviewKindFilter('all');
+    setReviewQaFlagFilter('all');
+    setReviewStatusFilter(project?.segments.find(segment => segment.id === id)?.reviewStatus === 'untranslated' ? 'untranslated' : 'all');
+    setSelectedSegmentId(id);
+    setTab('review');
+  }, [project, setSelectedSegmentId]);
   const showLua = useCallback(() => setTab('lua'), []);
   const activeTranslationJob = Boolean(project?.jobs.some((job) => ['queued', 'running', 'paused'].includes(job.status)));
   const {
@@ -183,6 +199,13 @@ export function WorkbenchPage() {
     });
   }, []);
 
+  const contentActionsRef = useRef({ updateSegment, openReviewField });
+  useLayoutEffect(() => { contentActionsRef.current = { updateSegment, openReviewField }; });
+  const toggleContentSegment = useCallback((segment: Segment) => {
+    void contentActionsRef.current.updateSegment(segment.id, { included: !segment.included });
+  }, []);
+  const selectContentSegment = useCallback((segment: Segment) => contentActionsRef.current.openReviewField(segment.id), []);
+
   const updateReviewSegment = useCallback(async (changes: Parameters<typeof updateSegment>[1]) => {
     if (!selectedSegment) return;
     if (changes.finalText !== undefined) {
@@ -213,12 +236,13 @@ export function WorkbenchPage() {
   }, [applyDraftQuiet, loadLuaReport, project?.id, saveAndExport]);
 
   const selectProject = useCallback((projectId: string) => {
+    if (projectId === selectedProjectId) return;
     clearJobDetail();
     setReviewFocus(null);
     setReviewSelectedIds(new Set());
     setReviewDrafts({});
     selectWorkspaceProject(projectId);
-  }, [clearJobDetail, selectWorkspaceProject]);
+  }, [clearJobDetail, selectedProjectId, selectWorkspaceProject]);
 
   const openProject = useCallback((projectId: string) => {
     selectProject(projectId);
@@ -264,7 +288,7 @@ export function WorkbenchPage() {
     writeWorkbenchRoute({ tab, projectId: routeProjectId, segmentId: routeSegmentId });
   }, [selectedProjectId, selectedSegmentId, tab]);
 
-  const { scan, scanProject, updateProjectLanguageRule, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject } = useProjectActions({
+  const { scan, scanProject, updateProjectLanguageRule, reuseVersionTranslations, previewPortraitRouter, repairPortraitRouter, resetLuaDraft, deleteProject, deleteProjectFamily } = useProjectActions({
     project,
     scope,
     setProject,
@@ -344,27 +368,25 @@ export function WorkbenchPage() {
       <WorkbenchSidebar
         projects={projects}
         selectedProjectId={isIndependentTab(tab) ? '' : selectedProjectId}
+        tab={tab}
         busy={busy}
         settings={settings}
         fileInputRef={fileInputRef}
         onSelectProject={openProject}
+        onDeleteProjectFamily={target => void deleteProjectFamily(target)}
         onImportFiles={(files) => void importCards(files)}
         onOpenSettings={openSettings}
-        onOpenAbout={() => setTab('about')}
-        onOpenPlugins={() => setTab('plugins')}
-        aboutActive={tab === 'about'}
-        pluginsActive={tab === 'plugins'}
+        onTabChange={setTab}
       />
 
-      <main className={`workspace ${tab === 'review' ? 'workspace-review' : ''}`}>
+      <main className={`workspace ${tab === 'review' ? 'workspace-review' : tab === 'resources' ? 'workspace-resources' : ''}`}>
         <WorkbenchHeader
           project={project}
+          tab={tab}
           busy={busy}
-          aboutActive={tab === 'about'}
-          pluginsActive={tab === 'plugins'}
+          onOpenLibrary={() => setTab('library')}
+          onOpenExport={() => setTab('export')}
           onDeleteProject={() => void deleteProject()}
-          onApplyDraft={() => void applyDraft()}
-          onSaveAndExport={() => void saveAndExport()}
         />
 
         <GlobalNoticeBanners
@@ -385,10 +407,14 @@ export function WorkbenchPage() {
           />
         )}
         {!isIndependentTab(tab) && <ProjectLoadingMask loading={projectLoading} progress={projectLoadProgress} />}
-        {tab === 'plugins' ? (
+        {tab === 'library' ? (
+          <ProjectLibrary projects={projects} settings={settings} busy={busy} onOpenProject={openProject} onImport={() => fileInputRef.current?.click()} onOpenSettings={openSettings} />
+        ) : tab === 'plugins' ? (
           <Suspense fallback={<div className="plugin-manager">正在读取插件与补丁清单...</div>}><PluginManagerPage /></Suspense>
         ) : tab === 'about' ? (
           <AboutPage />
+        ) : !project && projectLoading ? (
+          <div className="workspace-loading-space" aria-hidden="true" />
         ) : !project ? (
           <QuickStartView
             settings={settings}
@@ -403,6 +429,24 @@ export function WorkbenchPage() {
             busy={busy}
             activeTranslationJob={activeTranslationJob}
             tab={tab}
+            onTabChange={setTab}
+            onReviewField={openReviewField}
+            onReuseVersionTranslations={reuseVersionTranslations}
+            versions={{
+              projects, busy,
+              onSelect: selectProject,
+              onImport: async (file, label) => {
+                await runAction('import-version', async () => {
+                  const form = new FormData(); form.append('file', file);
+                  const query = new URLSearchParams({ baseVersionId: project.id, versionLabel: label });
+                  const imported = await api<{ id: string }>(`/api/projects/import?${query}`, { method: 'POST', body: form });
+                  await refreshProjects();
+                  selectProject(imported.id);
+                  setPendingAutoScanId(imported.id);
+                  setTab('versions');
+                });
+              },
+            }}
             workflow={{
               project,
               settings,
@@ -450,16 +494,14 @@ export function WorkbenchPage() {
                 onSearchScope: setSearchScope,
                 onStatusFilter: setStatusFilter,
                 onKindFilter: setKindFilter,
-                onToggle: (segment) => void updateSegment(segment.id, { included: !segment.included }),
-                onSelect: (segment) => {
-                  setSelectedSegmentId(segment.id);
-                  setTab('review');
-                },
+                onToggle: toggleContentSegment,
+                onSelect: selectContentSegment,
               },
               jobs: {
                 jobs: project.jobs,
                 selected: jobDetail,
-                onSelect: (job) => void loadJob(job.id),
+                onSelect: selectJob,
+                loadingJobId,
                 onAction: (jobId, action) => void jobAction(jobId, action),
                 onOpenReview: showReview,
                 languageBehaviorMode: project.languageBehaviorMode,
@@ -570,7 +612,6 @@ export function WorkbenchPage() {
                 projectId: project.id,
               },
             }}
-            onTabChange={setTab}
             preset={{
               onError: showError,
               onNotice: setNotice,

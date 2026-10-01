@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { ArrowRight, Check, Search } from 'lucide-react';
 import type { LuaManagementReport } from '@/shared/types';
 
@@ -45,7 +46,7 @@ export function LuaPortraitCandidates({
                 <div className="lua-segment-detail">
                   <div><strong>原有名称</strong><span>{candidate.names.join('、') || '无'}</span></div>
                   <div><strong>目标语言别名</strong><span>{candidate.targetAliases?.join('、') || '尚未生成'}</span></div>
-                  <div className="lua-alias-merge"><strong>合并到匹配目录</strong><button className="primary-button" disabled={!candidate.targetAliases?.length || candidate.status === 'covered'} onClick={() => void onSaveAliases(candidate.ownerId, candidate.targetAliases ?? [])}><Check size={14} />{candidate.status === 'covered' ? '已合并' : '一次合并保存'}</button></div>
+                  <div className="lua-alias-merge"><strong>合并到匹配目录</strong><Button variant="default" disabled={!candidate.targetAliases?.length || candidate.status === 'covered'} onClick={() => void onSaveAliases(candidate.ownerId, candidate.targetAliases ?? [])}><Check size={14} />{candidate.status === 'covered' ? '已合并' : '一次合并保存'}</Button></div>
                   <div><strong>缺少的匹配别名</strong><span>{candidate.missingAliases.join('、') || '无'}</span></div>
                   {candidate.pathLabels.length > 0 && <div><strong>运行时位置</strong><code>{candidate.pathLabels.join('、')}</code></div>}
                   <div className="lua-segment-detail-actions">

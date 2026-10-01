@@ -1,11 +1,11 @@
 import type { Tab } from '@/shared/types';
 
 export const HISTORY_TABS: Tab[] = [
-  'overview', 'segments', 'jobs', 'review', 'glossary', 'references', 'protocols', 'lua', 'resources', 'plugins', 'about',
+  'library', 'overview', 'segments', 'jobs', 'review', 'export', 'versions', 'glossary', 'references', 'protocols', 'lua', 'resources', 'plugins', 'about',
 ];
 
 export function isIndependentTab(tab: Tab): boolean {
-  return tab === 'plugins' || tab === 'about';
+  return tab === 'library' || tab === 'plugins' || tab === 'about';
 }
 
 export interface WorkbenchRoute {
@@ -15,10 +15,10 @@ export interface WorkbenchRoute {
 }
 
 export function readWorkbenchRoute(): WorkbenchRoute {
-  if (typeof window === 'undefined') return { tab: 'overview', projectId: '', segmentId: '' };
+  if (typeof window === 'undefined') return { tab: 'library', projectId: '', segmentId: '' };
   const params = new URLSearchParams(window.location.search);
   const requestedTab = params.get('tab') as Tab | null;
-  const tab = requestedTab && HISTORY_TABS.includes(requestedTab) ? requestedTab : 'overview';
+  const tab = requestedTab && HISTORY_TABS.includes(requestedTab) ? requestedTab : params.get('project') ? 'overview' : 'library';
   return {
     tab,
     projectId: isIndependentTab(tab) ? '' : params.get('project') || '',

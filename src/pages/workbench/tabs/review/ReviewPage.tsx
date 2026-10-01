@@ -1,10 +1,12 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Check, CheckCheck, ChevronDown, ChevronUp, CircleAlert, Copy, FilterX, Link2, LoaderCircle, RefreshCw, Save, Search, ShieldCheck, Trash2, X } from 'lucide-react';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo } from 'react';
+import { ReviewQueueList } from './ReviewQueueList';
 import { RiskBadge } from '@/entities/segment/ui/RiskBadge';
 import { CATEGORY_LABELS, KIND_LABELS } from '@/entities/segment/model/labels';
 import { STATUS_LABELS } from '@/entities/project/model/status-labels';
 import type { ReviewFocus, Segment } from '@/shared/types';
-import { findRegexRepairExamples, segmentSummary } from './lib/review-utils';
+import { findRegexRepairExamples } from './lib/review-utils';
 
 export type ReviewStatusFilter = 'all' | 'untranslated' | 'unapproved' | 'failed' | 'approved';
 export type ReviewProblemFilter = 'all' | 'issues' | 'clear';
@@ -135,18 +137,14 @@ export function ReviewPage({
       onQaFlagFilterChange('all');
     }
   }, [qaFlagFilter, qaFlagOptions]);
-  const pendingWithText = resultSegments.filter((segment) => (
+  const pendingWithText = useMemo(() => resultSegments.filter((segment) => (
     segment.reviewStatus === 'pending'
     && Boolean(segment.finalText?.trim() || segment.translatedText?.trim())
-  ));
-  const safePending = pendingWithText.filter((segment) => segment.riskLevel === 'low' && segment.qaFlags.length === 0);
-  const selectedRowRef = useRef<HTMLButtonElement>(null);
+  )), [resultSegments]);
+  const safePending = useMemo(() => pendingWithText.filter((segment) => segment.riskLevel === 'low' && segment.qaFlags.length === 0), [pendingWithText]);
   const regexRepairExamples = useMemo(() => selected && reviewFocus && reviewFocusIds.has(selected.id) && reviewFocus.pattern
     ? findRegexRepairExamples(selected.sourceText, draft, reviewFocus.pattern)
     : [], [selected, draft, reviewFocus, reviewFocusIds]);
-  useEffect(() => {
-    selectedRowRef.current?.scrollIntoView({ block: 'nearest' });
-  }, [selected?.id]);
   useEffect(() => {
     if (!filteredReviewable.some((segment) => segment.id === selected?.id)) {
       onSelect(filteredReviewable[0]?.id ?? '');
@@ -157,8 +155,9 @@ export function ReviewPage({
     const next = new Set([...selectedIds].filter((id) => visible.has(id)));
     if (next.size !== selectedIds.size) onSelectedIdsChange(next);
   }, [filteredReviewable, onSelectedIdsChange, selectedIds]);
-  const selectedVisibleIds = filteredReviewable.filter((segment) => selectedIds.has(segment.id)).map((segment) => segment.id);
+  const selectedVisibleIds = useMemo(() => filteredReviewable.filter((segment) => selectedIds.has(segment.id)).map((segment) => segment.id), [filteredReviewable, selectedIds]);
   const allVisibleSelected = filteredReviewable.length > 0 && selectedVisibleIds.length === filteredReviewable.length;
+  const advancedFilterCount = [reviewProblemFilter, categoryFilter, reviewKindFilter, qaFlagFilter].filter(value => value !== 'all').length;
   return (
     <section className="review-layout">
       <aside className="review-queue">
@@ -175,6 +174,12 @@ export function ReviewPage({
               <strong>审核队列</strong>
               <span>{filteredReviewable.length} / {reviewable.length}</span>
             </div>
+            <div className="review-quick-filters">
+              <div className="search-input"><Search size={14} /><input aria-label="审核文字搜索" value={reviewQuery} onChange={event => onReviewQueryChange(event.target.value)} placeholder="搜索原文、译文或路径" /></div>
+              <select aria-label="审核状态" value={reviewStatusFilter} onChange={event => onReviewStatusFilterChange(event.target.value as ReviewStatusFilter)}>
+                <option value="all">全部审核状态</option><option value="untranslated">未翻译</option><option value="unapproved">未通过</option><option value="failed">翻译失败</option><option value="approved">已通过</option>
+              </select>
+            </div>
             <div className="review-bulk-actions">
               <button className="review-bulk-button" disabled={resetting || selectedVisibleIds.length === 0} onClick={() => onReviewBulk('copy-machine', selectedVisibleIds)} title="将选中项的机器译文载入人工定稿框">
                 <Copy size={14} /><span>载入机翻</span><small>{selectedVisibleIds.length}</small>
@@ -190,7 +195,7 @@ export function ReviewPage({
               </button>
             </div>
             <div className="review-filter-heading">
-              <span>筛选条件</span>
+              <span>高级筛选与批量操作{advancedFilterCount > 0 ? ` · ${advancedFilterCount} 项筛选生效` : ''}</span>
               <button type="button" className="review-filter-toggle" aria-expanded={!reviewFiltersCollapsed} onClick={() => onReviewFiltersCollapsedChange(!reviewFiltersCollapsed)}>
                 {reviewFiltersCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
                 <span>{reviewFiltersCollapsed ? '展开' : '折叠'}</span>
@@ -198,23 +203,6 @@ export function ReviewPage({
             </div>
           </div>
           {!reviewFiltersCollapsed && <div className="review-filter-bar">
-            <label className="review-search-filter">
-              <span>文字搜索</span>
-              <div className="search-input">
-                <Search size={14} />
-                <input aria-label="审核文字搜索" value={reviewQuery} onChange={(event) => onReviewQueryChange(event.target.value)} placeholder="原文、译文或路径" />
-              </div>
-            </label>
-            <label>
-              <span>审核状态</span>
-              <select aria-label="审核状态" value={reviewStatusFilter} onChange={(event) => onReviewStatusFilterChange(event.target.value as ReviewStatusFilter)}>
-                <option value="all">全部</option>
-                <option value="untranslated">未翻译</option>
-                <option value="unapproved">未通过</option>
-                <option value="failed">翻译失败</option>
-                <option value="approved">已通过</option>
-              </select>
-            </label>
             <label>
               <span>问题状态</span>
               <select aria-label="问题状态" value={reviewProblemFilter} onChange={(event) => onReviewProblemFilterChange(event.target.value as ReviewProblemFilter)}>
@@ -271,35 +259,7 @@ export function ReviewPage({
             </div>
           </div>}
         </div>
-        {filteredReviewable.map((segment) => (
-          <button
-            key={segment.id}
-            ref={selected?.id === segment.id ? selectedRowRef : undefined}
-            className={selected?.id === segment.id ? 'active' : ''}
-            onClick={() => onSelect(segment.id)}
-          >
-            <input
-              type="checkbox"
-              checked={selectedIds.has(segment.id)}
-              onChange={(event) => {
-                event.stopPropagation();
-                const next = new Set(selectedIds);
-                if (event.target.checked) next.add(segment.id); else next.delete(segment.id);
-                onSelectedIdsChange(next);
-              }}
-              onClick={(event) => event.stopPropagation()}
-              aria-label={`选择第 ${segment.sortOrder + 1} 条审核项`}
-            />
-            <span className={`review-dot ${segment.translationError && segment.reviewStatus !== 'approved' ? 'review-failed' : `review-${segment.reviewStatus}`}`} />
-            <span className="review-row-copy">
-              <strong title={segment.sourceText}>#{segment.sortOrder + 1} {segmentSummary(segment.sourceText)}</strong>
-              <small>{CATEGORY_LABELS[segment.category] || segment.category} · {KIND_LABELS[segment.kind] || segment.kind} · {segment.pathLabel}</small>
-            </span>
-            {segment.controlReferences.length > 0
-              ? <Link2 size={15} />
-              : (segment.translationError || segment.qaFlags.length > 0) && <CircleAlert size={15} />}
-          </button>
-        ))}
+        <ReviewQueueList segments={filteredReviewable} selectedId={selected?.id} selectedIds={selectedIds} onSelect={onSelect} onSelectedIdsChange={onSelectedIdsChange} />
         {!filteredReviewable.length && <div className="table-empty">当前筛选无内容</div>}
       </aside>
       <div className="review-editor">
@@ -363,12 +323,12 @@ export function ReviewPage({
             <label><span>人工定稿</span><textarea value={draft} onChange={(event) => onDraftChange(event.target.value)} /></label>
           </div>
           <div className="review-actions">
-            {selected.translationError && selected.reviewStatus !== 'approved' && <button className="secondary-button" onClick={() => onDraftChange(selected.sourceText)}><Copy size={16} />载入原文</button>}
-            {selected.translationError && selected.translatedText && selected.reviewStatus !== 'approved' && <button className="secondary-button" onClick={() => onDraftChange(selected.translatedText!)}><Copy size={16} />载入失败译文</button>}
-            <button className="secondary-button danger-ghost" disabled={resetting} onClick={() => onRetranslate([selected.id])}><RefreshCw size={16} />删除并重译</button>
-            <button className="secondary-button" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'rejected' })}>{updating ? <LoaderCircle className="spin" size={16} /> : <X size={16} />}退回</button>
-            <button className="secondary-button" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: selected.reviewStatus })}>{updating ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存修改</button>
-            <button className="primary-button" disabled={updating || !draft.trim()} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'approved' })}>{updating ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}通过</button>
+            {selected.translationError && selected.reviewStatus !== 'approved' && <Button variant="outline" onClick={() => onDraftChange(selected.sourceText)}><Copy size={16} />载入原文</Button>}
+            {selected.translationError && selected.translatedText && selected.reviewStatus !== 'approved' && <Button variant="outline" onClick={() => onDraftChange(selected.translatedText!)}><Copy size={16} />载入失败译文</Button>}
+            <Button variant="outline" className="danger-ghost" disabled={resetting} onClick={() => onRetranslate([selected.id])}><RefreshCw size={16} />删除并重译</Button>
+            <Button variant="outline" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'rejected' })}>{updating ? <LoaderCircle className="spin" size={16} /> : <X size={16} />}退回</Button>
+            <Button variant="outline" disabled={updating} onClick={() => void onUpdate({ finalText: draft, reviewStatus: selected.reviewStatus })}>{updating ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}保存修改</Button>
+            <Button variant="default" disabled={updating || !draft.trim()} onClick={() => void onUpdate({ finalText: draft, reviewStatus: 'approved' })}>{updating ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}通过</Button>
           </div>
         </> : <div className="table-empty">从左侧选择一个段落</div>}
       </div>

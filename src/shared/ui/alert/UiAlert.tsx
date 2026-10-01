@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Check, CircleAlert, Copy, Trash2, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { UiAlertOptions } from './types';
@@ -41,18 +42,18 @@ export function UiAlert({ options, onResolve }: { options: UiAlertOptions; onRes
         <header className="ui-alert-header">
           <span className="ui-alert-icon"><CircleAlert size={19} /></span>
           <h2 id="ui-alert-title">{options.title}</h2>
-          <button className="icon-button" title="关闭" aria-label="关闭提示" onClick={() => onResolve(false)}><X size={17} /></button>
+          <Button variant="outline" size="icon" title="关闭" aria-label="关闭提示" onClick={() => onResolve(false)}><X size={17} /></Button>
         </header>
         <div id="ui-alert-message" className="ui-alert-message" tabIndex={0}>{options.message}</div>
         <footer className="ui-alert-actions">
-          <button className="secondary-button" onClick={() => void copyMessage()} title="复制完整提示文字">
+          <Button variant="outline" onClick={() => void copyMessage()} title="复制完整提示文字">
             {copied ? <Check size={16} /> : <Copy size={16} />}{copied ? '已复制' : '复制内容'}
-          </button>
+          </Button>
           <span />
-          <button className="secondary-button" onClick={() => onResolve(false)}><X size={16} />{options.cancelLabel ?? '取消'}</button>
-          <button ref={confirmRef} className={tone === 'danger' ? 'danger-button' : 'primary-button'} onClick={() => onResolve(true)}>
+          <Button variant="outline" onClick={() => onResolve(false)}><X size={16} />{options.cancelLabel ?? '取消'}</Button>
+          <Button ref={confirmRef} variant={tone === 'danger' ? 'destructive' : 'default'} onClick={() => onResolve(true)}>
             {tone === 'danger' ? <Trash2 size={16} /> : <Check size={16} />}{options.confirmLabel ?? '确认'}
-          </button>
+          </Button>
         </footer>
       </section>
     </div>

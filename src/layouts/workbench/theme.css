@@ -1,0 +1,161 @@
+/* Shared visual contract for every page, including lazy-loaded plugins and dialogs.
+   #root keeps feature styles from overriding control appearance on lazy import. */
+:root {
+  --ui-text: #253a35;
+  --ui-muted: #687d73;
+  --ui-border: #dce5df;
+  --ui-surface: #ffffff;
+  --ui-subtle: #f4f7f4;
+  --ui-accent: #315f49;
+  --ui-accent-hover: #244b38;
+  --ui-selected: #e6efe8;
+  --ui-danger: #ad4438;
+  --ui-radius: 8px;
+  --wb-accent: var(--ui-accent);
+  --wb-ink: var(--ui-text);
+  --wb-muted: var(--ui-muted);
+  --wb-line: var(--ui-border);
+  --wb-tint: var(--ui-selected);
+  color: var(--ui-text);
+  background: #fafbf9;
+}
+
+/* Actions: one size and visual hierarchy across all workflows. */
+#root :is(.primary-button, .secondary-button, .danger-button, .icon-button, .job-actions button,
+  .review-bulk-button, .project-tools-bar button, .import-button, .remote-key-browse) {
+  min-height: 36px;
+  padding: 8px 13px;
+  gap: 7px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.4;
+  box-shadow: none;
+  transition: background-color 120ms, border-color 120ms, color 120ms;
+}
+#root :is(.primary-button.primary-button, .review-bulk-all.review-bulk-all) {
+  background: var(--ui-accent);
+  border-color: var(--ui-accent);
+  color: white;
+}
+#root :is(.primary-button.primary-button, .review-bulk-all.review-bulk-all):hover:not(:disabled) {
+  background: var(--ui-accent-hover);
+  border-color: var(--ui-accent-hover);
+}
+#root :is(.secondary-button, .icon-button, .job-actions button, .review-bulk-button:not(.review-bulk-all),
+  .project-tools-bar button, .import-button, .remote-key-browse):hover:not(:disabled) {
+  background: var(--ui-subtle);
+  border-color: #a5b9ac;
+}
+#root .icon-button { width: 36px; padding: 8px; flex-shrink: 0; }
+#root :is(.danger-button.danger-button, .danger-ghost.danger-ghost) { color: var(--ui-danger); border-color: #e5c8c3; background: #fff6f4; }
+#root :is(.danger-button.danger-button, .danger-ghost.danger-ghost):hover:not(:disabled) { background: #fae8e4; border-color: #c98378; }
+#root :is(button:disabled, .primary-button.disabled) { opacity: .5; cursor: not-allowed; box-shadow: none; }
+#root button > svg { flex-shrink: 0; stroke-width: 1.7; }
+#root :is(button, a, summary, input, select, textarea):focus-visible { outline: 2px solid var(--ui-accent); outline-offset: 3px; }
+#root :is(.text-action, .status-link, .danger-action) { font-size: 12px; font-weight: 550; color: var(--ui-accent); text-underline-offset: 3px; }
+#root .danger-action { color: var(--ui-danger); }
+
+/* Secondary navigation stays visually quieter than primary actions. */
+#root .project-tools-bar button { background: transparent; border-color: transparent; color: var(--ui-muted); }
+#root .project-tools-bar button[aria-current] { background: var(--ui-selected); color: var(--ui-accent); border-color: #c5d8cb; }
+#root .project-tools-bar section > span { color: var(--ui-muted); font-size: 11px; font-weight: 500; }
+#root .project-tab-list > button { font-size: 12px; color: var(--ui-muted); }
+#root .project-tab-list > button.active { color: var(--ui-accent); border-color: var(--ui-accent); }
+#root :is(.lua-workspace-tabs, .patch-page-tabs, .patch-subtabs, .version-filters) button {
+  min-height: 34px; padding: 7px 12px; border-radius: var(--ui-radius); font-size: 12px;
+  color: var(--ui-muted); background: transparent; border: 1px solid var(--ui-border); box-shadow: none;
+}
+#root :is(.lua-workspace-tabs, .patch-page-tabs, .patch-subtabs, .version-filters) button:is(.active, [aria-pressed="true"], [aria-selected="true"], [aria-current]) {
+  background: var(--ui-selected); color: var(--ui-accent); border-color: #c5d8cb;
+}
+
+/* Fields, including settings, regex editors, presets and remote patch forms. */
+#root :is(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), select, textarea) {
+  border-color: var(--ui-border); border-radius: var(--ui-radius); background-color: var(--ui-surface);
+  color: var(--ui-text); font-size: 13px; box-shadow: none;
+}
+#root :is(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), select) { min-height: 36px; }
+#root textarea { line-height: 1.65; }
+#root :is(input, textarea)::placeholder { color: #84958a; }
+#root :is(input[type="checkbox"], input[type="radio"], input[type="range"]) { accent-color: var(--ui-accent); }
+#root :is(.search-input, .library-search) { border-color: var(--ui-border); border-radius: var(--ui-radius); background: var(--ui-surface); }
+#root :is(.search-input, .library-search) input { background: transparent; border: 0; min-height: 30px; }
+#root .project-version-bar select { background: var(--ui-surface); }
+
+/* Surfaces retain their established sizing and grid behaviour. */
+#root :is(.guided-workflow, .guided-panel, .preset-panel, .preset-hero, .lua-panel, .protocol-editor,
+  .resource-review-card, .resource-detail, .job-detail, .about-card, .patch-agent-panel,
+  .patch-editor, .export-summary, .library-card, .version-timeline button, .version-differences article) {
+  border-color: var(--ui-border); border-radius: 12px; background-color: var(--ui-surface); box-shadow: none;
+}
+#root :is(.guided-preset, .plugin-environment button, .remote-deployment button) {
+  border-color: var(--ui-border); border-radius: 10px; background: var(--ui-surface); box-shadow: none;
+}
+#root :is(.guided-preset.selected, .plugin-environment button.active, .remote-deployment button.active, .version-timeline button.active) {
+  background: var(--ui-selected); border-color: #9dbba8; color: var(--ui-accent); box-shadow: none;
+}
+#root :is(.table-head, .glossary-head, .reference-head, .protocol-field-head, .tavern-field-head, .preset-panel-head,
+  .lua-panel-header, .review-editor-header, .resource-detail-heading, .project-format-band) {
+  background: var(--ui-subtle); color: var(--ui-muted); border-color: var(--ui-border);
+}
+#root :is(.table-row, .glossary-row, .reference-row, .protocol-field-row, .tavern-field-row) { border-color: var(--ui-border); }
+#root :is(.table-row, .glossary-row, .reference-row):hover { background: #f1f6f2; }
+#root :is(.review-row.active, .resource-item.active, .protocol-item.active, .job-card.active) {
+  background: var(--ui-selected); border-color: #9dbba8;
+}
+#root :is(.table-empty, .glossary-empty, .resource-empty, .patch-empty, .lua-simple-empty) { color: var(--ui-muted); font-size: 13px; }
+#root :is(.progress-track, .loading-progress-track) { background: #e6ece7; border-radius: 999px; }
+#root .progress-track > span { background: var(--ui-accent); border-radius: inherit; }
+#root :is(.section-kicker, .section-eyebrow, .preset-eyebrow, .about-eyebrow, .plugin-install-kicker) { color: var(--ui-accent); }
+
+/* Dialog chrome is shared; code/diff, error and warning semantics stay intact. */
+#root .modal-backdrop { background: rgb(27 43 34 / 38%); backdrop-filter: blur(3px); }
+#root :is(.settings-dialog, .namespace-confirmation-dialog, .regex-coverage-dialog, .regex-editor-dialog,
+  .router-preview-dialog, .ui-alert-dialog) {
+  border: 1px solid var(--ui-border); border-radius: 14px; background: var(--ui-surface); box-shadow: 0 20px 70px #23382c26;
+}
+#root :is(.dialog-header, .ui-alert-header) { padding: 20px 24px; border-color: var(--ui-border); color: var(--ui-text); }
+#root :is(.dialog-actions, .ui-alert-actions) { padding: 16px 24px; gap: 10px; background: var(--ui-subtle); border-color: var(--ui-border); }
+#root :is(.settings-section-label, .preset-panel-head h2, .lua-panel-header h3) { color: var(--ui-text); }
+#root :is(.review-columns textarea, .regex-editor-input, .lua-inline-editor textarea, .router-edit-box textarea) {
+  font-family: "Cascadia Code", Consolas, "Microsoft YaHei", monospace; font-size: 12px;
+}
+#root .review-queue-header .review-bulk-button { min-height: 34px; padding: 6px 8px; font-size: 11px; }
+@media (max-width: 760px) {
+  #root .project-tools-bar { gap: 12px; }
+  #root .project-tools-bar section { gap: 5px; }
+  #root .project-tools-bar section > span { width: 100%; }
+  #root :is(.dialog-header, .ui-alert-header, .dialog-actions, .ui-alert-actions) { padding: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #root :is(button, a, input, select, textarea) { transition: none; }
+}
+
+#root :is(.patch-location, .plugin-manager-toolbar) button { min-height: 36px; padding: 8px 13px; border: 1px solid var(--ui-border); border-radius: var(--ui-radius); background: var(--ui-surface); color: var(--ui-muted); font-size: 12px; }
+#root :is(.patch-location, .plugin-manager-toolbar) button:is(.active, [aria-pressed="true"]) { background: var(--ui-selected); color: var(--ui-accent); border-color: #c5d8cb; }
+#root .review-columns textarea { font-family: inherit; font-size: 13px; }
+#root .ghost-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 8px 13px; border: 1px solid transparent; border-radius: var(--ui-radius); background: transparent; color: var(--ui-muted); font-size: 12px; cursor: pointer; }
+#root .ghost-button:hover { background: var(--ui-selected); color: var(--ui-accent); }
+#root :is(.resource-list, .protocol-list) > button.active, #root .job-list-item.active { background: var(--ui-selected); border-color: #9dbba8; color: var(--ui-accent); }
+
+#root .project-workspace-switch { display: flex; gap: 6px; width: 100%; padding: 12px 0; border-bottom: 1px solid var(--ui-border); }
+#root .project-workspace-switch button { padding: 9px 16px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--ui-muted); font-size: 13px; cursor: pointer; }
+#root .project-workspace-switch button[aria-pressed="true"] { background: var(--ui-selected); color: var(--ui-accent); border-color: #c5d8cb; font-weight: 600; }
+#root .project-tools-bar { border-top: 0; }
+.tab-loading-status { display: flex; align-items: center; gap: 14px; margin: 24px; padding: 28px; min-height: 150px; background: var(--ui-surface); border: 1px solid var(--ui-border); border-radius: 12px; color: var(--ui-accent); }
+.tab-loading-status p { margin: 8px 0 0; color: var(--ui-muted); font-size: 13px; }
+.segment-pagination { display: flex; align-items: center; gap: 10px; padding: 12px 20px; flex-wrap: wrap; border-bottom: 1px solid var(--ui-border); }
+.segment-pagination span { margin-right: auto; color: var(--ui-muted); font-size: 12px; }
+
+/* Keep the controls fixed while only the visible review rows are mounted. */
+#root .review-queue { display: flex; flex-direction: column; overflow: hidden; }
+#root .review-queue-controls { flex: 0 0 auto; max-height: 65%; overflow-y: auto; }
+#root .review-queue-viewport { flex: 1 1 0; min-height: 0; overflow-y: auto; overflow-anchor: none; }
+#root .review-virtual-row { box-sizing: border-box; border-radius: 0; }
+
+#root .job-pagination { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px; }
+#root .job-pagination > span { flex-basis: 100%; color: var(--muted-foreground, #6b7b73); font-size: 12px; }

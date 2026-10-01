@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { useState } from 'react';
 import { Check, Pencil, RotateCcw, ToggleLeft, X } from 'lucide-react';
 import type { PresetPromptView } from '@/features/preset/model/types';
@@ -84,12 +85,12 @@ export function PresetPromptList({ prompts, busy, onSave, onReset }: PresetPromp
                 <span className="preset-prompt-spacer" />
                 {isEditing ? (
                   <>
-                    <button className="secondary-button compact-button" type="button" disabled={busy} onClick={() => void commit(prompt)}><Check size={13} />完成</button>
+                    <Button variant="outline" className="compact-button" type="button" disabled={busy} onClick={() => void commit(prompt)}><Check size={13} />完成</Button>
                     <button className="link-button" type="button" onClick={() => setEditing(null)}>取消</button>
                   </>
                 ) : (
                   <>
-                    <button className="secondary-button compact-button" type="button" disabled={busy} onClick={() => begin(prompt)}><Pencil size={13} />编辑</button>
+                    <Button variant="outline" className="compact-button" type="button" disabled={busy} onClick={() => begin(prompt)}><Pencil size={13} />编辑</Button>
                     {prompt.edited && (
                       <button className="link-button" type="button" disabled={busy} onClick={() => void onReset(prompt.path)}><RotateCcw size={13} />恢复</button>
                     )}

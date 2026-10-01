@@ -83,7 +83,8 @@ import {
 import { abortJob, analyzeProtocolSemantics, analyzeRisuRegexLanguageCoverage, buildRegexWhitespaceProbe, collectRegexCoveragePairs, collectRegexCoveragePairsWithPatterns, privateImageSettings, publicSettings, recoverInterruptedJobs, regexLanguagePayloadSummary, scheduleJob, segmentRuntimeNames, splitRegexLanguageEntries, translateRuntimeAliases, type RisuRegexLanguageEntry } from '../scheduler.js';
 import { languageBehaviorDirectiveIssue } from '../domain/translation/language-directives.js';
 import { workbenchConfig } from '../../config/workbench.js';
-import { PROJECT_TITLE_COLUMNS } from '../repositories/project-queries.js';
+import { PROJECT_TITLE_COLUMNS, PROJECT_VERSION_COLUMNS } from '../repositories/project-queries.js';
+import { createProjectVersionService, ProjectVersionError } from '../application/projects/project-version-service.js';
 import { createScanService } from '../application/scanning/scan-service.js';
 import { createProjectService } from '../application/projects/project-service.js';
 import { createTranslationJobService } from '../application/translation/translation-job-service.js';
@@ -128,6 +129,7 @@ const scanService = createScanService({
   createId: id,
   clock: now,
   refreshHistoricalJobsAfterScan: translationJobs.refreshHistoricalJobsAfterScan,
+  reuseVersionTranslations: (projectId, ids) => versionService.reuseAfterScan(projectId, ids),
 });
 const projectService = createProjectService({
   database: db,
@@ -137,6 +139,8 @@ const projectService = createProjectService({
 });
 const namespaceReviewService = createNamespaceReviewService({ database: db, createId: id, clock: now });
 const { createProject } = projectService;
+const versionService = createProjectVersionService({ database: db, createProject, createId: id, clock: now,
+  removeStorage: removeProjectStorage, controlReferencesForProject });
 const reviewService = createReviewService({
   database: db,
   clock: now,
@@ -165,10 +169,19 @@ app.post('/api/projects', async (request, reply) => {
   if (!Object.keys(card).length) return reply.code(400).send({ error: '卡片 JSON 必须是对象。' });
   const name = text(body.name) || cardName(card);
   const sourceFormat = text(body.sourceFormat) || 'json';
-  return reply.code(201).send(await projectById(await createProject({ name, sourceFormat, card })));
+  try {
+    const input = { name, sourceFormat, card };
+    const projectId = text(body.baseVersionId)
+      ? await versionService.createVersion(text(body.baseVersionId), text(body.versionLabel), input)
+      : await createProject(input);
+    return reply.code(201).send(await projectById(projectId));
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
 });
 
-app.post('/api/projects/import', async (request, reply) => {
+app.post<{ Querystring: { baseVersionId?: string; versionLabel?: string } }>('/api/projects/import', async (request, reply) => {
+  const importProject: typeof createProject = input => request.query.baseVersionId
+    ? versionService.createVersion(request.query.baseVersionId, request.query.versionLabel || '', input)
+    : createProject(input);
   let part: multipart.MultipartFile | undefined;
   let buffer: Buffer;
   try {
@@ -193,7 +206,7 @@ app.post('/api/projects/import', async (request, reply) => {
         // `.risup` container is produced at export time from the translated draft.
         const presetName = text(card.name) || path.basename(part.filename, extension) || 'SillyTavern 预设';
         const analysis = analyzeStPreset(card);
-        const projectId = await createProject({
+        const projectId = await importProject({
           name: presetName, sourceFormat: 'st-preset', card, filename: part.filename, blob: buffer,
         });
         return reply.code(201).send({
@@ -207,12 +220,12 @@ app.post('/api/projects/import', async (request, reply) => {
           },
         });
       }
-      const projectId = await createProject({ name: cardName(card), sourceFormat: 'json', card, filename: part.filename });
+      const projectId = await importProject({ name: cardName(card), sourceFormat: 'json', card, filename: part.filename });
       return reply.code(201).send(await projectById(projectId));
     }
     if (extension === '.png' || part.mimetype === 'image/png') {
       const parsed = parseCardPng(buffer);
-      const projectId = await createProject({
+      const projectId = await importProject({
         name: cardName(parsed.card), sourceFormat: 'png', card: parsed.card,
         filename: part.filename, blob: buffer, metadataKeys: parsed.metadataKeys,
       });
@@ -220,7 +233,7 @@ app.post('/api/projects/import', async (request, reply) => {
     }
     if (extension === '.charx') {
       const parsed = parseCharx(buffer);
-      const projectId = await createProject({
+      const projectId = await importProject({
         name: cardName(parsed.card), sourceFormat: 'charx', card: parsed.card,
         module: parsed.module, filename: part.filename, blob: buffer,
       });
@@ -229,7 +242,7 @@ app.post('/api/projects/import', async (request, reply) => {
     if (extension === '.risum') {
       const parsed = parseRisuModule(buffer);
       const name = text(parsed.module.name) || path.basename(part.filename, extension) || '未命名模块';
-      const projectId = await createProject({
+      const projectId = await importProject({
         name, sourceFormat: 'risum', card: { name }, module: parsed.module,
         filename: part.filename, blob: buffer,
       });
@@ -242,6 +255,21 @@ app.post('/api/projects/import', async (request, reply) => {
 });
 
 registerInspectionRoutes(app, uploadLimitMib, { createProject, projectById, cardName });
+
+app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/versions/reuse', async (request, reply) => {
+  try { return await versionService.reuseFromBase(request.params.projectId); }
+  catch (error) {
+    if (error instanceof ProjectVersionError) return reply.code(error.statusCode).send({ error: error.message });
+    throw error;
+  }
+});
+
+app.get<{ Params: { projectId: string }; Querystring: { offset?: string; filter?: string } }>('/api/projects/:projectId/versions', async (request, reply) => {
+  if (!await projectById(request.params.projectId)) return reply.code(404).send({ error: '项目不存在。' });
+  const offset = Number(request.query.offset || 0);
+  if (!Number.isSafeInteger(offset) || offset < 0) return reply.code(400).send({ error: '分页偏移无效。' });
+  return versionService.describe(request.params.projectId, offset, request.query.filter);
+});
 
 app.get<{ Params: { projectId: string }; Querystring: { segments?: string } }>('/api/projects/:projectId', async (request, reply) => {
   await namespaceReviewService.ensureReviewItem(request.params.projectId);
@@ -809,7 +837,15 @@ app.patch<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/synta
   if (!row?.originalModuleJson) return reply.code(404).send({ error: '项目不存在或缺少原始 Risu Lua 模块。' });
   try {
     const originalModule = JSON.parse(row.originalModuleJson) as Record<string, unknown>;
-    const { draftModule } = await loadReviewedDraft(db, request.params.projectId);
+    let draftModule: Record<string, unknown> | null;
+    try { ({ draftModule } = await loadReviewedDraft(db, request.params.projectId)); }
+    catch (error) {
+      // Diagnostics display the retained manual draft when rebase conflicts.
+      // Edit that same draft so the user can resolve it, retaining the review
+      // baseline so unresolved overlaps still block apply and export.
+      if (!(error instanceof ModuleReviewConflict)) throw error;
+      draftModule = row.draftModuleJson ? JSON.parse(row.draftModuleJson) : null;
+    }
     if (!draftModule) return reply.code(404).send({ error: '项目缺少 Risu Lua 模块。' });
     const result = replaceRisuLuaLine(draftModule, pathJson, line, replacement, expectedLine);
     if (!result.ok) {
@@ -1594,7 +1630,23 @@ app.post<{ Params: { projectId: string } }>('/api/projects/:projectId/lua/reset-
   return { ok: true, reset: true };
 });
 
+app.delete<{ Params: { projectId: string } }>('/api/projects/:projectId/family', async (request, reply) => {
+  const count = asRecord(request.body).expectedVersionCount;
+  if (!Number.isInteger(count) || Number(count) < 1) return reply.code(400).send({ error: '请确认要删除的版本数量。' });
+  try {
+    const result = await versionService.deleteFamily(request.params.projectId, Number(count));
+    for (const id of result.deletedIds) controlReferenceCache.delete(id);
+    return { ok: true, deletedCount: result.deletedIds.length, cleanupFailed: result.cleanupFailed };
+  } catch (error) {
+    if (error instanceof ProjectVersionError) return reply.code(error.statusCode).send({ error: error.message });
+    throw error;
+  }
+});
+
 app.delete<{ Params: { projectId: string } }>('/api/projects/:projectId', async (request, reply) => {
+  if (await db.prepare('SELECT id FROM projects WHERE base_version_id = ? LIMIT 1').get(request.params.projectId)) {
+    return reply.code(409).send({ error: '后续版本仍以此版本为基础，请保留它以便追溯字段和译文来源。' });
+  }
   await namespaceReviewService.ensureReviewItem(request.params.projectId);
   const active = await db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE project_id = ? AND status IN ('queued', 'running')")
     .get(request.params.projectId) as { count: number };
@@ -2271,7 +2323,7 @@ async function protocolSourceByProject(projectId: string): Promise<{
 async function projectById(projectId: string): Promise<Record<string, unknown> | undefined> {
   return await db.prepare(`
     SELECT
-      p.id, p.name, ${PROJECT_TITLE_COLUMNS},
+      p.id, p.name, ${PROJECT_TITLE_COLUMNS}, ${PROJECT_VERSION_COLUMNS},
       p.source_format AS sourceFormat, p.source_language AS sourceLanguage,
       p.target_language AS targetLanguage, p.language_behavior_mode AS languageBehaviorMode, p.scope, p.status, p.original_hash AS originalHash,
       p.source_filename AS sourceFilename,

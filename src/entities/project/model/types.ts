@@ -13,6 +13,11 @@ export interface Dashboard {
 
 export interface ProjectSummary {
   id: string;
+  familyId?: string;
+  versionNumber?: number;
+  versionLabel?: string;
+  versionCount?: number;
+  baseVersionId?: string | null;
   name: string;
   originalName: string;
   translatedName: string | null;

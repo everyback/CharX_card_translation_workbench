@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Check, Play, RefreshCw, Search, X } from 'lucide-react';
 import { MatchExampleList } from '../shared/MatchExampleList';
 import type { RegexRuleTestResult } from '@/shared/types';
@@ -61,7 +62,7 @@ export function RegexEditorDialog({
       <section className="regex-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="regex-editor-title">
         <header className="dialog-header">
           <div><h2 id="regex-editor-title">{editor.runtimePostprocess ? '人工编辑 Lua 聊天后处理' : '人工编辑正则'}</h2><span>{editor.pathLabel} · 仅保存到 Lua 草稿，导出前仍会执行完整校验。</span></div>
-          <button className="icon-button" title="关闭" aria-label="关闭正则编辑" disabled={saving || analyzing || testing} onClick={onClose}><X size={16} /></button>
+          <Button variant="outline" size="icon" title="关闭" aria-label="关闭正则编辑" disabled={saving || analyzing || testing} onClick={onClose}><X size={16} /></Button>
         </header>
         <div className="regex-editor-body">
           <div className="regex-editor-baseline">
@@ -102,10 +103,10 @@ export function RegexEditorDialog({
           </div>}
         </div>
         <footer className="dialog-actions regex-editor-actions">
-          {analyzing ? <button className="secondary-button" onClick={onCancelAnalysis}><X size={16} />取消分析</button> : <button className="secondary-button" disabled={saving || testing} onClick={onClose}><X size={16} />关闭</button>}
-          <button className="secondary-button" disabled={analyzing || testing || saving || !pattern.trim()} onClick={onAnalyze}>{analyzing ? <RefreshCw className="spin" size={16} /> : <Search size={16} />}{editor.runtimePostprocess ? '大模型修正匹配式' : '大模型修正'}</button>
-          <button className="secondary-button" disabled={analyzing || testing || saving || !pattern.trim()} onClick={onTest}>{testing ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}测试匹配</button>
-          <button className={`primary-button${forcePass ? ' danger-button' : ''}`} disabled={analyzing || testing || saving || !pattern.trim()} onClick={onSave}>{saving ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}{forcePass ? '强制通过并保存' : editor.runtimePostprocess ? '保存后处理' : '保存规则'}</button>
+          {analyzing ? <Button variant="outline" onClick={onCancelAnalysis}><X size={16} />取消分析</Button> : <Button variant="outline" disabled={saving || testing} onClick={onClose}><X size={16} />关闭</Button>}
+          <Button variant="outline" disabled={analyzing || testing || saving || !pattern.trim()} onClick={onAnalyze}>{analyzing ? <RefreshCw className="spin" size={16} /> : <Search size={16} />}{editor.runtimePostprocess ? '大模型修正匹配式' : '大模型修正'}</Button>
+          <Button variant="outline" disabled={analyzing || testing || saving || !pattern.trim()} onClick={onTest}>{testing ? <RefreshCw className="spin" size={16} /> : <Play size={16} />}测试匹配</Button>
+          <Button variant={forcePass ? 'destructive' : 'default'} disabled={analyzing || testing || saving || !pattern.trim()} onClick={onSave}>{saving ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}{forcePass ? '强制通过并保存' : editor.runtimePostprocess ? '保存后处理' : '保存规则'}</Button>
         </footer>
       </section>
     </div>

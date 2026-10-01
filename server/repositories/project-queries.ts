@@ -1,3 +1,9 @@
+export const PROJECT_VERSION_COLUMNS = `
+  COALESCE(p.family_id, p.id) AS familyId,
+  p.version_number AS versionNumber, p.version_label AS versionLabel, p.base_version_id AS baseVersionId,
+  (SELECT COUNT(*) FROM projects versions WHERE COALESCE(versions.family_id, versions.id) = COALESCE(p.family_id, p.id)) AS versionCount
+`;
+
 export const PROJECT_TITLE_COLUMNS = `
   p.name AS originalName,
   (

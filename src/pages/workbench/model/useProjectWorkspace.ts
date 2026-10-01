@@ -1,5 +1,6 @@
 import { workflowState } from '@/features/translation/model/workflow-state';
 import { AutomaticLoads } from './automatic-loads';
+import { loadSegmentPages } from './load-segment-pages';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/shared/api/http';
 import type {
@@ -54,6 +55,7 @@ export function useProjectWorkspace({
   const selectedProjectIdRef = useRef('');
   const projectListRequest = useRef(0);
   const projectRequestRef = useRef(0);
+  const loadController = useRef<AbortController | null>(null);
   const loadedProjectIdRef = useRef(project?.id);
   loadedProjectIdRef.current = project?.id;
   const projectOverviewRequestRef = useRef(0);
@@ -65,6 +67,7 @@ export function useProjectWorkspace({
     // will not rerun. Avoid turning the mask on without a request that can clear it.
     if (selectedProjectIdRef.current === projectId) return;
     automaticLoads.current.clear();
+    loadController.current?.abort();
     projectRequestRef.current += 1;
     setProjectLoading(Boolean(projectId));
     setProjectLoadProgress({ current: 0, total: 0, known: false });
@@ -91,7 +94,7 @@ export function useProjectWorkspace({
     const refreshQuery = syncSettings ? '?fresh=1' : '';
     const [summary, list] = await Promise.all([
       api<Dashboard>('/api/dashboard' + refreshQuery),
-      api<ProjectSummary[]>('/api/projects' + refreshQuery),
+      api<ProjectSummary[]>('/api/projects?fresh=1'),
     ]);
     if (requestId !== projectListRequest.current) return;
     if (syncSettings) onSettingsLoaded(summary.settings);
@@ -120,34 +123,27 @@ export function useProjectWorkspace({
   }, []);
 
   const loadProjectProgressively = useCallback(async (projectId: string, requestId: number) => {
-    const [detail, terms, protocolSchemas] = await Promise.all([
-      api<ProjectDetail>(`/api/projects/${projectId}?segments=none`),
-      api<GlossaryTerm[]>(`/api/projects/${projectId}/glossary`),
-      api<ProtocolSchema[]>(`/api/projects/${projectId}/protocols`),
-    ]);
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
+    const { signal } = controller;
+    const detailPromise = api<ProjectDetail>(`/api/projects/${projectId}?segments=none`, { signal });
+    const segmentsPromise = detailPromise.then(async detail => {
+      const total = detail.scanSummary?.totalSegments ?? 0;
+      signal.throwIfAborted();
+      setProjectLoadProgress({ current: 0, total, known: true });
+      return loadSegmentPages<Segment>(total, PROJECT_SEGMENT_PAGE_SIZE,
+        (offset, limit) => api<ProjectSegmentsPage>(`/api/projects/${projectId}/segments?offset=${offset}&limit=${limit}`, { signal }),
+        current => { if (!signal.aborted) setProjectLoadProgress({ current, total, known: true }); }, signal);
+    });
+    let result;
+    try {
+      result = await Promise.all([detailPromise, segmentsPromise,
+        api<GlossaryTerm[]>(`/api/projects/${projectId}/glossary`, { signal }),
+        api<ProtocolSchema[]>(`/api/projects/${projectId}/protocols`, { signal })]);
+    } catch (error) { controller.abort(); throw error; }
+    const [detail, segments, terms, protocolSchemas] = result;
     if (projectRequestRef.current !== requestId || selectedProjectIdRef.current !== projectId) return;
-
-    let total = detail.scanSummary?.totalSegments ?? 0;
-    const segments: Segment[] = [];
-    setProjectLoadProgress({ current: 0, total, known: true });
-    for (let offset = 0; offset < total; offset += PROJECT_SEGMENT_PAGE_SIZE) {
-      const page = await api<ProjectSegmentsPage>(
-        `/api/projects/${projectId}/segments?offset=${offset}&limit=${PROJECT_SEGMENT_PAGE_SIZE}`,
-      );
-      if (projectRequestRef.current !== requestId || selectedProjectIdRef.current !== projectId) return;
-      segments.push(...page.segments);
-      total = page.total;
-      setProjectLoadProgress({ current: segments.length, total, known: true });
-      if (!page.segments.length && segments.length < total) {
-        throw new Error(`卡片段落读取中断：已读取 ${segments.length} / ${total} 段。`);
-      }
-      if (!page.segments.length) break;
-    }
-
-    if (projectRequestRef.current !== requestId || selectedProjectIdRef.current !== projectId) return;
-    if (segments.length !== total) {
-      throw new Error(`卡片段落数量不一致：已读取 ${segments.length} / ${total} 段。`);
-    }
     setProject({ ...detail, segments, status: workflowState({ ...detail, segments }).status });
     setGlossary(terms);
     setProtocols(protocolSchemas);
@@ -236,22 +232,20 @@ export function useProjectWorkspace({
     selectedProjectIdRef.current = selectedProjectId;
     if (!selectedProjectId || isIndependentTab(tab)) {
       projectRequestRef.current += 1;
+      loadController.current?.abort();
       setProjectLoading(false);
       return;
     }
     if (project?.id === selectedProjectId) return;
     const expectedProjectId = selectedProjectId;
     const requestId = ++projectRequestRef.current;
-    const loadingStartedAt = Date.now();
     setProjectLoading(true);
     setProjectLoadProgress({ current: 0, total: 0, known: false });
     void loadProjectProgressively(expectedProjectId, requestId)
       .catch((error) => {
         if (projectRequestRef.current === requestId) onError(error);
       })
-      .finally(async () => {
-        const remaining = LOADING_MASK_MINIMUM_MS - (Date.now() - loadingStartedAt);
-        if (remaining > 0) await new Promise((resolve) => window.setTimeout(resolve, remaining));
+      .finally(() => {
         if (projectRequestRef.current === requestId && selectedProjectIdRef.current === expectedProjectId) {
           setProjectLoading(false);
         }

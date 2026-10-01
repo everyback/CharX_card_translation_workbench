@@ -8,6 +8,7 @@ export interface ScanServiceDependencies {
   createId: () => string;
   clock: () => string;
   refreshHistoricalJobsAfterScan(projectId: string, timestamp: string): Promise<void>;
+  reuseVersionTranslations?(projectId: string, newSegmentIds: readonly string[]): Promise<number>;
 }
 
 export interface ReconciledSegment {
@@ -110,13 +111,14 @@ export function createScanService({
   createId,
   clock,
   refreshHistoricalJobsAfterScan,
+  reuseVersionTranslations,
 }: ScanServiceDependencies) {
   async function replaceScannedSegments(
     projectId: string,
     scope: string,
     scannedSegments: readonly ScannedSegment[],
     completeSegments: readonly ScannedSegment[] = scannedSegments,
-  ): Promise<{ segmentCount: number; preservedCount: number; newCount: number }> {
+  ): Promise<{ segmentCount: number; preservedCount: number; newCount: number; reusedCount: number }> {
     const timestamp = clock();
     const previousSegments = await database.prepare(`
       SELECT id, path_json, kind, source_text, start_pos, end_pos,
@@ -144,7 +146,9 @@ export function createScanService({
     `);
     const deleteObsolete = database.prepare('DELETE FROM segments WHERE project_id = ? AND id = ?');
 
+    let reusedCount = 0;
     await database.transaction(async () => {
+      const newSegmentIds: string[] = [];
       for (const item of plan.retained) {
         const { segment, sortOrder, previousId } = item;
         const pathJson = JSON.stringify(segment.path);
@@ -156,8 +160,10 @@ export function createScanService({
           );
           continue;
         }
+        const segmentId = createId();
+        newSegmentIds.push(segmentId);
         await insert.run(
-          createId(), projectId, pathJson, segment.pathLabel,
+          segmentId, projectId, pathJson, segment.pathLabel,
           segment.category, segment.kind, segment.protocolDelimiter ?? null, segment.sourceText,
           null, null,
           segment.start, segment.end, segment.risk,
@@ -165,11 +171,13 @@ export function createScanService({
         );
       }
       for (const previousId of plan.obsoleteIds) await deleteObsolete.run(projectId, previousId);
+      reusedCount = await reuseVersionTranslations?.(projectId, newSegmentIds) ?? 0;
       await refreshHistoricalJobsAfterScan(projectId, timestamp);
       await database.prepare("UPDATE projects SET scope = ?, status = 'scanned', updated_at = ? WHERE id = ?")
         .run(scope, timestamp, projectId);
     });
     return {
+      reusedCount,
       segmentCount: scannedSegments.length,
       preservedCount: plan.retained.filter(item => item.previousId && selected.has(segmentIdentity(
         JSON.stringify(item.segment.path), item.segment.kind, item.segment.sourceText, item.segment.start, item.segment.end,

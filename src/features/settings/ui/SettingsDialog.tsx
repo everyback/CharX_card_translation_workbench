@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { LoaderCircle, RefreshCw, Save, X } from 'lucide-react';
 import { useState } from 'react';
 import type { Settings } from '@/shared/types';
@@ -26,12 +27,12 @@ export function SettingsDialog({ settings, onClose, onSave }: { settings: Settin
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div className="dialog-header"><div><h2 id="settings-title">模型与调度</h2><span>{settings.apiKeyConfigured ? 'API Key 已配置' : 'API Key 未配置'}</span></div><button className="icon-button" type="button" onClick={onClose} aria-label="关闭设置" title="关闭"><X size={18} /></button></div>
+        <div className="dialog-header"><div><h2 id="settings-title">模型与调度</h2><span>{settings.apiKeyConfigured ? 'API Key 已配置' : 'API Key 未配置'}</span></div><Button variant="outline" size="icon" type="button" onClick={onClose} aria-label="关闭设置" title="关闭"><X size={18} /></Button></div>
         <div className="settings-grid">
           <div className="wide settings-section-label"><strong>文本模型</strong><small>使用 OpenAI 兼容的 Chat Completions 接口。模型列表探测失败时仍可直接手动输入模型名称。</small></div>
           <label><span>API Base URL / 完整接口</span><input value={value.apiBaseUrl} onChange={(event) => setValue({ ...value, apiBaseUrl: event.target.value })} placeholder="https://example.com/v1 或完整 /chat/completions 地址" /></label>
           <label><span>模型名称（可手动输入）</span><input value={value.model} onChange={(event) => setValue({ ...value, model: event.target.value })} placeholder="例如 gpt-4.1-mini" /></label>
-          <div className="model-discovery wide"><button className="secondary-button compact-button" type="button" onClick={() => void discoverModels()} disabled={modelsLoading}><>{modelsLoading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}获取模型列表</></button>{models.length > 0 && <select aria-label="选择已发现的模型" value={models.includes(value.model) ? value.model : ''} onChange={(event) => event.target.value && setValue({ ...value, model: event.target.value })}><option value="">从已发现模型中选择</option>{models.map((model) => <option value={model} key={model}>{model}</option>)}</select>}{modelsError && <small className="settings-inline-error">{modelsError}</small>}</div>
+          <div className="model-discovery wide"><Button variant="outline" className="compact-button" type="button" onClick={() => void discoverModels()} disabled={modelsLoading}><>{modelsLoading ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}获取模型列表</></Button>{models.length > 0 && <select aria-label="选择已发现的模型" value={models.includes(value.model) ? value.model : ''} onChange={(event) => event.target.value && setValue({ ...value, model: event.target.value })}><option value="">从已发现模型中选择</option>{models.map((model) => <option value={model} key={model}>{model}</option>)}</select>}{modelsError && <small className="settings-inline-error">{modelsError}</small>}</div>
           <label className="settings-checkbox"><span>流式响应</span><span className="settings-checkbox-control"><input type="checkbox" checked={value.streamingEnabled} onChange={(event) => setValue({ ...value, streamingEnabled: event.target.checked })} />启用 SSE 流式响应</span><small>启用后主模型请求会边生成边接收，可降低长请求触发上游网关超时的概率；仍会等完整结果通过校验后才写入草稿。</small></label>
           <label className="wide"><span>API Key</span><input type="password" value={value.apiKey} onChange={(event) => setValue({ ...value, apiKey: event.target.value })} placeholder={settings.apiKeyConfigured ? '留空则保持现有密钥' : '输入模型 API Key'} /></label>
           <div className="wide settings-section-label"><strong>图片编辑模型</strong><small>用于资源页“AI 图片汉化”，采用 OpenAI 兼容的 multipart 图片编辑接口，与文本翻译配置相互独立。</small></div>
@@ -49,7 +50,7 @@ export function SettingsDialog({ settings, onClose, onSave }: { settings: Settin
           <label><span>每批字符</span><input type="number" min="1000" step="500" value={value.batchChars} onChange={(event) => setValue({ ...value, batchChars: Number(event.target.value) })} /></label>
           <label><span>模型请求超时（秒）</span><input type="number" min="1" max="86400" step="1" value={value.requestTimeoutSeconds} onChange={(event) => setValue({ ...value, requestTimeoutSeconds: Number(event.target.value) })} /><small>单次文本模型请求的最长等待时间，超时后按任务重试策略处理。</small></label>
         </div>
-        <div className="dialog-actions"><button className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" onClick={() => void onSave(value)}><Save size={16} />保存设置</button></div>
+        <div className="dialog-actions"><Button variant="outline" onClick={onClose}>取消</Button><Button variant="default" onClick={() => void onSave(value)}><Save size={16} />保存设置</Button></div>
       </div>
     </div>
   );

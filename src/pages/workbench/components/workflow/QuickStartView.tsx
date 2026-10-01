@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { ArrowRight, FileUp, ScanSearch, Settings2, ShieldCheck } from 'lucide-react';
 import type { Settings } from '@/shared/types';
 
@@ -18,8 +19,8 @@ export function QuickStartView({ settings, onImport, onOpenSettings }: QuickStar
           <h2>从一张卡片开始</h2>
           <p>上传 CHARX、RISUM、PNG 或 JSON。工作台会先扫描结构，再让你选择翻译范围，最后逐条审核后导出。</p>
           <div className="quick-start-actions">
-            <button className="primary-button" onClick={onImport}><FileUp size={17} />选择卡片文件<ArrowRight size={15} /></button>
-            {!modelReady && <button className="secondary-button" onClick={onOpenSettings}><Settings2 size={16} />先配置模型</button>}
+            <Button variant="default" onClick={onImport}><FileUp size={17} />选择卡片文件<ArrowRight size={15} /></Button>
+            {!modelReady && <Button variant="outline" onClick={onOpenSettings}><Settings2 size={16} />先配置模型</Button>}
           </div>
           <span className="quick-start-hint">也可以直接把文件拖到窗口里</span>
         </div>

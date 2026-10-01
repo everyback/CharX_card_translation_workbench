@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Braces, Check, CircleAlert, LoaderCircle, RefreshCw, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { reconcileProtocolDraft } from '@/features/protocol/model/protocol-draft';
@@ -86,15 +87,15 @@ export function ProtocolsPage({
           <option value="approved">已采用</option>
           <option value="ignored">已忽略</option>
         </select>
-        <button className="secondary-button" disabled={busy} onClick={onDiscover}>
+        <Button variant="outline" disabled={busy} onClick={onDiscover}>
           {busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}重新发现
-        </button>
-        <button className="primary-button" disabled={busy || visibleAnalyzable.length === 0} onClick={() => onAnalyze(visibleAnalyzable.map((protocol) => protocol.id))}>
+        </Button>
+        <Button variant="default" disabled={busy || visibleAnalyzable.length === 0} onClick={() => onAnalyze(visibleAnalyzable.map((protocol) => protocol.id))}>
           <Sparkles size={16} />模型识别（{visibleAnalyzable.length}）
-        </button>
-        <button className="secondary-button" disabled={busy || activeTranslationJob || highConfidence.length === 0} onClick={() => onApproveHighConfidence(highConfidence.map((protocol) => protocol.id))}>
+        </Button>
+        <Button variant="outline" disabled={busy || activeTranslationJob || highConfidence.length === 0} onClick={() => onApproveHighConfidence(highConfidence.map((protocol) => protocol.id))}>
           <ShieldCheck size={16} />采用高置信度（{highConfidence.length}）
-        </button>
+        </Button>
         <span className="result-count">{filtered.length} 种</span>
       </div>
 
@@ -163,9 +164,9 @@ export function ProtocolsPage({
             </div>
 
             <div className="protocol-actions">
-              <button className="secondary-button" disabled={busy} onClick={() => onAnalyze([selected.id])}><Sparkles size={16} />重新判断</button>
-              <button className="secondary-button danger-ghost" disabled={busy || activeTranslationJob} onClick={() => onSave(selected.id, 'ignored', draftFields)}><X size={16} />忽略并重新扫描</button>
-              <button className="primary-button" disabled={busy || activeTranslationJob} onClick={() => onSave(selected.id, 'approved', draftFields)}><Check size={16} />采用并重新扫描</button>
+              <Button variant="outline" disabled={busy} onClick={() => onAnalyze([selected.id])}><Sparkles size={16} />重新判断</Button>
+              <Button variant="outline" className="danger-ghost" disabled={busy || activeTranslationJob} onClick={() => onSave(selected.id, 'ignored', draftFields)}><X size={16} />忽略并重新扫描</Button>
+              <Button variant="default" disabled={busy || activeTranslationJob} onClick={() => onSave(selected.id, 'approved', draftFields)}><Check size={16} />采用并重新扫描</Button>
             </div>
           </> : <div className="table-empty">先重新发现协议，再从左侧选择一种结构</div>}
         </div>

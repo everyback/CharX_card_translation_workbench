@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { scriptEditorSources, regexChanges } from './lib/script-editor';
 import { ApiError } from '@/shared/api/http';
 import { reconcileTextDraft } from '@/features/review/lib/text-draft';
@@ -606,7 +607,7 @@ export function LuaPage({
     return <section className="lua-management-section"><div className="table-empty">正在读取脚本诊断信息…</div></section>;
   }
   if (!report) {
-    return <section className="lua-management-section"><div className="table-empty">暂时无法读取脚本诊断信息。<button className="secondary-button" onClick={onRefresh}>重新读取诊断</button></div></section>;
+    return <section className="lua-management-section"><div className="table-empty">暂时无法读取脚本诊断信息。<Button variant="outline" onClick={onRefresh}>重新读取诊断</Button></div></section>;
   }
 
   return (
@@ -618,10 +619,10 @@ export function LuaPage({
           <p>选择工作区处理脚本；路径列表与代码各自滚动。</p>
         </div>
         <div className="lua-management-actions">
-          <button className="secondary-button" onClick={onRefresh} disabled={loading || editingChange}>
+          <Button variant="outline" onClick={onRefresh} disabled={loading || editingChange}>
             <RefreshCw className={loading ? 'spin' : ''} size={16} />刷新诊断
-          </button>
-          <button className="secondary-button" disabled={editingChange} onClick={() => setPanel('changes')}><Code2 size={16} />脚本编辑</button>
+          </Button>
+          <Button variant="outline" disabled={editingChange} onClick={() => setPanel('changes')}><Code2 size={16} />脚本编辑</Button>
         </div>
       </header>
 
@@ -644,8 +645,8 @@ export function LuaPage({
       {editingChange && <p className="lua-inline-save-message">正在编辑代码行，保存或取消后可切换路径与工作区。</p>}
 
       {reviewFocus && <div className="lua-focus-alert" role="status">
-        <div><strong>已过滤保存校验错误行</strong><span>{reviewFocus.pathLabel}{reviewFocus.originalMatches != null && reviewFocus.draftMatches != null ? ` · 匹配数 ${reviewFocus.originalMatches} → ${reviewFocus.draftMatches}` : ''}{reviewFocus.line ? ` · 第 ${reviewFocus.line} 行，第 ${reviewFocus.column ?? '?'} 列` : ''}</span><p>{reviewFocus.problem}</p>{reviewFocus.sourceLine && <code className="lua-focus-code-line">原始代码：{reviewFocus.sourceLine}</code>}{reviewFocus.draftLine && <code className="lua-focus-code-line current">当前稿：{reviewFocus.draftLine}</code>}<p><b>修正方案：</b>{reviewFocus.fixSuggestion}</p>{reviewFocus.line && <button type="button" className="secondary-button lua-locate-button" onClick={() => focusSyntaxEditor()}><Code2 size={14} />定位到 Lua 编辑器</button>}</div>
-        <button className="icon-button" title="关闭错误提示" aria-label="关闭错误提示" onClick={onClearReviewFocus}><X size={15} /></button>
+        <div><strong>已过滤保存校验错误行</strong><span>{reviewFocus.pathLabel}{reviewFocus.originalMatches != null && reviewFocus.draftMatches != null ? ` · 匹配数 ${reviewFocus.originalMatches} → ${reviewFocus.draftMatches}` : ''}{reviewFocus.line ? ` · 第 ${reviewFocus.line} 行，第 ${reviewFocus.column ?? '?'} 列` : ''}</span><p>{reviewFocus.problem}</p>{reviewFocus.sourceLine && <code className="lua-focus-code-line">原始代码：{reviewFocus.sourceLine}</code>}{reviewFocus.draftLine && <code className="lua-focus-code-line current">当前稿：{reviewFocus.draftLine}</code>}<p><b>修正方案：</b>{reviewFocus.fixSuggestion}</p>{reviewFocus.line && <Button type="button" variant="outline" className="lua-locate-button" onClick={() => focusSyntaxEditor()}><Code2 size={14} />定位到 Lua 编辑器</Button>}</div>
+        <Button variant="outline" size="icon" title="关闭错误提示" aria-label="关闭错误提示" onClick={onClearReviewFocus}><X size={15} /></Button>
       </div>}
 
       {regexEditor && <RegexEditorDialog
@@ -734,7 +735,7 @@ export function LuaPage({
                   ? '已由人工确认。需要改回原文或改成其他名称时，重新打开核对窗口即可。'
                   : '打开人工核对窗口后，保留原文或手动修改确认值。系统不判断这个字段是否可见，也不会跳转审核页。'}</span>
                 <div className="lua-namespace-decision-buttons">
-                  <button type="button" className="primary-button" disabled={loading || namespaceSaving} onClick={openNamespaceConfirmation}><Check size={14} />{namespaceConfirmed ? '重新人工核对' : '人工核对并确认'}</button>
+                  <Button type="button" variant="default" disabled={loading || namespaceSaving} onClick={openNamespaceConfirmation}><Check size={14} />{namespaceConfirmed ? '重新人工核对' : '人工核对并确认'}</Button>
                 </div>
               </div>
             </div>
@@ -764,9 +765,9 @@ export function LuaPage({
         <div className="lua-panel-header">
           <div><h2>静态正则校验</h2><span>仅显示可以在卡片文本中验证命中数的规则</span></div>
           <div className="lua-panel-header-actions">
-            <button className="secondary-button" onClick={() => void openRegexPreview()} disabled={loading || regexPreviewLoading || regexRunning || !regexReferenceCount}>
+            <Button variant="outline" onClick={() => void openRegexPreview()} disabled={loading || regexPreviewLoading || regexRunning || !regexReferenceCount}>
               {regexPreviewLoading ? <RefreshCw className="spin" size={14} /> : <ShieldCheck size={14} />}逐条分析
-            </button>
+            </Button>
           </div>
         </div>
         <div className="lua-static-regex-list">
@@ -842,7 +843,7 @@ export function LuaPage({
       </div>
 
       <div className="lua-maintenance-row" hidden={panel !== 'overview'}>
-        <button className="danger-button" onClick={() => void onResetLuaDraft()} disabled={loading || !report.hasModule} title="仅恢复 Lua 模块草稿，不影响卡片正文和翻译结果"><RotateCcw size={16} />恢复原始 Lua 草稿</button>
+        <Button variant="destructive" onClick={() => void onResetLuaDraft()} disabled={loading || !report.hasModule} title="仅恢复 Lua 模块草稿，不影响卡片正文和翻译结果"><RotateCcw size={16} />恢复原始 Lua 草稿</Button>
       </div>
 
       <div className="lua-footnote"><Code2 size={15} /><span>脚本管理页只处理脚本、正则和别名；可翻译文本统一在审核页修改，Lua 可在修改对比和语法问题中按真实代码行修改，保存后重新校验。</span></div>

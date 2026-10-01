@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { Check, RefreshCw, X } from 'lucide-react';
 import type { PortraitRouterRepairChange, PortraitRouterRepairPreview } from '@/shared/types';
 import { RouterCodePanel, compactCode } from './RouterCodePanel';
@@ -38,7 +39,7 @@ export function RouterPreviewDialog({
       <section className="router-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="router-preview-title">
         <header className="dialog-header">
           <div><h2 id="router-preview-title">路由修复修改对比</h2><span>仅显示检测到的局部修改，确认后才会写入卡片。</span></div>
-          <button className="icon-button" title="关闭" aria-label="关闭修改对比" disabled={applying} onClick={onClose}><X size={16} /></button>
+          <Button variant="outline" size="icon" title="关闭" aria-label="关闭修改对比" disabled={applying} onClick={onClose}><X size={16} /></Button>
         </header>
         <div className="router-preview-body">
           {preview.changes.map((change, index) => {
@@ -57,8 +58,8 @@ export function RouterPreviewDialog({
                     <span className="router-edit-label">修改点代码</span>
                     <textarea aria-label={`编辑${change.title}修改点`} value={editValue} onChange={(event) => onEditValueChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') onCancelEdit(); }} spellCheck={false} autoFocus />
                     <div className="router-edit-actions">
-                      <button className="secondary-button" onClick={onCancelEdit}><X size={14} />取消本项</button>
-                      <button className="primary-button" onClick={() => onSaveEdit(change, index)}><Check size={14} />保存本项</button>
+                      <Button variant="outline" onClick={onCancelEdit}><X size={14} />取消本项</Button>
+                      <Button variant="default" onClick={() => onSaveEdit(change, index)}><Check size={14} />保存本项</Button>
                     </div>
                   </div>
                 ) : (
@@ -73,8 +74,8 @@ export function RouterPreviewDialog({
           {!preview.changes.length && <div className="table-empty">预览时未发现仍可修改的路由代码，可能已被其他操作处理。</div>}
         </div>
         <footer className="dialog-actions router-preview-actions">
-          <button className="secondary-button" disabled={applying} onClick={onClose}><X size={16} />取消</button>
-          <button className="primary-button" disabled={applying || editingIndex !== null || !preview.changes.length} onClick={onApply}>{applying ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}人工检查通过，应用修改</button>
+          <Button variant="outline" disabled={applying} onClick={onClose}><X size={16} />取消</Button>
+          <Button variant="default" disabled={applying || editingIndex !== null || !preview.changes.length} onClick={onApply}>{applying ? <RefreshCw className="spin" size={16} /> : <Check size={16} />}人工检查通过，应用修改</Button>
         </footer>
       </section>
     </div>

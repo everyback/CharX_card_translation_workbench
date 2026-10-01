@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { AlertTriangle, FileKey2, FolderSearch, HardDrive, RefreshCw, Server, Unplug, X } from 'lucide-react';
 import { PatchDependencies } from './PatchDependencies';
@@ -158,11 +159,11 @@ export function RemotePatchPanel({ directAgentConfigured = false }: { directAgen
           <input ref={keyPicker} className="remote-key-picker" type="file" tabIndex={-1} aria-label="选择 SSH 私钥文件" onChange={(event) => { void importKey(event.target.files); event.target.value = ''; }} />
         </div>
       </div>
-      <div className="remote-target-heading"><strong>部署目标</strong><button type="button" className="secondary-button" disabled={busy || !host || !user || !keyFile} onClick={() => void probe()}><FolderSearch size={15} />扫描服务器</button></div>
+      <div className="remote-target-heading"><strong>部署目标</strong><Button type="button" variant="outline" disabled={busy || !host || !user || !keyFile} onClick={() => void probe()}><FolderSearch size={15} />扫描服务器</Button></div>
       {deployment === 'docker' ? <label className="remote-target-field">运行中的容器<select value={target} onChange={(event) => setTarget(event.target.value)} disabled={!inventory}><option value="">{inventory ? '选择容器' : '先扫描服务器'}</option>{inventory?.containers.map((item) => <option key={item} value={item}>{item}</option>)}</select></label> : <div className="remote-target-field"><label>检测到的项目目录<select value={inventory?.roots.includes(target) ? target : ''} onChange={(event) => setTarget(event.target.value)} disabled={!inventory}><option value="">{inventory ? '选择目录或在下方填写' : '先扫描服务器'}</option>{inventory?.roots.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>项目绝对目录<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder="/opt/risuai" autoComplete="off" /></label></div>}
-      <div className="remote-patch-footer"><span>连接信息保存在此浏览器。拖入的私钥暂存在本机工作台，断开连接或关闭工作台时删除；不会传到远程服务器。</span><button type="button" className="primary-button" disabled={busy || !host || !user || !keyFile || !target || (deployment === 'docker' && !inventory?.containers.includes(target))} onClick={() => void connect()}>连接所选目标</button></div>
+      <div className="remote-patch-footer"><span>连接信息保存在此浏览器。拖入的私钥暂存在本机工作台，断开连接或关闭工作台时删除；不会传到远程服务器。</span><Button type="button" variant="default" disabled={busy || !host || !user || !keyFile || !target || (deployment === 'docker' && !inventory?.containers.includes(target))} onClick={() => void connect()}>连接所选目标</Button></div>
     </> : <>
-      <div className="remote-connected"><div><strong>{status.deployment === 'docker' ? 'Docker 容器' : '项目目录'}</strong><span>{status.user}@{status.host} · {status.target}</span></div><button type="button" className="secondary-button" disabled={busy} onClick={() => void act(async () => { const next = await post<RemoteStatus>('disconnect', {}); setStatus(next); setDiscovery(null); setToken(null); if (keyFile.startsWith('ssh-key:')) { setKeyFile(''); setKeyLabel(''); setInventory(null); } })}><Unplug size={15} />更换目标</button></div>
+      <div className="remote-connected"><div><strong>{status.deployment === 'docker' ? 'Docker 容器' : '项目目录'}</strong><span>{status.user}@{status.host} · {status.target}</span></div><Button type="button" variant="outline" disabled={busy} onClick={() => void act(async () => { const next = await post<RemoteStatus>('disconnect', {}); setStatus(next); setDiscovery(null); setToken(null); if (keyFile.startsWith('ssh-key:')) { setKeyFile(''); setKeyLabel(''); setInventory(null); } })}><Unplug size={15} />更换目标</Button></div>
       <div className="patch-identity">{status.deployment === 'bare' ? '项目目录：仅核验文件，尚未关联运行实例；源码变更后需要重建。' : '运行容器：安装会构建新镜像并重建当前 Compose 服务。'}</div>
       {discovery && status.deployment === 'docker' && <div className="patch-identity"><span>RisuAI {discovery.identity?.version === 'unknown' || !discovery.identity ? '版本未识别' : discovery.identity.version}</span><span>容器状态：{discovery.identity?.health || '未核验'}</span><code>镜像 {discovery.image}</code></div>}
       <div className="patch-subtabs" role="tablist" aria-label="目标工作区">
@@ -177,14 +178,14 @@ export function RemotePatchPanel({ directAgentConfigured = false }: { directAgen
       <PatchDependencies patch={patch} />
       <div className={'patch-status ' + (phase === 'ready' || phase === 'current' ? 'success' : phase === 'error' || phase === 'dependencies' ? 'error' : '')} role="status">{phaseLabels[phase] || phaseLabels.idle}</div>
       <fieldset disabled={busy} className="patch-target-controls"><legend>目标文件</legend>
-      <button type="button" className="secondary-button" onClick={() => void discover()}><RefreshCw size={15} />读取 / 刷新文件</button>
+      <Button type="button" variant="outline" onClick={() => void discover()}><RefreshCw size={15} />读取 / 刷新文件</Button>
       <div className="patch-agent-form">
         {discovery && roles[patch].map((role) => <label key={role}>{role === 'frontend' ? '前端文件' : role === 'server' ? '服务端文件' : '源码文件'}<select value={files[role] || ''} onChange={(event) => { setFiles((current) => ({ ...current, [role]: event.target.value })); setToken(null); }}><option value="">选择目标</option>{discovery.targets.filter((item) => item.role === role).map((item) => <option key={item.file} value={item.file}>{item.file} · {item.hash.slice(0, 12)}</option>)}</select></label>)}
       </div>
       </fieldset>
       {discovery && roles[patch].some((role) => discovery.targets.filter((item) => item.role === role).length > 1) && <p className="patch-agent-help">找到多个同类文件，请核对 RisuAI 页面实际引用的资源后手动选择。</p>}
       {discovery && !roles[patch].every((role) => files[role]) && <div className="plugin-limited-access" role="note"><AlertTriangle size={18} /><div>当前目标缺少此补丁需要的文件，不能预检或安装。</div></div>}
-      <div className="plugin-install-actions"><button type="button" className="secondary-button" disabled={busy || !discovery || !roles[patch].every((role) => files[role])} onClick={() => void preflight()}>预检兼容性</button><button type="button" className="primary-button" disabled={busy || !token} onClick={() => void apply()}>{status.deployment === 'bare' ? '备份并安装文件' : '构建并安装到 RisuAI'}</button></div>
+      <div className="plugin-install-actions"><Button type="button" variant="outline" disabled={busy || !discovery || !roles[patch].every((role) => files[role])} onClick={() => void preflight()}>预检兼容性</Button><Button type="button" variant="default" disabled={busy || !token} onClick={() => void apply()}>{status.deployment === 'bare' ? '备份并安装文件' : '构建并安装到 RisuAI'}</Button></div>
       <details className="patch-verification"><summary>安装后核验</summary><p>{activePatch?.verify}</p></details>
       </section></div>}
     </>}

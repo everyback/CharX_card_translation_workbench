@@ -37,14 +37,44 @@ export function useTranslationTasks({
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
   const jobRequestRef = useRef(0);
-  const clearJobDetail = useCallback(() => setJobDetail(null), []);
-
-  const loadJob = useCallback(async (jobId: string, expectedProjectId = selectedProjectIdRef.current) => {
-    const request = ++jobRequestRef.current;
-    const detail = await api<Job>(`/api/jobs/${jobId}`);
-    if (request !== jobRequestRef.current || selectedProjectIdRef.current !== expectedProjectId || detail.projectId !== expectedProjectId) return;
-    setJobDetail(detail);
+  const [loadingJobId, setLoadingJobId] = useState('');
+  const foregroundRequestRef = useRef(0);
+  const clearJobDetail = useCallback(() => {
+    jobRequestRef.current += 1;
+    foregroundRequestRef.current = 0;
+    setLoadingJobId('');
+    setJobDetail(null);
   }, []);
+
+  const loadJob = useCallback(async (jobId: string, expectedProjectId = selectedProjectIdRef.current, foreground = false) => {
+    // A polling response must never supersede a user's pending selection.
+    if (!foreground && foregroundRequestRef.current) return;
+    const request = ++jobRequestRef.current;
+    if (foreground) {
+      foregroundRequestRef.current = request;
+      setLoadingJobId(jobId);
+    }
+    try {
+      const detail = await api<Job>(`/api/jobs/${jobId}`);
+      if (request !== jobRequestRef.current || selectedProjectIdRef.current !== expectedProjectId || detail.projectId !== expectedProjectId) return;
+      setJobDetail(detail);
+    } finally {
+      if (foregroundRequestRef.current === request) {
+        foregroundRequestRef.current = 0;
+        setLoadingJobId('');
+      }
+    }
+  }, []);
+
+  const selectJob = useCallback(async (job: Job) => {
+    if (job.projectId !== selectedProjectIdRef.current) return;
+    setJobDetail(job);
+    try {
+      await loadJob(job.id, job.projectId, true);
+    } catch (error) {
+      if (selectedProjectIdRef.current === job.projectId) onError(error);
+    }
+  }, [loadJob, onError]);
 
   const startTranslation = useCallback(async () => {
     if (!project) return;
@@ -166,6 +196,8 @@ export function useTranslationTasks({
 
   useEffect(() => {
     jobRequestRef.current += 1;
+    foregroundRequestRef.current = 0;
+    setLoadingJobId('');
     setJobDetail((current) => current && current.projectId === selectedProjectId ? current : null);
   }, [selectedProjectId]);
 
@@ -194,6 +226,8 @@ export function useTranslationTasks({
 
   return {
     jobDetail,
+    loadingJobId,
+    selectJob,
     clearJobDetail,
     loadJob,
     startTranslation,

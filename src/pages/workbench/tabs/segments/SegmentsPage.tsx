@@ -1,3 +1,5 @@
+import { memo, useState } from 'react';
+import { Button } from '@/shared/ui/button/Button';
 import { Link2, Search } from 'lucide-react';
 import { RiskBadge } from '@/entities/segment/ui/RiskBadge';
 import { CATEGORY_LABELS, KIND_LABELS } from '@/entities/segment/model/labels';
@@ -5,7 +7,7 @@ import { STATUS_LABELS } from '@/entities/project/model/status-labels';
 import type { Segment } from '@/shared/types';
 import type { SegmentSearchScope } from '@/features/segment-filter/model/useSegmentFilters';
 
-export function SegmentsPage({
+export const SegmentsPage = memo(function SegmentsPage({
   segments,
   query,
   searchScope,
@@ -30,6 +32,13 @@ export function SegmentsPage({
   onToggle: (segment: Segment) => void;
   onSelect: (segment: Segment) => void;
 }) {
+  const [page, setPage] = useState(0);
+  const [filterKey, setFilterKey] = useState('');
+  const nextKey = JSON.stringify([query, searchScope, statusFilter, kindFilter]);
+  if (filterKey !== nextKey) { setFilterKey(nextKey); setPage(0); }
+  const pageSize = 100;
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(segments.length / pageSize) - 1));
+  const start = currentPage * pageSize;
   return (
     <section className="table-section">
       <div className="table-toolbar">
@@ -53,11 +62,12 @@ export function SegmentsPage({
         </select>
         <span className="result-count">{segments.length} 条</span>
       </div>
+      <div className="segment-pagination"><span role="status">共 {segments.length} 条 · 当前 {segments.length ? start + 1 : 0}–{Math.min(start + pageSize, segments.length)} 条，筛选作用于全部段落</span><Button disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</Button><Button disabled={start + pageSize >= segments.length} onClick={() => setPage(currentPage + 1)}>下一页</Button></div>
       <div className="data-table">
         <div className="table-head">
           <span>选择</span><span>字段</span><span>原文</span><span>译文</span><span>风险</span><span>状态</span>
         </div>
-        {segments.map((segment) => (
+        {segments.slice(start, start + pageSize).map((segment) => (
           <div className="table-row" key={segment.id} onDoubleClick={() => onSelect(segment)}>
             <span><input type="checkbox" checked={segment.included} onChange={() => onToggle(segment)} aria-label={`选择 ${segment.pathLabel}`} /></span>
             <span className="field-cell">
@@ -79,4 +89,4 @@ export function SegmentsPage({
       </div>
     </section>
   );
-}
+});

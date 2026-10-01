@@ -1,3 +1,4 @@
+import { Button } from '@/shared/ui/button/Button';
 import { workflowState } from '../model/workflow-state';
 import { ChevronDown, LoaderCircle, Play, Search } from 'lucide-react';
 import { SCOPE_OPTIONS } from '../model/scope';
@@ -40,17 +41,17 @@ export function TranslationCommandBar({
           <ChevronDown size={15} />
         </div>
       </label>
-      <button
-        className="secondary-button"
+      <Button
+        variant="outline"
         onClick={onScan}
         disabled={Boolean(busy) || activeTranslationJob}
         title={activeTranslationJob ? '翻译任务进行中，完成或取消后才能重新扫描' : undefined}
       >
         {busy === 'scan' ? <LoaderCircle className="spin" size={16} /> : <Search size={16} />}扫描字段
-      </button>
-      <button className="primary-button" onClick={onStartTranslation} disabled={Boolean(busy) || !running && (scopeChanged || !workflow.canStart)}>
+      </Button>
+      <Button variant="default" onClick={onStartTranslation} disabled={Boolean(busy) || !running && (scopeChanged || !workflow.canStart)}>
         {busy === 'start' ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}{running ? '查看翻译进度' : workflow.retryAction ? workflow.latest?.failedItems ? '重试失败项与阶段 2' : '重试阶段 2' : workflow.resumable ? '继续翻译' : workflow.canStart ? '开始翻译' : '没有待翻译项'}
-      </button>
+      </Button>
       {scopeChanged && <span className="scope-change-note" role="status">范围已变化，请重新扫描；已有译文会保留。</span>}
       <div className="command-spacer" />
       <span className="model-name">{settings?.model || '未配置模型'}</span>

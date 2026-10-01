@@ -1,4 +1,5 @@
-import { useEffect, useState, type ComponentProps } from 'react';
+import { memo, useEffect, useState, type ComponentProps } from 'react';
+import { LoaderCircle } from 'lucide-react';
 import type { Tab } from '@/shared/types';
 import { ProjectOverviewPage } from '../tabs/overview/ProjectOverviewPage';
 import { GlossaryPage } from '../tabs/glossary/GlossaryPage';
@@ -51,6 +52,10 @@ function renderTabContent(tab: WorkspaceTab, content: Omit<WorkspaceTabContentPr
   }
 }
 
+const RetainedPane = memo(function RetainedPane({ active, tab, content }: { active: boolean; tab: WorkspaceTab; content: Omit<WorkspaceTabContentProps, 'tab'> }) {
+  return <div className="workspace-tab-pane" aria-label={tab} hidden={!active}>{renderTabContent(tab, content)}</div>;
+}, (previous, next) => !previous.active && !next.active);
+
 export function WorkspaceTabContent({
   tab,
   overview,
@@ -63,19 +68,26 @@ export function WorkspaceTabContent({
   lua,
   resources,
 }: WorkspaceTabContentProps) {
-  const [mountedTabs, setMountedTabs] = useState<Set<WorkspaceTab>>(() => new Set([tab]));
+  const [readyTab, setReadyTab] = useState<WorkspaceTab | null>(null);
+  const pending = (tab === 'segments' || tab === 'jobs') && readyTab !== tab;
+  useEffect(() => {
+    // Give the browser a paint before mounting a potentially expensive page.
+    const first = requestAnimationFrame(() => { second = requestAnimationFrame(() => setReadyTab(tab)); });
+    let second = 0;
+    return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
+  }, [tab]);
+  const [mountedTabs, setMountedTabs] = useState<Set<WorkspaceTab>>(() => new Set(tab === 'segments' || tab === 'jobs' ? [] : [tab]));
 
   useEffect(() => {
-    setMountedTabs((current) => current.has(tab) ? current : new Set([...current, tab]));
-  }, [tab]);
+    if (!pending) setMountedTabs((current) => current.has(tab) ? current : new Set([...current, tab]));
+  }, [tab, pending]);
 
   const content = { overview, segments, jobs, review, glossary, references, protocols, lua, resources };
   const tabsToRender = TAB_ORDER.filter((candidate) => candidate === tab || mountedTabs.has(candidate));
   return <>
-    {tabsToRender.map((candidate) => (
-      <div key={candidate} className="workspace-tab-pane" hidden={candidate !== tab}>
-        {renderTabContent(candidate, content)}
-      </div>
+    {pending && <div className="tab-loading-status" role="status" aria-live="polite"><LoaderCircle className="spin" size={20} /><div><strong>{tab === 'segments' ? '正在准备翻译内容…' : '正在准备翻译任务…'}</strong><p>{tab === 'segments' ? `正在整理 ${segments.segments.length} 条段落，完成后分页面显示。` : '正在整理任务进度与运行日志，请稍候。'}</p></div></div>}
+    {tabsToRender.filter(candidate => !(pending && candidate === tab && !mountedTabs.has(candidate))).map((candidate) => (
+      <RetainedPane key={candidate} active={candidate === tab && !pending} tab={candidate} content={content} />
     ))}
   </>;
 }

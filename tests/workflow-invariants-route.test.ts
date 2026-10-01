@@ -198,6 +198,21 @@ test('workflow invariants through isolated HTTP and mock-model requests', async 
       assert.equal(result.status, 409);
       assert.equal((await result.json() as { code: string }).code, 'MODULE_REVIEW_CONFLICT');
       assert.equal((await db.prepare('SELECT draft_module_json FROM projects WHERE id=?').get(id))?.draft_module_json, JSON.stringify(current));
+      const pathJson = '["trigger",0,"effect",0,"code"]';
+      const stale = await request(`/api/projects/${id}/lua/syntax-line`, 'PATCH', {
+        pathJson, line: 1, expectedLine: 'outdated', replacement: 'return "Hello"',
+      });
+      assert.equal(stale.status, 409);
+      const edited = await request(`/api/projects/${id}/lua/syntax-line`, 'PATCH', {
+        pathJson, line: 1, expectedLine: 'return "人工文字"', replacement: 'return "修订人工文字"',
+      });
+      assert.equal(edited.status, 200);
+      assert.equal((await request(`/api/projects/${id}/export`)).status, 409);
+      const restored = await request(`/api/projects/${id}/lua/syntax-line`, 'PATCH', {
+        pathJson, line: 1, expectedLine: 'return "修订人工文字"', replacement: 'return "Hello"',
+      });
+      assert.equal(restored.status, 200);
+      assert.equal((await request(`/api/projects/${id}/export`)).status, 200);
     });
   } finally {
     releaseFirst();
