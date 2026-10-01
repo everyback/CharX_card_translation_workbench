@@ -68,9 +68,11 @@ async function boot(): Promise<void> {
 
   const root = applicationRoot();
   const data = dataRoot();
-  const serverEntry = path.join(root, 'dist-server', 'server', 'index.js');
+  // Workers and external patch scripts require physical filesystem paths.
+  const runtimeRoot = app.isPackaged ? `${root}.unpacked` : root;
+  const serverEntry = path.join(runtimeRoot, 'dist-server', 'server', 'index.js');
   const webRoot = path.join(root, 'dist');
-  const nodeModulesRoot = path.join(root, 'node_modules');
+  const nodeModulesRoot = path.join(runtimeRoot, 'node_modules');
 
   loadingWindow = createLoadingWindow();
   loadingWindow.on('closed', () => { loadingWindow = null; });
@@ -90,7 +92,7 @@ async function boot(): Promise<void> {
   process.env.WORKBENCH_DATA_DIR = data;
   process.env.WORKBENCH_WEB_DIR = webRoot;
   process.env.WORKBENCH_NODE_MODULES_DIR = nodeModulesRoot;
-  process.env.WORKBENCH_PATCH_INSTALLER_PATH = path.join(root, 'patches', 'risuai', 'install.mjs');
+  process.env.WORKBENCH_PATCH_INSTALLER_PATH = path.join(runtimeRoot, 'patches', 'risuai', 'install.mjs');
 
   await loadingStage(16, 48, '初始化本地数据库', async () => {
     server = await import(pathToFileURL(serverEntry).href) as WorkbenchServerModule;

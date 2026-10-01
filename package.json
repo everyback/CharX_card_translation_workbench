@@ -1,6 +1,6 @@
 {
   "name": "card-translation-workbench",
-  "version": "0.2.1-ocr-free.1",
+  "version": "0.2.1-slim.1",
   "private": true,
   "license": "GPL-3.0-or-later",
   "type": "module",
@@ -26,15 +26,15 @@
     "fastify": "^5.0.0",
     "fflate": "^0.8.3",
     "luaparse": "^0.3.1",
-    "lucide-react": "^0.468.0",
     "msgpackr": "^2.1.0",
     "png-chunk-text": "^1.0.0",
     "png-chunks-encode": "^1.0.0",
-    "png-chunks-extract": "^1.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "png-chunks-extract": "^1.0.0"
   },
   "devDependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "@types/luaparse": "^0.2.13",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
@@ -63,7 +63,10 @@
   "build": {
     "appId": "com.cardloom.translate",
     "productName": "CardLoom Translate",
-    "asar": false,
+    "asar": true,
+    "asarUnpack": ["dist-server/**/*", "node_modules/**/*", "patches/**/*", "package.json"],
+    "electronLanguages": ["zh-CN", "zh-TW", "ko", "ja", "en-US"],
+    "compression": "maximum",
     "directories": {
       "output": "release"
     },

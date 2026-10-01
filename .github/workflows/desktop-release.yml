@@ -55,17 +55,45 @@ jobs:
       - name: Build portable package
         run: npx electron-builder --win portable --publish never
 
-      - name: Verify desktop package excludes OCR
+      - name: Verify slim desktop package
         shell: pwsh
         run: |
-          $appRoot = 'release/win-unpacked/resources/app'
+          $appRoot = 'release/win-unpacked/resources/app.asar.unpacked'
+          if (-not (Test-Path 'release/win-unpacked/resources/app.asar')) { throw 'ASAR archive is missing' }
+          foreach ($requiredPath in @('package.json', 'dist-server/server/db-worker.js', 'patches/risuai/install.mjs')) {
+            if (-not (Test-Path "$appRoot/$requiredPath")) { throw "Required runtime file is missing: $requiredPath" }
+          }
           if (-not (Test-Path "$appRoot/dist-server/server/index.js")) {
             throw 'Packaged backend entry is missing'
           }
-          foreach ($removedPath in @('node_modules/tesseract.js', 'node_modules/tesseract.js-core', 'dist-server/server/domain/resources/ocr.js')) {
+          foreach ($removedPath in @('node_modules/react', 'node_modules/react-dom', 'node_modules/lucide-react', 'node_modules/tesseract.js', 'node_modules/tesseract.js-core', 'dist-server/server/domain/resources/ocr.js')) {
             if (Test-Path "$appRoot/$removedPath") {
               throw "Removed OCR component is still packaged: $removedPath"
             }
+          }
+          $locales = @(Get-ChildItem 'release/win-unpacked/locales/*.pak' | ForEach-Object BaseName | Sort-Object)
+          if (($locales -join ',') -ne 'en-US,ja,ko,zh-CN,zh-TW') { throw "Unexpected locales: $locales" }
+
+      - name: Smoke test packaged backend and frontend
+        shell: pwsh
+        run: |
+          $desktopProcess = Start-Process -FilePath 'release/win-unpacked/CardLoom Translate.exe' -WindowStyle Hidden -PassThru
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              if ($desktopProcess.HasExited) { throw 'Packaged application exited before startup' }
+              try {
+                Invoke-RestMethod 'http://127.0.0.1:8787/api/health' | Out-Null
+                $ready = $true
+                break
+              } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $ready) { throw 'Packaged application did not become healthy' }
+            Invoke-RestMethod 'http://127.0.0.1:8787/api/projects' | Out-Null
+            $page = Invoke-WebRequest 'http://127.0.0.1:8787/'
+            if ($page.Content -notmatch '<div id="root">') { throw 'Packaged frontend is missing' }
+          } finally {
+            if (-not $desktopProcess.HasExited) { Stop-Process -Id $desktopProcess.Id -Force }
           }
 
       - name: Upload portable EXE
