@@ -369,6 +369,61 @@ test('Risu HTML text extraction keeps visible labels between nested template mac
   );
 });
 
+test('Risu action attributes stay fixed while nearby HTML copy is translated', () => {
+  const module = {
+    regex: [{ in: 'PANEL', out: '<style>.choice > span{color:red}</style><button class="choice" risu-trigger="Panel77_SetMode_small" data-action="set-mode" data-tooltip="Choose mode">Choose mode</button><button risu-btn="HUD_ResetLoop">Reset</button>' }],
+    trigger: [{ effect: [{ code: 'function Panel77_SetMode_small(id) return id end' }] }],
+  };
+  const segments = scanRisuModule(module, 'all-visible');
+  assert.deepEqual(segments.map((segment) => segment.sourceText), ['Choose mode', 'Choose mode', 'Reset']);
+  const approved = segments.map((segment) => ({
+    pathJson: JSON.stringify(segment.path.slice(1)),
+    start: segment.start,
+    end: segment.end,
+    sourceText: segment.sourceText,
+    translatedText: segment.sourceText === 'Reset' ? '重置' : '选择模式',
+    finalText: null,
+    reviewStatus: 'approved',
+    kind: segment.kind,
+  }));
+  const draft = applyRisuModuleSegments(module, approved).draft;
+  assert.match((draft.regex as Array<{ out: string }>)[0].out, /risu-trigger="Panel77_SetMode_small"/u);
+  assert.match((draft.regex as Array<{ out: string }>)[0].out, /risu-btn="HUD_ResetLoop"/u);
+  assert.deepEqual(validateRisuControlReferences({}, {}, module, draft), []);
+
+  const broken = structuredClone(draft);
+  (broken.regex as Array<{ out: string }>)[0].out = (broken.regex as Array<{ out: string }>)[0].out
+    .replace('Panel77_SetMode_small', 'Panel77_Set模式_small')
+    .replace('HUD_ResetLoop', 'HUD_重置Loop');
+  assert.match(validateRisuControlReferences({}, {}, module, broken)[0]?.message ?? '', /HTML 控制属性/u);
+
+  const changedData = structuredClone(draft);
+  (changedData.regex as Array<{ out: string }>)[0].out = (changedData.regex as Array<{ out: string }>)[0].out
+    .replace('data-action="set-mode"', 'data-action="设置模式"');
+  assert.match(validateRisuControlReferences({}, {}, module, changedData)[0]?.message ?? '', /HTML 控制属性/u);
+
+  const changedCss = structuredClone(draft);
+  (changedCss.regex as Array<{ out: string }>)[0].out = (changedCss.regex as Array<{ out: string }>)[0].out
+    .replace('.choice > span', '.选择 > span');
+  assert.match(validateRisuControlReferences({}, {}, module, changedCss)[0]?.message ?? '', /script\/style/u);
+
+  const missingCallback = structuredClone(module);
+  (missingCallback.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code = 'function AnotherCallback(id) return id end';
+  assert.match(validateRisuControlReferences({}, {}, module, missingCallback)[0]?.message ?? '', /静态 Lua 回调/u);
+  (missingCallback.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code = '';
+  assert.match(validateRisuControlReferences({}, {}, module, missingCallback)
+    .map((issue) => issue.message).join('\n'), /Lua 回调定义已丢失/u);
+});
+
+test('nested CBS macros are protected as complete tokens', () => {
+  const source = '{{#if {{equal::{{getvar::mode}}::1}}}}Story{{/if}}';
+  const protectedValue = protectText(source);
+  assert.equal(protectedValue.tokens[0], '{{#if {{equal::{{getvar::mode}}::1}}}}');
+  assert.equal(protectedValue.protectedText, '__CTW_KEEP_0__Story__CTW_KEEP_1__');
+  assert.equal(restoreProtectedText(protectedValue.protectedText.replace('Story', '故事'), protectedValue.tokens),
+    '{{#if {{equal::{{getvar::mode}}::1}}}}故事{{/if}}');
+});
+
 test('Risu control references include regex triggers and scoped Lua control strings', () => {
   const module = {
     regex: [{ in: '\\[시나리오선택\\]', out: '<div>{{button::열기::OpenScenario}}</div>' }],

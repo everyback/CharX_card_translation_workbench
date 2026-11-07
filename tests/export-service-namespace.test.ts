@@ -80,6 +80,46 @@ async function createNamespaceDatabase(): Promise<{ database: AsyncDatabase; dir
   return { database, directory };
 }
 
+test('export blocks changed Risu action attributes without rewriting the stored draft', async () => {
+  const { database, directory } = await createNamespaceDatabase();
+  const originalModule = {
+    regex: [{ type: 'editdisplay', in: 'PANEL', out: '<button risu-trigger="View42_Open">Open</button>' }],
+    trigger: [{ effect: [{ code: 'function View42_Open(id) return id end' }] }],
+  };
+  const draftModule = structuredClone(originalModule);
+  draftModule.regex[0].out = '<button risu-trigger="View42_打开">打开</button>';
+  const storedDraft = JSON.stringify(draftModule);
+  try {
+    await database.prepare(`
+      INSERT INTO projects(id, original_json, draft_json, original_module_json, draft_module_json,
+        source_format, status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('action-guard', '{}', '{}', JSON.stringify(originalModule), storedDraft,
+      'risum', 'ready', '2026-09-03T00:00:00.000Z');
+    const service = createExportService({
+      database,
+      clock: () => '2026-09-03T00:00:00.000Z',
+      targetLanguage: () => 'zh-CN',
+      review: {
+        projectLanguageBehaviorIssue: async () => null,
+        approvedSegmentProtectionIssue: async () => null,
+        resolveMirroredModuleLorebookFailures: async () => {},
+      },
+    });
+    await assert.rejects(service.exportProject('action-guard'), (error: unknown) =>
+      error instanceof ProjectWorkflowError
+      && error.statusCode === 409
+      && error.payload.pathLabel === '模块.regex.0.out');
+    const row = await database.prepare<{ draft: string }>(
+      'SELECT draft_module_json AS draft FROM projects WHERE id = ?',
+    ).get('action-guard');
+    assert.equal(row?.draft, storedDraft);
+  } finally {
+    await database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('application blocks an unreviewed Mahou Shoujo namespace stored without the module path prefix', async () => {
   const { database, directory } = await createNamespaceDatabase();
   const module = {

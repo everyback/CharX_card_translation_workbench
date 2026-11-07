@@ -1,4 +1,6 @@
 import { textAttributes, escapeTextAttribute, MARKUP_TOKEN_SOURCE } from './text-attributes.js';
+import { nonVisibleMarkupRanges } from './html-controls.js';
+import { risuActionIntegrityIssues } from './risu-actions.js';
 import { createHash } from 'node:crypto';
 import { parse } from 'luaparse';
 import { parseProtocols, protocolMatchesForText, type ProtocolSchemaRule } from '../protocol/protocol.js';
@@ -675,6 +677,7 @@ export function validateRisuControlReferences(
       });
     }
   }
+  for (const issue of risuActionIntegrityIssues(originalModule, draftModule)) report(issue);
   return issues;
 }
 
@@ -1602,7 +1605,14 @@ export function protectText(text: string, extraFragments: readonly string[] = []
   };
 
   const structuredText = protectNaturalStatusPayloads(text, keep);
-  const protectedText = structuredText.replace(protectedPattern(extraFragments), (fragment) => {
+  let macroProtectedText = '';
+  let macroCursor = 0;
+  for (const macro of templateMacros(structuredText, true)) {
+    macroProtectedText += structuredText.slice(macroCursor, macro.start) + keep(structuredText.slice(macro.start, macro.end));
+    macroCursor = macro.end;
+  }
+  macroProtectedText += structuredText.slice(macroCursor);
+  const protectedText = macroProtectedText.replace(protectedPattern(extraFragments), (fragment) => {
     const attributes = textAttributes(fragment);
     if (!attributes.length || extraFragments.includes(fragment)) return keep(fragment);
     let result = '';
@@ -2052,7 +2062,10 @@ function extractVisibleText(
 ): ScannedSegment[] {
   const segments: ScannedSegment[] = [];
   const risk = category === 'script-ui' ? 'high' : 'medium';
-  const hiddenRanges = hiddenContentRanges(source);
+  const hiddenRanges = mergeRanges([
+    ...hiddenContentRanges(source),
+    ...nonVisibleMarkupRanges(source).map(({ start, end }) => ({ start, end })),
+  ]);
   const patterns: Array<{ kind: ScannedSegment['kind']; regex: RegExp; group: number }> = [
     { kind: 'button', regex: /\{\{button::([\s\S]*?)::[\w.-]+\}\}/g, group: 1 },
     { kind: 'text-node', regex: />([^<>]*[A-Za-z\u3040-\u30ff\uac00-\ud7af][^<>]*)</g, group: 1 },

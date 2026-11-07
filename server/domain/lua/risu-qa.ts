@@ -1,3 +1,5 @@
+import { missingRisuActionCallbacks } from '../card/risu-actions.js';
+
 export interface RisuTemplateIssue {
   pathLabel: string;
   message: string;
@@ -42,6 +44,12 @@ export function validateRisuTemplateChanges(
  */
 export function detectRisuRuntimeRisks(module: Record<string, unknown>): RisuRuntimeRisk[] {
   const risks: RisuRuntimeRisk[] = [];
+  for (const reference of missingRisuActionCallbacks(module)) {
+    risks.push({
+      pathLabel: reference.pathLabel,
+      message: `按钮动作 ${reference.name} 找不到静态 Lua 回调定义；若由运行时动态注册，请人工核对。`,
+    });
+  }
   for (const [pathJson, source] of collectLuaCode(module)) {
     const reads = [...source.matchAll(/getChatVar\s*\([^\n]*["'](?:prisoner_list|soldier_list)["'][^\n]*\)/gu)];
     if (!reads.length) continue;
