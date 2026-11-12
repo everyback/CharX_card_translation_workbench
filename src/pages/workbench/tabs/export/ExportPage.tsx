@@ -2,6 +2,7 @@ import { Button } from '@/shared/ui/button/Button';
 import { ArrowRight, Check, CircleAlert, Code2, Download, FileArchive, Save, ShieldCheck } from 'lucide-react';
 import type { ProjectDetail } from '@/shared/types';
 import { workflowState } from '@/features/translation/model/workflow-state';
+import { IdentifierRepairPanel } from '@/features/identifier-repair/IdentifierRepairPanel';
 
 export function ExportPage({ project, busy, onReview, onJobs, onScripts, onApplyDraft, onSaveAndExport }: {
   project: ProjectDetail; busy: string; onReview: () => void; onJobs: () => void;
@@ -21,5 +22,6 @@ export function ExportPage({ project, busy, onReview, onJobs, onScripts, onApply
       <div className="export-actions"><Button variant="outline" disabled={disabled} onClick={onApplyDraft}><Save size={16} />仅保存审核稿</Button><Button variant="default" disabled={disabled} onClick={onSaveAndExport}><Download size={16} />保存并导出</Button></div>
     </div>
     <aside className="export-summary"><span className="section-eyebrow">本次导出</span><h3>{project.translatedName || project.originalName || project.name}</h3><dl><div><dt>原始名称</dt><dd>{project.originalName}</dd></div><div><dt>文件格式</dt><dd>{project.sourceFormat.toUpperCase()}</dd></div><div><dt>语言方向</dt><dd>{project.sourceLanguage} → {project.targetLanguage}</dd></div></dl><p><Check size={15} />保留世界书原始触发词</p><p><Check size={15} />保留变量、脚本与资源引用</p><p><Check size={15} />未审核内容保留原文</p><small>导出完成后，请在目标客户端打开卡片，复核显示和交互。</small></aside>
+    <IdentifierRepairPanel key={`identifier-repair-${project.id}`} />
   </section>;
 }

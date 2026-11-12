@@ -409,7 +409,8 @@ test('Risu action attributes stay fixed while nearby HTML copy is translated', (
 
   const missingCallback = structuredClone(module);
   (missingCallback.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code = 'function AnotherCallback(id) return id end';
-  assert.match(validateRisuControlReferences({}, {}, module, missingCallback)[0]?.message ?? '', /静态 Lua 回调/u);
+  assert.match(validateRisuControlReferences({}, {}, module, missingCallback)
+    .map((issue) => issue.message).join('\n'), /静态 Lua 回调/u);
   (missingCallback.trigger as Array<{ effect: Array<{ code: string }> }>)[0].effect[0].code = '';
   assert.match(validateRisuControlReferences({}, {}, module, missingCallback)
     .map((issue) => issue.message).join('\n'), /Lua 回调定义已丢失/u);

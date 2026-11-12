@@ -1,5 +1,6 @@
 import { parse } from 'luaparse';
 import { htmlControlAttributes, nonVisibleMarkupRanges } from './html-controls.js';
+import { luaIdentifierNames, missingControlTokens } from './runtime-structure.js';
 
 interface ActionReference {
   pathLabel: string;
@@ -30,18 +31,25 @@ function staticActionReferences(module: Record<string, unknown>): ActionReferenc
 export function risuActionIntegrityIssues(
   original: Record<string, unknown>,
   draft: Record<string, unknown>,
+  label = '模块',
 ): ActionIssue[] {
   const issues: ActionIssue[] = [];
   const originalStrings = moduleStrings(original);
   const draftStrings = moduleStrings(draft);
   for (const pathJson of new Set([...originalStrings.keys(), ...draftStrings.keys()])) {
-    const source = originalStrings.get(pathJson) ?? '';
+    const pathLabel = `${label}.${(JSON.parse(pathJson) as Array<string | number>).join('.')}`;
+    let source = originalStrings.get(pathJson) ?? '';
+    if (label === '模块' && typeof original.namespace === 'string' && typeof draft.namespace === 'string'
+      && original.namespace && draft.namespace && original.namespace !== draft.namespace) {
+      source = source.replace(/(module_?(?:assetlist|enabled)::)([^:}]+)/gu,
+        (whole, prefix: string, name: string) => name === original.namespace ? prefix + draft.namespace : whole);
+    }
     const candidate = draftStrings.get(pathJson) ?? '';
     const sourceAttributes = htmlControlAttributes(source);
     const draftAttributes = htmlControlAttributes(candidate);
     if (sourceAttributes.length && JSON.stringify(sourceAttributes) !== JSON.stringify(draftAttributes)) {
       issues.push({
-        pathLabel: modulePathLabel(pathJson),
+        pathLabel,
         message: 'HTML 控制属性发生变化；请只翻译可见文案，保留按钮动作和结构属性。',
       });
     }
@@ -49,9 +57,20 @@ export function risuActionIntegrityIssues(
     const draftCode = nonVisibleMarkupRanges(candidate).map((range) => range.text);
     if (sourceCode.length && JSON.stringify(sourceCode) !== JSON.stringify(draftCode)) {
       issues.push({
-        pathLabel: modulePathLabel(pathJson),
+        pathLabel,
         message: 'HTML 的 script/style 代码块发生变化。',
       });
+    }
+    if (missingControlTokens(source, candidate).length) {
+      issues.push({ pathLabel, message: 'CBS 模板、变量名或插值表达式发生变化；请保留完整程序标记。' });
+    }
+    const path = JSON.parse(pathJson) as Array<string | number>;
+    if (path.at(-1) === 'code' && path.some(part => part === 'effect' || part === 'trigger')) {
+      const sourceNames = luaIdentifierNames(source);
+      const draftNames = luaIdentifierNames(candidate);
+      if (sourceNames && draftNames && [...sourceNames].some(name => !draftNames.has(name))) {
+        issues.push({ pathLabel, message: 'Lua 程序标识符丢失或改名；翻译只能修改可见字符串。' });
+      }
     }
   }
   const originalMissing = new Set(missingRisuActionCallbacks(original)
@@ -70,7 +89,7 @@ export function risuActionIntegrityIssues(
   return issues;
 }
 
-function moduleStrings(module: Record<string, unknown>): Map<string, string> {
+export function moduleStrings(module: Record<string, unknown>): Map<string, string> {
   const result = new Map<string, string>();
   const visit = (value: unknown, path: Array<string | number>): void => {
     if (typeof value === 'string') {
@@ -89,7 +108,7 @@ function modulePathLabel(pathJson: string): string {
   return `模块.${(JSON.parse(pathJson) as Array<string | number>).join('.')}`;
 }
 
-function luaCallbackNames(module: Record<string, unknown>): Set<string> {
+export function luaCallbackNames(module: Record<string, unknown>): Set<string> {
   const names = new Set<string>();
   for (const [pathJson, source] of moduleStrings(module)) {
     const path = JSON.parse(pathJson) as Array<string | number>;

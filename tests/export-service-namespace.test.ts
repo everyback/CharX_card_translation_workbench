@@ -80,6 +80,33 @@ async function createNamespaceDatabase(): Promise<{ database: AsyncDatabase; dir
   return { database, directory };
 }
 
+test('card-only manual and backfilled approvals cannot bypass runtime integrity', async () => {
+  const { database, directory } = await createNamespaceDatabase();
+  const html = '<button class="pick" data-action="start" risu-btn="OpenPanel">Hello {{getvar::mode}}</button>';
+  const original = { data: { first_mes: html } };
+  try {
+    await database.prepare(`INSERT INTO projects(id,original_json,draft_json,source_format,status,updated_at)
+      VALUES (?,?,?,?,?,?)`).run('card-controls', JSON.stringify(original), JSON.stringify(original), 'json', 'ready', 'now');
+    await database.prepare(`INSERT INTO segments(id,project_id,path_json,path_label,kind,source_text,translated_text,review_status)
+      VALUES (?,?,?,?,?,?,?,?)`).run('legacy-approved', 'card-controls', '["data","first_mes"]', 'data.first_mes', 'field', html,
+        html.replace('getvar::mode', 'getvar::模式'), 'approved');
+    const service = createExportService({ database, clock: () => 'now', targetLanguage: () => 'zh-CN', review: {
+      projectLanguageBehaviorIssue: async () => null, approvedSegmentProtectionIssue: async () => null,
+      resolveMirroredModuleLorebookFailures: async () => {},
+    } });
+    for (const mutation of [html.replace('getvar::mode', 'getvar::模式'), html.replace('OpenPanel', '打开面板'), html.replace('data-action="start"', 'data-action="开始"')]) {
+      await database.prepare('UPDATE segments SET translated_text=? WHERE id=?').run(mutation, 'legacy-approved');
+      await assert.rejects(service.applyProject('card-controls'), (error: unknown) => error instanceof ProjectWorkflowError && error.statusCode === 409);
+      await assert.rejects(service.exportProject('card-controls'), (error: unknown) => error instanceof ProjectWorkflowError && error.statusCode === 409);
+      const stored = await database.prepare<{ draft: string }>('SELECT draft_json AS draft FROM projects WHERE id=?').get('card-controls');
+      assert.equal(stored?.draft, JSON.stringify(original));
+    }
+    await database.prepare('UPDATE segments SET translated_text=? WHERE id=?').run(html.replace('Hello', '你好'), 'legacy-approved');
+    await service.applyProject('card-controls');
+    await service.exportProject('card-controls');
+  } finally { await database.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('export blocks changed Risu action attributes without rewriting the stored draft', async () => {
   const { database, directory } = await createNamespaceDatabase();
   const originalModule = {

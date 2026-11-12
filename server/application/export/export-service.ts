@@ -529,7 +529,9 @@ export function createExportService({ database, clock, targetLanguage, review }:
     cardSegments: readonly ApplicableSegment[] = [],
     regexValidationOverrides: RisuRegexValidationOverrides = {},
   ): void {
-    if (!originalModule || !draftModule) return;
+    if (originalModule && !draftModule) throw new ProjectWorkflowError('Risu 模块草稿丢失，无法验证脚本与资源引用。', 409);
+    originalModule ??= {};
+    draftModule ??= {};
     if (exporting) {
       const issues = validateRisuLuaChanges(originalModule, draftModule);
       if (issues.length) {

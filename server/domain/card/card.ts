@@ -678,6 +678,7 @@ export function validateRisuControlReferences(
     }
   }
   for (const issue of risuActionIntegrityIssues(originalModule, draftModule)) report(issue);
+  for (const issue of risuActionIntegrityIssues(originalCard, draftCard, '卡片')) report(issue);
   return issues;
 }
 
@@ -1604,27 +1605,37 @@ export function protectText(text: string, extraFragments: readonly string[] = []
     return token;
   };
 
-  const structuredText = protectNaturalStatusPayloads(text, keep);
-  let macroProtectedText = '';
-  let macroCursor = 0;
-  for (const macro of templateMacros(structuredText, true)) {
-    macroProtectedText += structuredText.slice(macroCursor, macro.start) + keep(structuredText.slice(macro.start, macro.end));
-    macroCursor = macro.end;
-  }
-  macroProtectedText += structuredText.slice(macroCursor);
-  const protectedText = macroProtectedText.replace(protectedPattern(extraFragments), (fragment) => {
-    const attributes = textAttributes(fragment);
-    if (!attributes.length || extraFragments.includes(fragment)) return keep(fragment);
+  // Tokenize the original text once. Replacing macros before markup creates
+  // tokens containing other tokens, which cannot be restored or validated.
+  const protect = (source: string): string => {
+    const macros = new Map(templateMacros(source, true).map(macro => [macro.start, macro.end]));
+    const pattern = protectedPattern(extraFragments);
     let result = '';
     let cursor = 0;
-    for (const attr of attributes) {
-      result += keep(fragment.slice(cursor, attr.start));
-      result += attr.text.replace(protectedPattern(extraFragments), keep);
-      cursor = attr.end;
+    for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+      const end = macros.get(match.index) ?? pattern.lastIndex;
+      const fragment = source.slice(match.index, end);
+      pattern.lastIndex = end;
+      result += source.slice(cursor, match.index);
+      if (/^<rp-status\b/iu.test(fragment)) {
+        result += protectNaturalStatusPayloads(fragment, keep);
+      } else {
+        const attributes = textAttributes(fragment);
+        if (!attributes.length || extraFragments.includes(fragment)) result += keep(fragment);
+        else {
+          let offset = 0;
+          for (const attr of attributes) {
+            result += keep(fragment.slice(offset, attr.start)) + protect(attr.text);
+            offset = attr.end;
+          }
+          result += keep(fragment.slice(offset));
+        }
+      }
+      cursor = end;
     }
-    return result + keep(fragment.slice(cursor));
-  });
-  return { protectedText, tokens };
+    return result + source.slice(cursor);
+  };
+  return { protectedText: protect(text), tokens };
 }
 
 export function localTranslationControlFragments(text: string): string[] {
@@ -1787,6 +1798,7 @@ function protectedPatterns(): RegExp[] {
     /\$\{[^}]+\}/g,
     new RegExp(MARKUP_TOKEN_SOURCE, 'g'),
     /^@@[^\n]*/gm,
+    /\{\{/g,
   ];
 }
 

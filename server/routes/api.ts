@@ -1,6 +1,7 @@
 import { createJobLifecycleService } from '../application/translation/job-lifecycle-service.js';
 import { projectJobLanguage } from '../application/translation/job-language.js';
 import { registerJobRoutes } from './jobs.js';
+import { registerIdentifierRepairRoutes } from './identifier-repair.js';
 import { loadReviewedDraft } from '../application/export/reviewed-draft.js';
 import { ModuleReviewConflict } from '../domain/lua/module-review-base.js';
 import { saveImageCandidate } from '../application/resources/image-candidate-service.js';
@@ -119,6 +120,7 @@ const uploadLimitMib = workbenchConfig.uploadLimitMib;
 const uploadBytes = uploadLimitBytes(uploadLimitMib);
 const app = Fastify({ logger: true, bodyLimit: uploadBytes });
 await app.register(multipart, { limits: { fileSize: uploadBytes, files: 1 } });
+registerIdentifierRepairRoutes(app, uploadBytes);
 const controlReferenceCache = new Map<string, RisuControlReference[]>();
 const translationJobs = createTranslationJobService({ database: db, createId: id, clock: now,
   captureLanguage: projectId => projectJobLanguage(db, projectId, publicSettings()),
